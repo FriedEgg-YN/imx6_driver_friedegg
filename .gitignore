@@ -1,0 +1,14 @@
+# Buildroot artifacts
+buildroot/output/
+buildroot/.config
+buildroot/dl/
+buildroot/build/
+
+# General ignores
+*.o
+*.cmd
+.tmp_*
+*.mod.c
+modules.order
+Module.symvers
+.cache.mk

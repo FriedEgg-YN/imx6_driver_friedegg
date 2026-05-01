@@ -1,0 +1,5 @@
+config BR2_PACKAGE_AP3216C
+    bool "AP3216C driver"
+    depends on BR2_LINUX_KERNEL
+    help
+      AP3216C I2C sensor custom kernel module.

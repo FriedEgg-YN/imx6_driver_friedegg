@@ -1,0 +1,15 @@
+if TARGET_MX6ULL_FRIEDEGG_EMMC
+
+config SYS_BOARD
+	default "mx6ull_friedegg_emmc"
+
+config SYS_VENDOR
+	default "freescale"
+
+config SYS_SOC
+	default "mx6"
+
+config SYS_CONFIG_NAME
+	default "mx6ull_friedegg_emmc"
+
+endif
