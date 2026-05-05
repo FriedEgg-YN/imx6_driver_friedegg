@@ -460,12 +460,19 @@ static int run_irqdemo_mode(const char *filename, int loops)
 			stats.manual_events,
 			stats.last_ps,
 			stats.last_source);
+		APP_LOGI("irqdiag[%d]: entries=%u no_status=%u filtered=%u",
+			i + 1,
+			stats.irq_entries,
+			stats.irq_no_status_events,
+			stats.irq_filtered_events);
 
 		/* 每 5 轮手动注入一次，演示事件处理链路可达。 */
 		if ((i % 5) == 4) {
 			ret = ioctl(fd, AP3216C_CMD_TRIGGER_EVENT);
 			if (ret < 0)
 				APP_LOGE("ioctl TRIGGER_EVENT failed: %s", strerror(errno));
+			else
+				APP_LOGI("manual trigger injected at loop %d", i + 1);
 		}
 
 		prev = stats;

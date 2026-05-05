@@ -40,6 +40,13 @@ OUTPUT_IMAGE_DIR="$BUILDROOT_DIR/output/images"
 ROOTFS_FILE="$OUTPUT_IMAGE_DIR/rootfs.tar"
 KERNEL_FILE="$OUTPUT_IMAGE_DIR/$KERNEL_IMAGE"
 DTB_FILE="$OUTPUT_IMAGE_DIR/$TARGET_DTB"
+
+# 外部 local 包增量重编检测（通用机制）
+# 原理说明：
+# 1) Buildroot 增量构建主要由包级 stamp 驱动；外部源码目录变更时，包不一定自动重编。
+# 2) 这里自动扫描 BSP external 中启用且 SITE_METHOD=local 的包，比较“源码最新时间”与“包安装 stamp 时间”。
+# 3) 若源码更新，则对该包执行 <pkg>-dirclean，使后续 make 重新 rsync/build/install。
+# 4) 这样无需为每个外部源码包单独写 if 判断，新增 local 包也可复用同一套流程。
 # ------------------------------------------------------------------
 
 # 解析运行参数
@@ -59,6 +66,65 @@ cd "$BUILDROOT_DIR" || exit 1
 if [ "$MODE" == "all" ]; then
     echo ">>> 检测到全量编译，执行清理 (make clean)..."
     make clean
+fi
+
+if [ "$MODE" == "inc" ] && [ -f "$BUILDROOT_DIR/.config" ]; then
+    echo ">>> 检测 external local 包是否需要重编..."
+    for MK_FILE in "$BSP_DIR"/package/*/*.mk; do
+        [ -f "$MK_FILE" ] || continue
+
+        PKG_NAME=$(basename "$(dirname "$MK_FILE")")
+        PKG_SYMBOL=$(echo "$PKG_NAME" | tr '[:lower:]-' '[:upper:]_')
+
+        if ! grep -q "^BR2_PACKAGE_${PKG_SYMBOL}=y" "$BUILDROOT_DIR/.config"; then
+            continue
+        fi
+
+        PKG_VAR=$(sed -n 's/^\([A-Za-z0-9_][A-Za-z0-9_]*\)_SITE_METHOD[[:space:]]*=[[:space:]]*local[[:space:]]*$/\1/p' "$MK_FILE" | head -n1)
+        [ -n "$PKG_VAR" ] || continue
+
+        SITE_RAW=$(sed -n "s/^${PKG_VAR}_SITE[[:space:]]*=[[:space:]]*//p" "$MK_FILE" | head -n1)
+        SITE_RAW=${SITE_RAW%%#*}
+        SITE_RAW=$(echo "$SITE_RAW" | xargs)
+        [ -n "$SITE_RAW" ] || continue
+
+        SITE_PATH=${SITE_RAW//\$\(TOPDIR\)/$BUILDROOT_DIR}
+        if echo "$SITE_PATH" | grep -q '\$('; then
+            echo ">>> 跳过 $PKG_NAME: SITE 路径包含未解析变量 ($SITE_RAW)"
+            continue
+        fi
+
+        if [ "${SITE_PATH#/}" = "$SITE_PATH" ]; then
+            SITE_PATH="$BUILDROOT_DIR/$SITE_PATH"
+        fi
+
+        if [ ! -d "$SITE_PATH" ]; then
+            echo ">>> 跳过 $PKG_NAME: 未找到源码目录 $SITE_PATH"
+            continue
+        fi
+
+        SRC_TS=$(find "$SITE_PATH" -type f -not -path '*/.git/*' -print0 2>/dev/null | xargs -0 -r stat -c '%Y' | sort -nr | head -n1)
+        SRC_TS=${SRC_TS:-0}
+
+        PKG_BUILD_DIR=$(find "$BUILDROOT_DIR/output/build" -maxdepth 1 -type d -name "$PKG_NAME-*" | head -n1)
+        STAMP_TS=0
+        if [ -n "$PKG_BUILD_DIR" ]; then
+            if [ -f "$PKG_BUILD_DIR/.stamp_target_installed" ]; then
+                STAMP_TS=$(stat -c '%Y' "$PKG_BUILD_DIR/.stamp_target_installed")
+            elif [ -f "$PKG_BUILD_DIR/.stamp_built" ]; then
+                STAMP_TS=$(stat -c '%Y' "$PKG_BUILD_DIR/.stamp_built")
+            fi
+        fi
+
+        if [ "$SRC_TS" -gt "$STAMP_TS" ]; then
+            echo ">>> 检测到 $PKG_NAME 源码更新，执行 ${PKG_NAME}-dirclean 触发重编..."
+            make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" ${PKG_NAME}-dirclean
+            if [ $? -ne 0 ]; then
+                echo "❌ 错误: ${PKG_NAME}-dirclean 失败，请排查日志。"
+                exit 1
+            fi
+        fi
+    done
 fi
 
 # 核心编译指令

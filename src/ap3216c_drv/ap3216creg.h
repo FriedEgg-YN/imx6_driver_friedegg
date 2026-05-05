@@ -84,6 +84,9 @@ struct ap3216c_event_stats {
 	unsigned int hw_irq_events;
 	unsigned int poll_sim_events;
 	unsigned int manual_events;
+	unsigned int irq_entries;
+	unsigned int irq_no_status_events;
+	unsigned int irq_filtered_events;
 	unsigned int last_ps;
 	unsigned int last_source;
 };

@@ -279,8 +279,15 @@ static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 	struct ap3216c_dev *dev = (struct ap3216c_dev *)dev_id;
 	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 
+	spin_lock_irqsave(&dev->data_lock, flags);
+	dev->event_stats.irq_entries++;
+	spin_unlock_irqrestore(&dev->data_lock, flags);
+
 	status = ap3216c_read_reg(dev, AP3216C_INTSTATUS);
 	if (!(status & (AP3216C_INTSTATUS_PS_BIT | AP3216C_INTSTATUS_ALS_BIT))) {
+		spin_lock_irqsave(&dev->data_lock, flags);
+		dev->event_stats.irq_no_status_events++;
+		spin_unlock_irqrestore(&dev->data_lock, flags);
 		if (client)
 			dev_dbg(&client->dev, "irq without interested status bits: 0x%02x\n", status);
 		ap3216c_write_reg(dev, AP3216C_INTCLEAR, 0x00);
@@ -298,11 +305,16 @@ static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 	should_trigger = ap3216c_should_trigger_event(dev, ps, als, &als_delta);
 	if (should_trigger)
 		ap3216c_event_core_handle(dev, AP3216C_EVENT_SRC_HW_IRQ, ps);
-	else if (client)
+	else {
+		spin_lock_irqsave(&dev->data_lock, flags);
+		dev->event_stats.irq_filtered_events++;
+		spin_unlock_irqrestore(&dev->data_lock, flags);
+		if (client)
 		dev_dbg(&client->dev, "irq filtered by threshold: ps=%u als=%u delta=%u\n",
 			ps,
 			als,
 			als_delta);
+	}
 
 	/* 按寄存器手册清中断，避免中断线粘连。 */
 	ap3216c_write_reg(dev, AP3216C_INTCLEAR, 0x00);
@@ -435,8 +447,6 @@ static int ap3216c_update_bits(struct ap3216c_dev *dev, u8 reg, u8 mask, u8 val)
 	 * update_bits 需要保持“读-改-写”原子语义，
 	 * 因为 i2c_transfer 可能睡眠，这里必须使用 mutex。
 	 */
-	mutex_lock(&dev->bus_lock);
-
 	ret = mutex_lock_interruptible(&dev->bus_lock);
 	if (ret)
 		return ret;

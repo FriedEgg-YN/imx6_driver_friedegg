@@ -265,8 +265,10 @@ dmesg -w | grep ap3216c
 预期：
 
 - 输出当前 `event mode`
-- 周期打印 `total/hw/poll/manual` 统计
+- 周期打印 `total/hw/poll/manual` 统计和 `last_ps/last_src`
+- 周期打印 `irqdiag`：`entries/no_status/filtered`
 - 在 `POLL_SIM` 下，`poll` 与 `manual` 统计应随时间增长
+- 每 5 轮会注入一次手动事件，便于验证事件处理链路和统计更新
 
 ## 9. irqcfg 模式（运行时切换 IRQ/POLL）
 
