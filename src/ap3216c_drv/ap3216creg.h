@@ -33,6 +33,19 @@ Copyright © ALIENTEK Co., Ltd. 1998-2029. All rights reserved.
 #define AP3216C_ALSCONFIG	0x10	/* ALS配置寄存器 */
 #define AP3216C_PSCONFIG	0x20	/* PS配置寄存器  */
 
+/* 中断与阈值寄存器新增 */
+#define AP3216C_ALS_LTH_L		0x1A	/* ALS低阈值 低字节 */
+#define AP3216C_ALS_LTH_H		0x1B	/* ALS低阈值 高字节 */
+#define AP3216C_ALS_HTH_L		0x1C	/* ALS高阈值 低字节 */
+#define AP3216C_ALS_HTH_H		0x1D	/* ALS高阈值 高字节 */
+
+#define AP3216C_PS_LTH_L		0x2A	/* PS低阈值 低字节 (Bit 1:0) */
+#define AP3216C_PS_LTH_H		0x2B	/* PS低阈值 高字节 (Bit 7:0) */
+#define AP3216C_PS_HTH_L		0x2C	/* PS高阈值 低字节 (Bit 1:0) */
+#define AP3216C_PS_HTH_H		0x2D	/* PS高阈值 高字节 (Bit 7:0) */
+
+#define AP3216C_PS_INT_FORM		0x22	/* PS INT Form */
+
 /*
  * IR/PS数据位定义
  * 驱动在解析传感器原始寄存器值时会使用这些掩码。

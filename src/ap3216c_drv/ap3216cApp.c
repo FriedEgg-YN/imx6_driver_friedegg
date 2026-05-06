@@ -451,29 +451,32 @@ static int run_irqdemo_mode(const char *filename, int loops)
 			return -1;
 		}
 
-		APP_LOGI("stats[%d]: total=%u(+%u) hw=%u poll=%u manual=%u last_ps=%u last_src=%u",
-			i + 1,
-			stats.total_events,
-			stats.total_events - prev.total_events,
-			stats.hw_irq_events,
-			stats.poll_sim_events,
-			stats.manual_events,
-			stats.last_ps,
-			stats.last_source);
-		APP_LOGI("irqdiag[%d]: entries=%u no_status=%u filtered=%u",
-			i + 1,
-			stats.irq_entries,
-			stats.irq_no_status_events,
-			stats.irq_filtered_events);
+		// if ((i % 10) == 9)
+		// {
+		// 	APP_LOGI("stats[%d]: total=%u(+%u) hw=%u poll=%u manual=%u last_ps=%u last_src=%u",
+		// 			 i + 1,
+		// 			 stats.total_events,
+		// 			 stats.total_events - prev.total_events,
+		// 			 stats.hw_irq_events,
+		// 			 stats.poll_sim_events,
+		// 			 stats.manual_events,
+		// 			 stats.last_ps,
+		// 			 stats.last_source);
+		// 	APP_LOGI("irqdiag[%d]: entries=%u no_status=%u filtered=%u",
+		// 			 i + 1,
+		// 			 stats.irq_entries,
+		// 			 stats.irq_no_status_events,
+		// 			 stats.irq_filtered_events);
+		// }
 
-		/* 每 5 轮手动注入一次，演示事件处理链路可达。 */
-		if ((i % 5) == 4) {
-			ret = ioctl(fd, AP3216C_CMD_TRIGGER_EVENT);
-			if (ret < 0)
-				APP_LOGE("ioctl TRIGGER_EVENT failed: %s", strerror(errno));
-			else
-				APP_LOGI("manual trigger injected at loop %d", i + 1);
-		}
+		// /* 每 5 轮手动注入一次，演示事件处理链路可达。 */
+		// if ((i % 5) == 4) {
+		// 	ret = ioctl(fd, AP3216C_CMD_TRIGGER_EVENT);
+		// 	if (ret < 0)
+		// 		APP_LOGE("ioctl TRIGGER_EVENT failed: %s", strerror(errno));
+		// 	else
+		// 		APP_LOGI("manual trigger injected at loop %d", i + 1);
+		// }
 
 		prev = stats;
 		usleep(200000);
