@@ -127,6 +127,38 @@ if [ "$MODE" == "inc" ] && [ -f "$BUILDROOT_DIR/.config" ]; then
     done
 fi
 
+# 新增：检测内核 DTS 变更
+# 内核源码位于 src/linux-imx/，不属于 BSP external 包管理，
+# Buildroot 增量编译不会自动感知 .dts 文件变更，需手动触发 linux-rebuild。
+if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-imx" ]; then
+    DTS_FILE="$WORKSPACE_DIR/src/linux-imx/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dts"
+    DTSI_FILE="$WORKSPACE_DIR/src/linux-imx/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dtsi"
+    DTS_TS=0
+    [ -f "$DTS_FILE" ] && DTS_TS=$(stat -c '%Y' "$DTS_FILE")
+    # 如果存在同名 .dtsi，取较新的时间戳
+    if [ -f "$DTSI_FILE" ]; then
+        DTSI_TS=$(stat -c '%Y' "$DTSI_FILE")
+        [ "$DTSI_TS" -gt "$DTS_TS" ] && DTS_TS="$DTSI_TS"
+    fi
+
+    LINUX_BUILD_DIR=$(find "$BUILDROOT_DIR/output/build" -maxdepth 1 -type d -name "linux-*" | head -n1)
+    STAMP_TS=0
+    if [ -n "$LINUX_BUILD_DIR" ] && [ -f "$LINUX_BUILD_DIR/.stamp_images_installed" ]; then
+        STAMP_TS=$(stat -c '%Y' "$LINUX_BUILD_DIR/.stamp_images_installed")
+    elif [ -n "$LINUX_BUILD_DIR" ] && [ -f "$LINUX_BUILD_DIR/.stamp_built" ]; then
+        STAMP_TS=$(stat -c '%Y' "$LINUX_BUILD_DIR/.stamp_built")
+    fi
+
+    if [ "$DTS_TS" -gt "$STAMP_TS" ]; then
+        echo ">>> 检测到 DTS 更新 (${TARGET_DTB%.dtb})，触发 linux-rebuild..."
+        make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" linux-rebuild
+        if [ $? -ne 0 ]; then
+            echo "❌ 错误: linux-rebuild 失败，请排查日志。"
+            exit 1
+        fi
+    fi
+fi
+
 # 核心编译指令
 echo ">>> 开始多线程编译 (外部树: $BSP_DIR)..."
 make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" -j$(nproc)
