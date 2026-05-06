@@ -13,6 +13,7 @@
 
 / {
 	model = "Freescale i.MX6 ULL 14x14 EVK Board";
+	board-version = "202605062152";
 	compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
 
 	chosen {
@@ -238,8 +239,8 @@
 	ap3216c@1e {
 		compatible = "alientek,ap3216c";
 		reg = <0x1e>;
-		interrupt-parent = <&gpio5>;
-		interrupts = <0 8>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_ap3216c>;
 	};
@@ -284,6 +285,12 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_hog_1>;
 	imx6ul-evk {
+		pinctrl_ap3216c: ap3216cgrp {
+			fsl,pins = <
+				MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0x17059
+			>;
+		};
+
 		pinctrl_hog_1: hoggrp-1 {
 			fsl,pins = <
 				MX6UL_PAD_UART1_RTS_B__GPIO1_IO19	0x17059 /* SD1 CD */
@@ -432,7 +439,7 @@
 
 		pinctrl_tsc: tscgrp {
 			fsl,pins = <
-				MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0xb0
+				/* MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0xb0 */
 				MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0xb0
 				MX6UL_PAD_GPIO1_IO03__GPIO1_IO03	0xb0
 				MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0xb0
@@ -565,12 +572,6 @@
 	pinctrl-names = "default_snvs";
         pinctrl-0 = <&pinctrl_hog_2>;
         imx6ul-evk {
-		pinctrl_ap3216c: ap3216cgrp {
-			fsl,pins = <
-				MX6ULL_PAD_SNVS_TAMPER0__GPIO5_IO00	0x17059
-			>;
-		};
-
 		pinctrl_enet1_reset: enet1resetgrp {
 			fsl,pins = <
 				MX6ULL_PAD_SNVS_TAMPER7__GPIO5_IO07		0x10B0
@@ -583,7 +584,7 @@
 		};
 		pinctrl_hog_2: hoggrp-2 {
                         fsl,pins = <
-                                /* MX6ULL_PAD_SNVS_TAMPER0__GPIO5_IO00      0x80000000 */
+                                MX6ULL_PAD_SNVS_TAMPER0__GPIO5_IO00      0x80000000
                         >;
                 };
 
