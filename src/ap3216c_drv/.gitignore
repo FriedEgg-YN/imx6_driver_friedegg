@@ -1,0 +1,9 @@
+*.o
+*.ko
+*.mod.c
+.*.cmd
+*.mod
+.tmp_versions/
+modules.order
+Module.symvers
+ap3216cApp

@@ -1,9 +1,9 @@
 [submodule "buildroot"]
 	path = buildroot
-	url = ./buildroot
+	url = https://github.com/buildroot/buildroot.git
 [submodule "src/linux-friedegg"]
 	path = src/linux-friedegg
-	url = ./src/linux-friedegg
+	url = https://github.com/FriedEgg-YN/linux-friedegg.git
 [submodule "src/uboot-friedegg"]
 	path = src/uboot-friedegg
-	url = ./src/uboot-friedegg
+	url = https://github.com/FriedEgg-YN/uboot-friedegg.git
