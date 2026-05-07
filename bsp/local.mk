@@ -1,1 +1,1 @@
-LINUX_OVERRIDE_SRCDIR = $(TOPDIR)/../src/linux-imx
+LINUX_OVERRIDE_SRCDIR = $(TOPDIR)/../src/linux-friedegg

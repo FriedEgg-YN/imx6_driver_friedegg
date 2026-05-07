@@ -9,20 +9,20 @@
 目前的结构层级如下：
 
 ```
-my_imx6_workspace/              <-- 【主仓库】只记录这层核心逻辑
+imx6_driver_friedegg/              <-- 【主仓库】只记录这层核心逻辑
 ├── .git/                       
 ├── bsp/                        <-- 属于主仓库追踪（你的 Buildroot 配置与脚本）
 ├── src/ap3216c_drv/            <-- 属于主仓库追踪（完全原生的自写驱动）
 │
 ├── buildroot/                  <-- 【独立子仓库】官方编译引擎，以 Gitlink 指向
-├── src/linux-imx/              <-- 【独立子仓库】移植后的内核，内部自建 git 追踪
-└── src/uboot-imx/              <-- 【独立子仓库】移植后的Uboot，内部自建 git 追踪
+├── src/linux-friedegg/              <-- 【独立子仓库】移植后的内核，内部自建 git 追踪
+└── src/uboot-friedegg/              <-- 【独立子仓库】移植后的Uboot，内部自建 git 追踪
 ```
 
-### 为什么 `src/linux-imx` 和 `src/uboot-imx` 需要独立 git？
+### 为什么 `src/linux-friedegg` 和 `src/uboot-friedegg` 需要独立 git？
 即使这是你“移植修改后”的内容，不再与 NXP 官方源码对齐，采用独立局部建仓（内部带有单独 `.git`）再链到外层仓库也是非常有用的：
 1. **轻量化主仓**：外层主仓只会记录里面那个独立的 `Commit ID`，无需将六万个源码文件加入 `git add`。
-2. **便于调试溯源**：你在针对 Kernel 打驱动补丁时，修改的是 `src/linux-imx` 内部环境，可以单独进行内部提交，保持历史清晰。
+2. **便于调试溯源**：你在针对 Kernel 打驱动补丁时，修改的是 `src/linux-friedegg` 内部环境，可以单独进行内部提交，保持历史清晰。
 
 ---
 
@@ -34,7 +34,7 @@ my_imx6_workspace/              <-- 【主仓库】只记录这层核心逻辑
 这种修改**只属于主仓库**。
 ```bash
 # 回到工作空间根目录
-cd /home/friedegg/my_imx6_workspace
+cd /home/friedegg/imx6_driver_friedegg
 
 git status
 git add bsp/ src/ap3216c_drv/
@@ -42,40 +42,40 @@ git commit -m "更新系统打包配置或外置驱动逻辑"
 ```
 
 ### 场景二：修改了 Kernel (内核) 或 U-Boot 下的代码（如移植修改）
-假设你修改了 `src/linux-imx/arch/arm/boot/dts/imx6ull-friedegg-emmc.dts`，此时需要：**先进子仓提交 -> 再回主仓绑定最新指针**
+假设你修改了 `src/linux-friedegg/arch/arm/boot/dts/imx6ull-friedegg-emmc.dts`，此时需要：**先进子仓提交 -> 再回主仓绑定最新指针**
 ```bash
 # 1. 进入子模块内部提交修改
-cd src/linux-imx
+cd src/linux-friedegg
 git add arch/arm/boot/dts/imx6ull-friedegg-emmc.dts
 git commit -m "dts: imx6ull-friedegg-emmc: fix ap3216c interrupt to GPIO1_IO01"
 
 # 2. 退回主仓库根目录，更新子模块指针
-cd /home/friedegg/my_imx6_workspace
-git add src/linux-imx   # 此时 stage 的是子模块的新 commit ID 指针
-git commit -m "chore: update linux-imx submodule for ap3216c dts fix"
+cd /home/friedegg/imx6_driver_friedegg
+git add src/linux-friedegg   # 此时 stage 的是子模块的新 commit ID 指针
+git commit -m "chore: update linux-friedegg submodule for ap3216c dts fix"
 ```
 
 ### 场景二补充：在 VS Code 中查看子模块的内部变更
 
-VS Code 的 Git 插件默认只显示主仓库的变更（即子模块的**指针变化**，`src/linux-imx` 显示为绿色修改，不展开内部文件）。要查看子模块内部具体改了哪些文件：
+VS Code 的 Git 插件默认只显示主仓库的变更（即子模块的**指针变化**，`src/linux-friedegg` 显示为绿色修改，不展开内部文件）。要查看子模块内部具体改了哪些文件：
 
 **方式一（推荐）—— 终端命令：**
 ```bash
 # 查看子模块最近一次提交的详细 diff
-cd src/linux-imx
+cd src/linux-friedegg
 git log -p -1
 
 # 查看子模块相对于主仓记录的上次指针，有哪些新提交
-cd /home/friedegg/my_imx6_workspace
-git diff src/linux-imx   # 显示子模块指针的 commit id 变化
+cd /home/friedegg/imx6_driver_friedegg
+git diff src/linux-friedegg   # 显示子模块指针的 commit id 变化
 
 # 列出所有子模块最近的 3 条提交（不用手动 cd）
 git submodule foreach 'git log --oneline -3'
 ```
 
 **方式二（VS Code 图形化）：**
-1. 在 VS Code 中打开 `src/linux-imx/` 下的文件，文件编辑器内会正常显示 git 行级标注（blame / 修改标记）
-2. **源代码管理面板** (Ctrl+Shift+G) → 在 `src/linux-imx` 项上 **右键 → 在集成终端中打开**
+1. 在 VS Code 中打开 `src/linux-friedegg/` 下的文件，文件编辑器内会正常显示 git 行级标注（blame / 修改标记）
+2. **源代码管理面板** (Ctrl+Shift+G) → 在 `src/linux-friedegg` 项上 **右键 → 在集成终端中打开**
 3. 在该终端内用 `git log` / `git diff` 查看子模块内部的变更细节
 4. 子模块内文件的 `Stage Changes` 和 `Commit` 请在子模块自己的终端上下文中完成，不要在 VS Code 的主仓库 Git 面板中操作
 
@@ -92,9 +92,9 @@ git submodule update --init --recursive
 ---
 
 ## 三、 本地备份推荐说明
-你目前在 `src/linux-imx/` 以及 `src/uboot-imx/` 中的修改是**纯本地版控**的。
+你目前在 `src/linux-friedegg/` 以及 `src/uboot-friedegg/` 中的修改是**纯本地版控**的。
 如果将来你购买/搭建了如 GitHub、Gitee 或者本地 GitLab 服务，你可以：
-1. 在 Gitee 上新建三个仓库：`main-workspace`、`my-linux-imx`、`my-uboot-imx`。
+1. 在 Gitee 上新建三个仓库：`main-workspace`、`my-linux-friedegg`、`my-uboot-friedegg`。
 2. 分别进入那三个对应的目录中，去执行各自的 `git remote add origin <各自独立仓库地址>`。
 3. 把它们分别推送到云端即可完成完美的工程安全托管。
 
@@ -128,7 +128,7 @@ git submodule update --init --recursive
 | `driver` | 驱动代码变更专用 | `driver: ap3216c: fix interrupt not triggering` |
 | `docs` | 文档/README | `docs: update GIT_WORKFLOW with commit conventions` |
 | `refactor` | 重构，不改行为 | `refactor: extract event mode switch to separate func` |
-| `chore` | 构建脚本、子模块指针等杂项 | `chore: update linux-imx submodule` |
+| `chore` | 构建脚本、子模块指针等杂项 | `chore: update linux-friedegg submodule` |
 
 ### 4.5 完整示例
 
@@ -145,7 +145,7 @@ tree was using the wrong mapping. Correct the 'interrupts' property to
 主仓库中更新子模块指针时，用 `chore:` 前缀，并在正文中列出子模块内部的 commit 摘要：
 
 ```
-chore: update linux-imx submodule
+chore: update linux-friedegg submodule
 
 - dts: fix ap3216c interrupt to GPIO1_IO01
 ```

@@ -128,11 +128,11 @@ if [ "$MODE" == "inc" ] && [ -f "$BUILDROOT_DIR/.config" ]; then
 fi
 
 # 新增：检测内核 DTS 变更
-# 内核源码位于 src/linux-imx/，不属于 BSP external 包管理，
+# 内核源码位于 src/linux-friedegg/，不属于 BSP external 包管理，
 # Buildroot 增量编译不会自动感知 .dts 文件变更，需手动触发 linux-rebuild。
-if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-imx" ]; then
-    DTS_FILE="$WORKSPACE_DIR/src/linux-imx/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dts"
-    DTSI_FILE="$WORKSPACE_DIR/src/linux-imx/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dtsi"
+if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-friedegg" ]; then
+    DTS_FILE="$WORKSPACE_DIR/src/linux-friedegg/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dts"
+    DTSI_FILE="$WORKSPACE_DIR/src/linux-friedegg/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dtsi"
     DTS_TS=0
     [ -f "$DTS_FILE" ] && DTS_TS=$(stat -c '%Y' "$DTS_FILE")
     # 如果存在同名 .dtsi，取较新的时间戳

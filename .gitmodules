@@ -1,9 +1,9 @@
 [submodule "buildroot"]
 	path = buildroot
 	url = ./buildroot
-[submodule "src/linux-imx"]
-	path = src/linux-imx
-	url = ./src/linux-imx
-[submodule "src/uboot-imx"]
-	path = src/uboot-imx
-	url = ./src/uboot-imx
+[submodule "src/linux-friedegg"]
+	path = src/linux-friedegg
+	url = ./src/linux-friedegg
+[submodule "src/uboot-friedegg"]
+	path = src/uboot-friedegg
+	url = ./src/uboot-friedegg
