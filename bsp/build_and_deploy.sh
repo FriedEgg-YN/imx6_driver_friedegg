@@ -25,6 +25,8 @@
 # 目标文件名配置（按需精准指定，多余的 DTB 就算生成了也不会被拷贝）
 KERNEL_IMAGE="zImage"                                   # 内核文件名，一般为 zImage 或 Image
 TARGET_DTB="imx6ull-friedegg-emmc.dtb"                  # 你的目标设备树文件名（请换成你实际的板子dtb名称）
+DEFCONFIG_NAME="${TARGET_DTB%.dtb}"                     # 从 dtb 名推导 defconfig 名
+DEFCONFIG_NAME="${DEFCONFIG_NAME//-/_}_defconfig"        # 连字符转下划线，匹配 Buildroot defconfig 文件命名
 
 # 自动定位项目根路径配置
 BSP_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -40,6 +42,9 @@ OUTPUT_IMAGE_DIR="$BUILDROOT_DIR/output/images"
 ROOTFS_FILE="$OUTPUT_IMAGE_DIR/rootfs.tar"
 KERNEL_FILE="$OUTPUT_IMAGE_DIR/$KERNEL_IMAGE"
 DTB_FILE="$OUTPUT_IMAGE_DIR/$TARGET_DTB"
+
+# Buildroot 固定参数（避免重复书写）
+MAKE_OPTS="BR2_EXTERNAL=$BSP_DIR BR2_PACKAGE_OVERRIDE_FILE=$BSP_DIR/local.mk"
 
 # 外部 local 包增量重编检测（通用机制）
 # 原理说明：
@@ -63,10 +68,28 @@ echo " [1/3] 开始构建基础组件 (模式: $MODE)"
 echo "========================================"
 cd "$BUILDROOT_DIR" || exit 1
 
+# ----------------------------------------------------------
+# 确保 Buildroot 已配置（首次使用时自动运行 defconfig）
+# ----------------------------------------------------------
+ensure_config() {
+    if [ ! -f "$BUILDROOT_DIR/.config" ]; then
+        echo ">>> 检测到 Buildroot 尚未配置，自动运行 ${DEFCONFIG_NAME}..."
+        make $MAKE_OPTS "$DEFCONFIG_NAME"
+        if [ $? -ne 0 ]; then
+            echo "❌ 错误: defconfig 配置失败，请检查 bsp/configs/ 下是否存在 $DEFCONFIG_NAME 文件。"
+            exit 1
+        fi
+        echo "✅ Buildroot 配置完成。"
+    fi
+}
+
 if [ "$MODE" == "all" ]; then
     echo ">>> 检测到全量编译，执行清理 (make clean)..."
     make clean
 fi
+
+# 恢复或初始化 .config（clean 会删除它，首次使用也没有）
+ensure_config
 
 if [ "$MODE" == "inc" ] && [ -f "$BUILDROOT_DIR/.config" ]; then
     echo ">>> 检测 external local 包是否需要重编..."
@@ -118,7 +141,7 @@ if [ "$MODE" == "inc" ] && [ -f "$BUILDROOT_DIR/.config" ]; then
 
         if [ "$SRC_TS" -gt "$STAMP_TS" ]; then
             echo ">>> 检测到 $PKG_NAME 源码更新，执行 ${PKG_NAME}-dirclean 触发重编..."
-            make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" ${PKG_NAME}-dirclean
+            make $MAKE_OPTS ${PKG_NAME}-dirclean
             if [ $? -ne 0 ]; then
                 echo "❌ 错误: ${PKG_NAME}-dirclean 失败，请排查日志。"
                 exit 1
@@ -130,7 +153,10 @@ fi
 # 新增：检测内核 DTS 变更
 # 内核源码位于 src/linux-friedegg/，不属于 BSP external 包管理，
 # Buildroot 增量编译不会自动感知 .dts 文件变更，需手动触发 linux-rebuild。
-if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-friedegg" ]; then
+if [ "$MODE" == "inc" ] \
+   && [ -f "$BUILDROOT_DIR/.config" ] \
+   && [ -d "$BUILDROOT_DIR/output/build" ] \
+   && [ -d "$WORKSPACE_DIR/src/linux-friedegg" ]; then
     DTS_FILE="$WORKSPACE_DIR/src/linux-friedegg/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dts"
     DTSI_FILE="$WORKSPACE_DIR/src/linux-friedegg/arch/arm/boot/dts/${TARGET_DTB%.dtb}.dtsi"
     DTS_TS=0
@@ -141,7 +167,7 @@ if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-friedegg" ]; then
         [ "$DTSI_TS" -gt "$DTS_TS" ] && DTS_TS="$DTSI_TS"
     fi
 
-    LINUX_BUILD_DIR=$(find "$BUILDROOT_DIR/output/build" -maxdepth 1 -type d -name "linux-*" | head -n1)
+    LINUX_BUILD_DIR=$(find "$BUILDROOT_DIR/output/build" -maxdepth 1 -type d -name "linux-*" 2>/dev/null | head -n1)
     STAMP_TS=0
     if [ -n "$LINUX_BUILD_DIR" ] && [ -f "$LINUX_BUILD_DIR/.stamp_images_installed" ]; then
         STAMP_TS=$(stat -c '%Y' "$LINUX_BUILD_DIR/.stamp_images_installed")
@@ -149,9 +175,9 @@ if [ "$MODE" == "inc" ] && [ -d "$WORKSPACE_DIR/src/linux-friedegg" ]; then
         STAMP_TS=$(stat -c '%Y' "$LINUX_BUILD_DIR/.stamp_built")
     fi
 
-    if [ "$DTS_TS" -gt "$STAMP_TS" ]; then
+    if [ -n "$LINUX_BUILD_DIR" ] && [ "$DTS_TS" -gt "$STAMP_TS" ]; then
         echo ">>> 检测到 DTS 更新 (${TARGET_DTB%.dtb})，触发 linux-rebuild..."
-        make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" linux-rebuild
+        make $MAKE_OPTS linux-rebuild
         if [ $? -ne 0 ]; then
             echo "❌ 错误: linux-rebuild 失败，请排查日志。"
             exit 1
@@ -161,7 +187,7 @@ fi
 
 # 核心编译指令
 echo ">>> 开始多线程编译 (外部树: $BSP_DIR)..."
-make BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk" -j$(nproc)
+make $MAKE_OPTS -j$(nproc)
 
 if [ $? -ne 0 ]; then
     echo "❌ 错误: Buildroot 编译运行失败，请根据上方日志排查！"
