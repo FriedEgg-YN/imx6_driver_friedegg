@@ -57,7 +57,8 @@ enum ov5640_mode {
 	ov5640_mode_QSXGA_2592_1944 = 6,
 	ov5640_mode_QCIF_176_144 = 7,
 	ov5640_mode_XGA_1024_768 = 8,
-	ov5640_mode_MAX = 8
+	ov5640_mode_800_480 = 9,
+	ov5640_mode_MAX = 9
 };
 
 enum ov5640_frame_rate {
@@ -528,6 +529,24 @@ static struct reg_value ov5640_setting_15fps_QSXGA_2592_1944[] = {
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
+static struct reg_value ov5640_setting_30fps_800_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x03, 0, 0}, {0x3809, 0x20, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x01, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
 static struct ov5640_mode_info ov5640_mode_info_data[2][ov5640_mode_MAX + 1] = {
 	{
 		{ov5640_mode_VGA_640_480,      640,  480,
@@ -582,6 +601,10 @@ static struct ov5640_mode_info ov5640_mode_info_data[2][ov5640_mode_MAX + 1] = {
 		{ov5640_mode_XGA_1024_768,    1024,  768,
 		ov5640_setting_30fps_XGA_1024_768,
 		ARRAY_SIZE(ov5640_setting_30fps_XGA_1024_768)},
+
+		{ov5640_mode_800_480,          800,  480,
+		ov5640_setting_30fps_800_480,
+		ARRAY_SIZE(ov5640_setting_30fps_800_480)},
 	},
 };
 
@@ -614,6 +637,7 @@ static struct i2c_driver ov5640_i2c_driver = {
 };
 
 static const struct ov5640_datafmt ov5640_colour_fmts[] = {
+	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_YUYV8_2X8, V4L2_COLORSPACE_JPEG},
 };
 
@@ -649,13 +673,13 @@ static inline void ov5640_reset(void)
 
 	/* camera power down */
 	gpio_set_value_cansleep(pwn_gpio, 1);
-	msleep(5);
+	msleep(10);
 	gpio_set_value_cansleep(pwn_gpio, 0);
-	msleep(5);
+	msleep(10);
 	gpio_set_value_cansleep(rst_gpio, 0);
-	msleep(1);
-	gpio_set_value_cansleep(rst_gpio, 1);
 	msleep(5);
+	gpio_set_value_cansleep(rst_gpio, 1);
+	msleep(10);
 	gpio_set_value_cansleep(pwn_gpio, 1);
 }
 
@@ -742,16 +766,22 @@ static s32 ov5640_read_reg(u16 reg, u8 *val)
 	au8RegBuf[0] = reg >> 8;
 	au8RegBuf[1] = reg & 0xff;
 
-	if (2 != i2c_master_send(ov5640_data.i2c_client, au8RegBuf, 2)) {
-		pr_err("%s:write reg error:reg=%x\n",
-				__func__, reg);
-		return -1;
+	{
+		int ret = i2c_master_send(ov5640_data.i2c_client, au8RegBuf, 2);
+		if (2 != ret) {
+			pr_err("%s:send error reg=%04x ret=%d\n",
+					__func__, reg, ret);
+			return -1;
+		}
 	}
 
-	if (1 != i2c_master_recv(ov5640_data.i2c_client, &u8RdVal, 1)) {
-		pr_err("%s:read reg error:reg=%x,val=%x\n",
-				__func__, reg, u8RdVal);
-		return -1;
+	{
+		int ret = i2c_master_recv(ov5640_data.i2c_client, &u8RdVal, 1);
+		if (1 != ret) {
+			pr_err("%s:recv error reg=%04x ret=%d\n",
+					__func__, reg, ret);
+			return -1;
+		}
 	}
 
 	*val = u8RdVal;
@@ -1147,10 +1177,10 @@ static int ov5640_init_mode(void)
 	if (retval < 0)
 		goto err;
 
-	/* change driver capability to 2x according to validation board.
-	 * if the image is not stable, please increase the driver strength.
+	/* change driver capability to 1x.
+	 * 2x may cause image instability on some boards.
 	 */
-	ov5640_driver_capability(2);
+	ov5640_driver_capability(1);
 	ov5640_set_bandingfilter();
 	ov5640_set_AE_target(AE_Target);
 	ov5640_set_night_mode(night_mode);
@@ -1492,10 +1522,10 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 			goto error;
 		}
 
-		ret = ov5640_change_mode(frame_rate,
+	/*ret = ov5640_change_mode(frame_rate,
 				a->parm.capture.capturemode);
-		if (ret < 0)
-			goto error;
+	if (ret < 0)
+		goto error;*/
 
 		sensor->streamcap.timeperframe = *timeperframe;
 		sensor->streamcap.capturemode = a->parm.capture.capturemode;
@@ -1545,13 +1575,28 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ov5640 *sensor = to_ov5640(client);
+	const struct ov5640_datafmt *my_fm = NULL;
 
-	/* MIPI CSI could have changed the format, double-check */
-	if (!ov5640_find_datafmt(mf->code))
-		return -EINVAL;
+	my_fm = ov5640_find_datafmt(mf->code);
+	if (!my_fm) {
+		mf->code = ov5640_colour_fmts[0].code;
+		mf->colorspace = ov5640_colour_fmts[0].colorspace;
+	}
 
-	ov5640_try_fmt(sd, mf);
-	sensor->fmt = ov5640_find_datafmt(mf->code);
+	mf->field = V4L2_FIELD_NONE;
+
+	/* Set RGB565 output format in OV5640 */
+	ov5640_write_reg(0x501f, 0x01);
+	ov5640_write_reg(0x4300, 0x6f);
+
+	/* Apply 800x480 30fps mode registers */
+	ov5640_change_mode(ov5640_30_fps, ov5640_mode_800_480);
+
+	mf->width = ov5640_mode_info_data[1][ov5640_mode_800_480].width;
+	mf->height = ov5640_mode_info_data[1][ov5640_mode_800_480].height;
+
+	sensor->fmt = my_fm;
+	sensor->pix.colorspace = mf->colorspace;
 
 	return 0;
 }
@@ -1810,9 +1855,11 @@ static int ov5640_probe(struct i2c_client *client,
 
 	ov5640_data.io_init = ov5640_reset;
 	ov5640_data.i2c_client = client;
-	ov5640_data.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	ov5640_data.pix.pixelformat = V4L2_PIX_FMT_RGB565;
 	ov5640_data.pix.width = 640;
 	ov5640_data.pix.height = 480;
+	ov5640_data.pix.field = V4L2_FIELD_NONE;
+	ov5640_data.pix.colorspace = V4L2_COLORSPACE_SRGB;
 	ov5640_data.streamcap.capability = V4L2_MODE_HIGHQUALITY |
 					   V4L2_CAP_TIMEPERFRAME;
 	ov5640_data.streamcap.capturemode = 0;
@@ -1821,9 +1868,22 @@ static int ov5640_probe(struct i2c_client *client,
 
 	ov5640_regulator_enable(&client->dev);
 
+	pr_info("ov5640 probe: pwn=%d rst=%d mclk=%d\n",
+		gpio_get_value(pwn_gpio), gpio_get_value(rst_gpio),
+		ov5640_data.mclk);
+
 	ov5640_reset();
 
+	pr_info("ov5640 probe: after reset pwn=%d rst=%d\n",
+		gpio_get_value(pwn_gpio), gpio_get_value(rst_gpio));
+
 	ov5640_power_down(0);
+	pr_info("ov5640 probe: after power_down pwn=%d\n",
+		gpio_get_value(pwn_gpio));
+	msleep(50);
+
+	pr_info("ov5640 probe: before chip id read, pwn=%d rst=%d\n",
+		gpio_get_value(pwn_gpio), gpio_get_value(rst_gpio));
 
 	retval = ov5640_read_reg(OV5640_CHIP_ID_HIGH_BYTE, &chip_id_high);
 	if (retval < 0 || chip_id_high != 0x56) {
