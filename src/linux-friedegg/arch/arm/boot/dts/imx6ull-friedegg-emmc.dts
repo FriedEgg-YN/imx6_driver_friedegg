@@ -13,7 +13,7 @@
 
 / {
 	model = "Freescale i.MX6 ULL 14x14 EVK Board";
-	board-version = "202605062152";
+	board-version = "202605082300";
 	compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
 
 	chosen {
@@ -172,7 +172,7 @@
 &fec1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_enet1
-					&pinctrl_enet1_reset>;
+				   &pinctrl_enet1_reset>;
 	phy-mode = "rmii";
 	phy-handle = <&ethphy0>;
 	phy-reset-gpios = <&gpio5 7 GPIO_ACTIVE_LOW>;
@@ -247,7 +247,7 @@
 };
 
 &i2c2 {
-	clock_frequency = <100000>;
+	clock-frequency = <100000>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_i2c2>;
 	status = "okay";
@@ -264,11 +264,12 @@
 		compatible = "ovti,ov5640";
 		reg = <0x3c>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&pinctrl_csi1>;
+		pinctrl-0 = <&pinctrl_csi1
+					&pinctrl_csi_pwn_rst>;
 		clocks = <&clks IMX6UL_CLK_CSI>;
 		clock-names = "csi_mclk";
-		pwn-gpios = <&gpio_spi 6 1>;
-		rst-gpios = <&gpio_spi 5 0>;
+		pwn-gpios = <&gpio1 4 1>;
+		rst-gpios = <&gpio1 2 0>;
 		csi_id = <0>;
 		mclk = <24000000>;
 		mclk_source = <0>;
@@ -313,6 +314,13 @@
 				MX6UL_PAD_CSI_DATA05__CSI_DATA07	0x1b088
 				MX6UL_PAD_CSI_DATA06__CSI_DATA08	0x1b088
 				MX6UL_PAD_CSI_DATA07__CSI_DATA09	0x1b088
+			>;
+		};
+
+		pinctrl_csi_pwn_rst: csi_pwn_rstgrp {
+			fsl,pins = <
+				MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0x10b0  /* CSI_RESET */
+				MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0x10b0  /* CSI_PWDN */
 			>;
 		};
 
@@ -440,9 +448,9 @@
 		pinctrl_tsc: tscgrp {
 			fsl,pins = <
 				/* MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0xb0 */
-				MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0xb0
+				/*MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0xb0*/
 				MX6UL_PAD_GPIO1_IO03__GPIO1_IO03	0xb0
-				MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0xb0
+				/*MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0xb0*/
 			>;
 		};
 
@@ -628,7 +636,7 @@
 	status = "okay";
 
 	display0: display {
-		bits-per-pixel = <24>;
+		bits-per-pixel = <16>;
 		bus-width = <24>;
 
 		display-timings {
