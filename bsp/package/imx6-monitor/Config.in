@@ -1,0 +1,10 @@
+config BR2_PACKAGE_IMX6_MONITOR
+	bool "imx6-monitor web camera service"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_JPEG
+	select BR2_PACKAGE_JPEG_TURBO
+	help
+	  Small C monitoring service for the i.MX6ULL BSP. It captures
+	  OV5640 frames through V4L2 MMAP, keeps an optional framebuffer
+	  preview, reads AP3216C sensor data, and exposes HTTP endpoints:
+	  /, /snapshot.jpg, /stream.mjpg and /api/status.
