@@ -3,26 +3,22 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/ide.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/atomic.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
-#include <linux/gpio.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
-#include <linux/of_gpio.h>
-#include <linux/semaphore.h>
-#include <linux/timer.h>
+#include <linux/fs.h>
 #include <linux/i2c.h>
+#include <linux/of.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
-#include <asm/mach/map.h>
+#include <linux/string.h>
 #include <asm/uaccess.h>
-#include <asm/io.h>
 #include "ap3216creg.h"
 
 #define AP3216C_CNT 1
@@ -32,6 +28,8 @@
 #define AP3216C_DEFAULT_ALS_DELTA_TH 200
 #define AP3216C_POLL_INTERVAL_MIN_MS 5
 #define AP3216C_POLL_INTERVAL_MAX_MS 1000
+#define AP3216C_PS_MAX_VALUE 1023
+#define AP3216C_ALS_MAX_VALUE 65535
 
 enum ap3216c_runtime_event_mode
 {
@@ -46,7 +44,6 @@ struct ap3216c_dev
 	struct cdev cdev;			/* cdev 	*/
 	struct class *class;		/* 类 		*/
 	struct device *device;		/* 设备 	 */
-	struct device_node *nd;		/* 设备节点 */
 	int major;					/* 主设备号 */
 	void *private_data;			/* 私有数据 */
 	unsigned short ir, als, ps; /* 三个光传感器数据 */
@@ -58,7 +55,6 @@ struct ap3216c_dev
 	enum ap3216c_runtime_event_mode event_mode;
 	struct delayed_work poll_work;
 	unsigned int poll_interval_ms;
-	unsigned int last_poll_ps;
 	unsigned int ps_trigger_th;
 	unsigned int als_delta_th;
 	unsigned int last_als_sample;
@@ -68,10 +64,19 @@ struct ap3216c_dev
 
 static struct ap3216c_dev ap3216cdev;
 
-static unsigned char ap3216c_read_reg(struct ap3216c_dev *dev, u8 reg);
+static int ap3216c_read_regs(struct ap3216c_dev *dev, u8 reg, void *val, int len);
 static int ap3216c_write_reg(struct ap3216c_dev *dev, u8 reg, u8 data);
 static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id);
 static int ap3216c_readdata(struct ap3216c_dev *dev, bool interruptible);
+
+static int ap3216c_lock_bus(struct ap3216c_dev *dev, bool interruptible)
+{
+	if (interruptible)
+		return mutex_lock_interruptible(&dev->bus_lock);
+
+	mutex_lock(&dev->bus_lock);
+	return 0;
+}
 
 static int ap3216c_request_hw_irq(struct ap3216c_dev *dev)
 {
@@ -171,7 +176,6 @@ static int ap3216c_set_event_mode(struct ap3216c_dev *dev,
 	}
 	poll_interval = dev->poll_interval_ms;
 	dev->event_mode = target_mode;
-	dev->last_poll_ps = 0;
 	dev->als_baseline_valid = false;
 	spin_unlock_irqrestore(&dev->data_lock, flags);
 
@@ -204,10 +208,12 @@ static int ap3216c_set_event_mode(struct ap3216c_dev *dev,
 static void ap3216c_event_core_handle(struct ap3216c_dev *dev, unsigned int source, unsigned int ps)
 {
 	unsigned long flags;
+	unsigned int total_events;
 	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 
 	spin_lock_irqsave(&dev->data_lock, flags);
 	dev->event_stats.total_events++;
+	total_events = dev->event_stats.total_events;
 	dev->event_stats.last_ps = ps;
 	dev->event_stats.last_source = source;
 	switch (source)
@@ -228,57 +234,83 @@ static void ap3216c_event_core_handle(struct ap3216c_dev *dev, unsigned int sour
 
 	if (client)
 		dev_info(&client->dev, "event handled: src=%u ps=%u total=%u\n",
-				 source, ps, dev->event_stats.total_events);
+				 source, ps, total_events);
 }
 
 /* 轮询任务：硬件 IRQ 不可用时，周期检测 PS 阈值并注入事件。 */
 static void ap3216c_poll_work_func(struct work_struct *work)
 {
 	unsigned long flags;
-	unsigned int curr_ps;
-	unsigned int curr_als;
+	unsigned int curr_ps = 0;
+	unsigned int curr_als = 0;
 	unsigned int als_delta;
 	unsigned int poll_interval;
 	bool should_trigger;
 	bool poll_enabled;
 	struct ap3216c_dev *dev = container_of(to_delayed_work(work),
-										   struct ap3216c_dev,
-										   poll_work);
+									   struct ap3216c_dev,
+									   poll_work);
+	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 	int ret;
 
 	ret = ap3216c_readdata(dev, false);
-	if (ret)
-		return;
 
 	spin_lock_irqsave(&dev->data_lock, flags);
-	curr_ps = dev->ps;
-	curr_als = dev->als;
 	poll_interval = dev->poll_interval_ms;
 	poll_enabled = (dev->event_mode == AP3216C_RUNTIME_EVENT_MODE_POLL_SIM);
+	if (!ret)
+	{
+		curr_ps = dev->ps;
+		curr_als = dev->als;
+	}
 	spin_unlock_irqrestore(&dev->data_lock, flags);
 
 	if (!poll_enabled)
 		return;
 
+	if (ret)
+	{
+		if (client)
+			dev_dbg(&client->dev, "poll read failed: ret=%d\n", ret);
+		goto reschedule;
+	}
+
 	should_trigger = ap3216c_should_trigger_event(dev, curr_ps, curr_als, &als_delta);
 	if (should_trigger)
 	{
-		dev_dbg(&((struct i2c_client *)dev->private_data)->dev,
-				"poll trigger: ps=%u als=%u delta=%u\n",
-				curr_ps,
-				curr_als,
-				als_delta);
+		if (client)
+			dev_dbg(&client->dev,
+					"poll trigger: ps=%u als=%u delta=%u\n",
+					curr_ps,
+					curr_als,
+					als_delta);
 		ap3216c_event_core_handle(dev, AP3216C_EVENT_SRC_POLL_SIM, curr_ps);
 	}
 
-	dev->last_poll_ps = curr_ps;
+reschedule:
 	schedule_delayed_work(&dev->poll_work, msecs_to_jiffies(poll_interval));
+}
+
+static void ap3216c_clear_irq(struct ap3216c_dev *dev)
+{
+	int ret;
+	struct i2c_client *client = (struct i2c_client *)dev->private_data;
+
+	ret = ap3216c_lock_bus(dev, false);
+	if (ret)
+		return;
+
+	ret = ap3216c_write_reg(dev, AP3216C_INTCLEAR, 0x00);
+	mutex_unlock(&dev->bus_lock);
+
+	if (ret && client)
+		dev_warn(&client->dev, "clear irq failed: ret=%d\n", ret);
 }
 
 /* 真实 IRQ 线程化处理：当前保留框架，便于后续硬件恢复时直接启用。 */
 static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 {
-	u8 status;
+	u8 status = 0;
 	unsigned int ps;
 	unsigned int als;
 	unsigned int als_delta;
@@ -292,7 +324,19 @@ static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 	dev->event_stats.irq_entries++;
 	spin_unlock_irqrestore(&dev->data_lock, flags);
 
-	status = ap3216c_read_reg(dev, AP3216C_INTSTATUS);
+	ret = ap3216c_lock_bus(dev, false);
+	if (ret)
+		return IRQ_HANDLED;
+	ret = ap3216c_read_regs(dev, AP3216C_INTSTATUS, &status, 1);
+	mutex_unlock(&dev->bus_lock);
+	if (ret)
+	{
+		if (client)
+			dev_warn(&client->dev, "read irq status failed: ret=%d\n", ret);
+		ap3216c_clear_irq(dev);
+		return IRQ_HANDLED;
+	}
+
 	if (!(status & (AP3216C_INTSTATUS_PS_BIT | AP3216C_INTSTATUS_ALS_BIT)))
 	{
 		spin_lock_irqsave(&dev->data_lock, flags);
@@ -300,13 +344,19 @@ static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 		spin_unlock_irqrestore(&dev->data_lock, flags);
 		if (client)
 			dev_dbg(&client->dev, "irq without interested status bits: 0x%02x\n", status);
-		ap3216c_write_reg(dev, AP3216C_INTCLEAR, 0x00);
+		ap3216c_clear_irq(dev);
 		return IRQ_HANDLED;
 	}
 
 	ret = ap3216c_readdata(dev, false);
 	if (ret)
+	{
+		if (client)
+			dev_warn(&client->dev, "irq data read failed: ret=%d\n", ret);
+		ap3216c_clear_irq(dev);
 		return IRQ_HANDLED;
+	}
+
 	spin_lock_irqsave(&dev->data_lock, flags);
 	ps = dev->ps;
 	als = dev->als;
@@ -328,7 +378,7 @@ static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 	}
 
 	/* 按寄存器手册清中断，避免中断线粘连。 */
-	ap3216c_write_reg(dev, AP3216C_INTCLEAR, 0x00);
+	ap3216c_clear_irq(dev);
 	return IRQ_HANDLED;
 }
 
@@ -346,33 +396,29 @@ static int ap3216c_read_regs(struct ap3216c_dev *dev, u8 reg, void *val, int len
 	struct i2c_msg msg[2];
 	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 
-	/*
-	 * i2c_msg[0] 先写入目标寄存器地址，告诉从设备“接下来我要从哪个寄存器开始读”。
-	 * AP3216C 这类寄存器设备通常需要“写寄存器地址 + 重启 + 读数据”的组合事务。
-	 */
-	msg[0].addr = client->addr; /* ap3216c地址 */
-	msg[0].flags = 0;			/* 标记为发送数据 */
-	msg[0].buf = &reg;			/* 读取的首地址 */
-	msg[0].len = 1;				/* reg长度*/
+	if (len <= 0)
+		return -EINVAL;
 
-	/* i2c_msg[1] 从指定寄存器连续读取 len 字节数据。 */
-	msg[1].addr = client->addr; /* ap3216c地址 */
-	msg[1].flags = I2C_M_RD;	/* 标记为读取数据*/
-	msg[1].buf = val;			/* 读取数据缓冲区 */
-	msg[1].len = len;			/* 要读取的数据长度*/
+	/* AP3216C 读取使用“写寄存器地址 + repeated start + 连续读”的组合事务。 */
+	msg[0].addr = client->addr;
+	msg[0].flags = 0;
+	msg[0].buf = &reg;
+	msg[0].len = 1;
+
+	msg[1].addr = client->addr;
+	msg[1].flags = I2C_M_RD;
+	msg[1].buf = val;
+	msg[1].len = len;
 
 	ret = i2c_transfer(client->adapter, msg, 2);
 	if (ret == 2)
 	{
 		dev_dbg(&client->dev, "i2c read ok: reg=0x%02x len=%d\n", reg, len);
-		ret = 0;
+		return 0;
 	}
-	else
-	{
-		dev_err(&client->dev, "i2c read failed: ret=%d reg=0x%02x len=%d\n", ret, reg, len);
-		ret = -EREMOTEIO;
-	}
-	return ret;
+
+	dev_err(&client->dev, "i2c read failed: ret=%d reg=0x%02x len=%d\n", ret, reg, len);
+	return (ret < 0) ? ret : -EREMOTEIO;
 }
 
 /*
@@ -383,21 +429,23 @@ static int ap3216c_read_regs(struct ap3216c_dev *dev, u8 reg, void *val, int len
  * @param - len:  要写入的数据长度
  * @return 	  :   操作结果
  */
-static s32 ap3216c_write_regs(struct ap3216c_dev *dev, u8 reg, u8 *buf, u8 len)
+static int ap3216c_write_regs(struct ap3216c_dev *dev, u8 reg, const u8 *buf, u8 len)
 {
 	int ret;
 	u8 b[256];
 	struct i2c_msg msg;
 	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 
-	b[0] = reg;				 /* 寄存器首地址 */
-	memcpy(&b[1], buf, len); /* 将要写入的数据拷贝到数组b里面 */
+	if (len > sizeof(b) - 1)
+		return -EINVAL;
 
-	msg.addr = client->addr; /* ap3216c地址 */
-	msg.flags = 0;			 /* 标记为写数据 */
+	b[0] = reg;
+	memcpy(&b[1], buf, len);
 
-	msg.buf = b;	   /* 要写入的数据缓冲区 */
-	msg.len = len + 1; /* 要写入的数据长度 */
+	msg.addr = client->addr;
+	msg.flags = 0;
+	msg.buf = b;
+	msg.len = len + 1;
 
 	ret = i2c_transfer(client->adapter, &msg, 1);
 	if (ret == 1)
@@ -407,31 +455,7 @@ static s32 ap3216c_write_regs(struct ap3216c_dev *dev, u8 reg, u8 *buf, u8 len)
 	}
 
 	dev_err(&client->dev, "i2c write failed: ret=%d reg=0x%02x len=%u\n", ret, reg, len);
-	return -EREMOTEIO;
-}
-
-/*
- * @description	: 读取ap3216c指定寄存器值，读取一个寄存器
- * @param - dev:  ap3216c设备
- * @param - reg:  要读取的寄存器
- * @return 	  :   读取到的寄存器值
- */
-static unsigned char ap3216c_read_reg(struct ap3216c_dev *dev, u8 reg)
-{
-	u8 data = 0;
-	int ret;
-	struct i2c_client *client = (struct i2c_client *)dev->private_data;
-
-	ret = ap3216c_read_regs(dev, reg, &data, 1);
-	if (ret)
-		dev_warn(&client->dev, "read reg failed: reg=0x%02x ret=%d\n", reg, ret);
-
-	return data;
-
-#if 0
-	struct i2c_client *client = (struct i2c_client *)dev->private_data;
-	return i2c_smbus_read_byte_data(client, reg);
-#endif
+	return (ret < 0) ? ret : -EREMOTEIO;
 }
 
 /*
@@ -439,13 +463,11 @@ static unsigned char ap3216c_read_reg(struct ap3216c_dev *dev, u8 reg)
  * @param - dev:  ap3216c设备
  * @param - reg:  要写的寄存器
  * @param - data: 要写入的值
- * @return   :    无
+ * @return   :    操作结果
  */
 static int ap3216c_write_reg(struct ap3216c_dev *dev, u8 reg, u8 data)
 {
-	u8 buf = 0;
-	buf = data;
-	return ap3216c_write_regs(dev, reg, &buf, 1);
+	return ap3216c_write_regs(dev, reg, &data, 1);
 }
 
 /*
@@ -462,7 +484,7 @@ static int ap3216c_update_bits(struct ap3216c_dev *dev, u8 reg, u8 mask, u8 val)
 	 * update_bits 需要保持“读-改-写”原子语义，
 	 * 因为 i2c_transfer 可能睡眠，这里必须使用 mutex。
 	 */
-	ret = mutex_lock_interruptible(&dev->bus_lock);
+	ret = ap3216c_lock_bus(dev, true);
 	if (ret)
 		return ret;
 
@@ -485,79 +507,107 @@ static int ap3216c_update_bits(struct ap3216c_dev *dev, u8 reg, u8 mask, u8 val)
 	return ret;
 }
 
+static int ap3216c_hw_init(struct ap3216c_dev *dev)
+{
+	int ret;
+	struct i2c_client *client = (struct i2c_client *)dev->private_data;
+
+	ret = ap3216c_lock_bus(dev, true);
+	if (ret)
+		return ret;
+
+	ret = ap3216c_write_reg(dev, AP3216C_SYSTEMCONG, 0x04);
+	if (ret)
+	{
+		dev_err(&client->dev, "reset sensor failed: ret=%d\n", ret);
+		goto out_unlock;
+	}
+
+	msleep(50);
+	ret = ap3216c_write_reg(dev, AP3216C_SYSTEMCONG, AP3216C_MODE_ALS_PS_IR);
+	if (ret)
+	{
+		dev_err(&client->dev, "enable sensor failed: ret=%d\n", ret);
+		goto out_unlock;
+	}
+
+	ret = ap3216c_write_reg(dev, AP3216C_PS_INT_FORM, 0x01);
+	if (ret)
+		dev_err(&client->dev, "set ps interrupt form failed: ret=%d\n", ret);
+
+out_unlock:
+	mutex_unlock(&dev->bus_lock);
+	return ret;
+}
+
+static int ap3216c_config_ps_threshold_locked(struct ap3216c_dev *dev, unsigned int threshold)
+{
+	int ret;
+
+	/* 0x2C 保存低 2 位，0x2D 保存高 8 位，组合成 10-bit PS 阈值。 */
+	ret = ap3216c_write_reg(dev, AP3216C_PS_HTH_L, threshold & 0x03);
+	if (ret)
+		return ret;
+
+	ret = ap3216c_write_reg(dev, AP3216C_PS_HTH_H, (threshold >> 2) & 0xFF);
+	if (ret)
+		return ret;
+
+	ret = ap3216c_write_reg(dev, AP3216C_PS_LTH_L, 0x00);
+	if (ret)
+		return ret;
+
+	return ap3216c_write_reg(dev, AP3216C_PS_LTH_H, 0x00);
+}
+
 /*
- * @description	: 读取AP3216C的数据，读取原始数据，包括ALS,PS和IR, 注意！
- *				: 如果同时打开ALS,IR+PS的话两次数据读取的时间间隔要大于112.5ms
- * @param - ir	: ir数据
- * @param - ps 	: ps数据
- * @param - ps 	: als数据
- * @return 		: 无。
+ * @description	: 读取 AP3216C 的 IR/ALS/PS 原始数据并更新内存快照。
+ *				: 如果同时打开 ALS、IR+PS，两次数据读取的时间间隔要大于 112.5ms。
+ * @param - dev	: AP3216C 设备
+ * @param - interruptible: 是否允许等待 bus_lock 时被信号打断
+ * @return 		: 0 成功；负值为错误码。
  */
 static int ap3216c_readdata(struct ap3216c_dev *dev, bool interruptible)
 {
 	unsigned long flags;
-	unsigned char i = 0;
-	unsigned char buf[6];
+	u8 buf[6];
 	unsigned short ir;
 	unsigned short als;
 	unsigned short ps;
 	struct i2c_client *client = (struct i2c_client *)dev->private_data;
 	int ret;
 
-	/* I2C 事务可能睡眠，因此使用 mutex 保护总线访问。 */
-	if (interruptible)
-		ret = mutex_lock_interruptible(&dev->bus_lock);
-	else
-	{
-		mutex_lock(&dev->bus_lock);
-		ret = 0;
-	}
+	ret = ap3216c_lock_bus(dev, interruptible);
 	if (ret)
 		return ret;
 
-	/* 循环读取所有传感器数据 */
-	for (i = 0; i < 6; i++)
-	{
-		buf[i] = ap3216c_read_reg(dev, AP3216C_IRDATALOW + i);
-	}
-
+	ret = ap3216c_read_regs(dev, AP3216C_IRDATALOW, buf, sizeof(buf));
 	mutex_unlock(&dev->bus_lock);
+	if (ret)
+		return ret;
 
-	/*
-	 * IR 数据拼接说明：
-	 * - buf[0] bit7 为无效标志位，bit[1:0] 为 IR 低 2 位；
-	 * - buf[1] 为 IR 高 8 位（最终左移 2 位）。
-	 */
-	if (buf[0] & AP3216C_IR_OF_BIT) /* IR_OF位为1,则数据无效 */
+	/* IR: bit7 为无效标志，bit[1:0] 为低 2 位，下一字节为高 8 位。 */
+	if (buf[0] & AP3216C_IR_OF_BIT)
 		ir = 0;
-	else /* 读取IR传感器的数据   		*/
+	else
 		ir = ((unsigned short)buf[1] << 2) | (buf[0] & AP3216C_IR_DATA_L_MASK);
 
-	als = ((unsigned short)buf[3] << 8) | buf[2]; /* 读取ALS传感器的数据 */
+	als = ((unsigned short)buf[3] << 8) | buf[2];
 
-	/*
-	 * PS 数据拼接说明：
-	 * - PSDATALOW bit6 为无效标志位；
-	 * - PSDATAHIGH bit[5:0] 作为高 6 位，左移 4；
-	 * - PSDATALOW bit[3:0] 作为低 4 位。
-	 */
-	if (buf[4] & AP3216C_PS_OF_BIT) /* PS_OF位为1,则数据无效 */
+	/* PS: bit6 为无效标志，高字节 bit[5:0] 和低字节 bit[3:0] 组合为 10 位值。 */
+	if (buf[4] & AP3216C_PS_OF_BIT)
 		ps = 0;
-	else /* 读取PS传感器的数据    */
+	else
 		ps = ((unsigned short)(buf[5] & AP3216C_PS_DATA_H_MASK) << 4) |
 			 (buf[4] & AP3216C_PS_DATA_L_MASK);
 
-	/*
-	 * 这里只保护内存态共享数据，不涉及可睡眠操作，
-	 * 用 spinlock 避免未来中断上下文读取时出现撕裂。
-	 */
 	spin_lock_irqsave(&dev->data_lock, flags);
 	dev->ir = ir;
 	dev->als = als;
 	dev->ps = ps;
 	spin_unlock_irqrestore(&dev->data_lock, flags);
 
-	dev_dbg(&client->dev, "sensor raw: ir=%u als=%u ps=%u\n", dev->ir, dev->als, dev->ps);
+	dev_dbg(&client->dev, "sensor raw: ir=%u als=%u ps=%u\n", ir, als, ps);
 	return 0;
 }
 
@@ -579,48 +629,21 @@ static int ap3216c_open(struct inode *inode, struct file *filp)
 		return -ENODEV;
 	}
 
-	/*
-	 * atomic_cmpxchg(&open_cnt, 0, 1):
-	 * 仅当当前值为 0 时原子地改为 1，并返回旧值。
-	 * 返回非 0 说明设备已被占用，按独占策略返回 -EBUSY。
-	 */
+	/* 独占打开：仅当 open_cnt 仍为 0 时允许当前进程持有设备。 */
 	if (atomic_cmpxchg(&ap3216cdev.open_cnt, 0, 1) != 0)
 	{
 		dev_warn(&client->dev, "device busy, reject open\n");
 		return -EBUSY;
 	}
 
+	ret = ap3216c_hw_init(&ap3216cdev);
+	if (ret)
+	{
+		atomic_set(&ap3216cdev.open_cnt, 0);
+		return ret;
+	}
+
 	filp->private_data = &ap3216cdev;
-
-	/* 初始化AP3216C */
-	ret = mutex_lock_interruptible(&ap3216cdev.bus_lock);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_write_reg(&ap3216cdev, AP3216C_SYSTEMCONG, 0x04); /* 复位AP3216C */
-	if (ret)
-	{
-		dev_err(&client->dev, "reset sensor failed: ret=%d\n", ret);
-		mutex_unlock(&ap3216cdev.bus_lock);
-		atomic_set(&ap3216cdev.open_cnt, 0);
-		return ret;
-	}
-
-	mdelay(50);														/* AP3216C复位最少10ms 	*/
-	ret = ap3216c_write_reg(&ap3216cdev, AP3216C_SYSTEMCONG, 0X03); /* 开启ALS、PS+IR */
-	if (ret)
-	{
-		dev_err(&client->dev, "enable sensor failed: ret=%d\n", ret);
-		mutex_unlock(&ap3216cdev.bus_lock);
-		atomic_set(&ap3216cdev.open_cnt, 0);
-		return ret;
-	}
-
-    /* 0x22 设为 0：要求中断算法选用默认的Hysteresis Type */
-    ap3216c_write_reg(&ap3216cdev, AP3216C_PS_INT_FORM, 0x01);
-
-	mutex_unlock(&ap3216cdev.bus_lock);
-
 	dev_info(&client->dev, "device opened, open_cnt=%d\n", atomic_read(&ap3216cdev.open_cnt));
 	return 0;
 }
@@ -636,8 +659,8 @@ static int ap3216c_open(struct inode *inode, struct file *filp)
 static ssize_t ap3216c_read(struct file *filp, char __user *buf, size_t cnt, loff_t *off)
 {
 	unsigned long flags;
-	short data[3];
-	long err = 0;
+	unsigned short data[3];
+	unsigned long err = 0;
 	int ret;
 
 	struct ap3216c_dev *dev = (struct ap3216c_dev *)filp->private_data;
@@ -738,7 +761,9 @@ static long ap3216c_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned
 			return -EINVAL;
 		}
 
-		mutex_lock(&dev->bus_lock);
+		ret = ap3216c_lock_bus(dev, true);
+		if (ret)
+			return ret;
 		ret = ap3216c_write_reg(dev, AP3216C_SYSTEMCONG, (u8)val);
 		mutex_unlock(&dev->bus_lock);
 		if (ret)
@@ -748,7 +773,7 @@ static long ap3216c_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned
 		}
 
 		/* 模式切换后留出稳定时间，避免紧接着读取得到瞬态值。 */
-		mdelay(20);
+		msleep(20);
 		dev_info(&client->dev, "set mode ok: mode=%d\n", val);
 		break;
 
@@ -821,27 +846,19 @@ static long ap3216c_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned
 		break;
 
 	case AP3216C_CMD_SET_PS_TRIGGER_TH:
-		if (val < 0 || val > 1023)
+		if (val < 0 || val > AP3216C_PS_MAX_VALUE)
 			return -EINVAL;
 
-		mutex_lock(&dev->bus_lock);
-
-		/*
-		 * 按手册说明：
-		 * 0x2C (Low) 取最低 2 位 (val & 0x03)
-		 * 0x2D (High) 取高 8 位 ((val >> 2) & 0xFF)
-		 */
-		ap3216c_write_reg(dev, AP3216C_PS_HTH_L, val & 0x03);
-		ap3216c_write_reg(dev, AP3216C_PS_HTH_H, (val >> 2) & 0xFF);
-
-		/* 将低阈值设为0（或者比触发值略小作迟滞），确保物品靠近离开能形成触发区间 */
-		ap3216c_write_reg(dev, AP3216C_PS_LTH_L, 0x00);
-		ap3216c_write_reg(dev, AP3216C_PS_LTH_H, 0x00);
-
-		/* 配置中断触发需要持续 2 个周期 (默认配置 0x05 的低两位 01) */
-		// 这里暂且保持之前 open() 时的默认配置，不用改
-
+		ret = ap3216c_lock_bus(dev, true);
+		if (ret)
+			return ret;
+		ret = ap3216c_config_ps_threshold_locked(dev, (unsigned int)val);
 		mutex_unlock(&dev->bus_lock);
+		if (ret)
+		{
+			dev_err(&client->dev, "set ps trigger threshold failed: threshold=%d ret=%d\n", val, ret);
+			return ret;
+		}
 
 		spin_lock_irqsave(&dev->data_lock, flags);
 		dev->ps_trigger_th = (unsigned int)val;
@@ -850,7 +867,7 @@ static long ap3216c_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned
 		break;
 
 	case AP3216C_CMD_SET_ALS_DELTA_TH:
-		if (val < 0 || val > 65535)
+		if (val < 0 || val > AP3216C_ALS_MAX_VALUE)
 			return -EINVAL;
 		spin_lock_irqsave(&dev->data_lock, flags);
 		dev->als_delta_th = (unsigned int)val;
@@ -955,7 +972,6 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
 	ap3216cdev.irq_requested = false;
 	ap3216cdev.event_mode = AP3216C_RUNTIME_EVENT_MODE_UNKNOWN;
 	ap3216cdev.poll_interval_ms = AP3216C_POLL_INTERVAL_MS;
-	ap3216cdev.last_poll_ps = 0;
 	ap3216cdev.ps_trigger_th = AP3216C_DEFAULT_PS_TRIGGER_TH;
 	ap3216cdev.als_delta_th = AP3216C_DEFAULT_ALS_DELTA_TH;
 	ap3216cdev.last_als_sample = 0;
@@ -1007,8 +1023,13 @@ err_unregister_chrdev:
  */
 static int ap3216c_remove(struct i2c_client *client)
 {
+	unsigned long flags;
+
 	dev_info(&client->dev, "remove device\n");
 
+	spin_lock_irqsave(&ap3216cdev.data_lock, flags);
+	ap3216cdev.event_mode = AP3216C_RUNTIME_EVENT_MODE_UNKNOWN;
+	spin_unlock_irqrestore(&ap3216cdev.data_lock, flags);
 	cancel_delayed_work_sync(&ap3216cdev.poll_work);
 	ap3216c_release_hw_irq(&ap3216cdev);
 
@@ -1027,11 +1048,13 @@ static int ap3216c_remove(struct i2c_client *client)
 static const struct i2c_device_id ap3216c_id[] = {
 	{"alientek,ap3216c", 0},
 	{}};
+MODULE_DEVICE_TABLE(i2c, ap3216c_id);
 
 /* 设备树匹配列表 */
 static const struct of_device_id ap3216c_of_match[] = {
 	{.compatible = "alientek,ap3216c"},
 	{/* Sentinel */}};
+MODULE_DEVICE_TABLE(of, ap3216c_of_match);
 
 /* i2c驱动结构体 */
 static struct i2c_driver ap3216c_driver = {
@@ -1075,9 +1098,6 @@ static void __exit ap3216c_exit(void)
 	i2c_del_driver(&ap3216c_driver);
 }
 
-/* module_i2c_driver(ap3216c_driver) */
-
-module_init(ap3216c_init);
-module_exit(ap3216c_exit);
+module_i2c_driver(ap3216c_driver);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("FriedEgg");
