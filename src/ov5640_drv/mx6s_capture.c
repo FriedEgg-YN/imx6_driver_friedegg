@@ -340,7 +340,7 @@ struct mx6s_csi_dev {
 	size_t						discard_size;
 	struct mx6s_buf_internal	buf_discard[2];
 
-	struct v4l2_async_subdev	asd;
+	struct v4l2_async_subdev	asd;	/* 描述异步等待的 OV5640 subdev。 */
 	struct v4l2_async_notifier	subdev_notifier;
 	struct v4l2_async_subdev	*async_subdevs[2];
 
@@ -397,6 +397,10 @@ static struct mx6s_buffer *mx6s_ibuf_to_buf(struct mx6s_buf_internal *int_buf)
 
 void csi_clk_enable(struct mx6s_csi_dev *csi_dev)
 {
+	/*
+	 * clk_prepare_enable() 等价于 prepare + enable，适合在可睡眠的
+	 * 进程上下文中开启时钟。CSI 访问寄存器前必须先打开相关总线和模块时钟。
+	 */
 	clk_prepare_enable(csi_dev->clk_disp_axi);
 	clk_prepare_enable(csi_dev->clk_disp_dcic);
 	clk_prepare_enable(csi_dev->clk_csi_mclk);
@@ -404,6 +408,10 @@ void csi_clk_enable(struct mx6s_csi_dev *csi_dev)
 
 void csi_clk_disable(struct mx6s_csi_dev *csi_dev)
 {
+	/*
+	 * disable 顺序与 enable 相反，保证先关模块时钟，再关其依赖的显示/AXI
+	 * 时钟。每次 clk_prepare_enable() 都要和 clk_disable_unprepare() 配对。
+	 */
 	clk_disable_unprepare(csi_dev->clk_csi_mclk);
 	clk_disable_unprepare(csi_dev->clk_disp_dcic);
 	clk_disable_unprepare(csi_dev->clk_disp_axi);
@@ -411,6 +419,10 @@ void csi_clk_disable(struct mx6s_csi_dev *csi_dev)
 
 static void csihw_reset(struct mx6s_csi_dev *csi_dev)
 {
+	/*
+	 * 先置位帧计数复位，再把 CSI 控制寄存器写回硬件默认值。
+	 * __raw_readl()/__raw_writel() 直接访问 MMIO 寄存器，不做额外字节序转换。
+	 */
 	__raw_writel(__raw_readl(csi_dev->regbase + CSI_CSICR3)
 			| BIT_FRMCNT_RST,
 			csi_dev->regbase + CSI_CSICR3);
@@ -462,6 +474,14 @@ static void csi_init_interface(struct mx6s_csi_dev *csi_dev)
 	unsigned int val = 0;
 	unsigned int imag_para;
 
+	/*
+	 * 配置 CSI 基础输入时序和模块时钟：
+	 * - SOF/HSYNC 极性；
+	 * - 上升沿采样；
+	 * - gated clock 模式；
+	 * - FIFO control；
+	 * - MCLK 分频和 MCLK 输出使能。
+	 */
 	val |= BIT_SOF_POL;
 	val |= BIT_REDGE;
 	val |= BIT_GCLK_MODE;
@@ -471,9 +491,14 @@ static void csi_init_interface(struct mx6s_csi_dev *csi_dev)
 	val |= BIT_MCLKEN;
 	__raw_writel(val, csi_dev->regbase + CSI_CSICR1);
 
+	/*
+	 * 初始化默认图像参数。后续真正设置格式时，mx6s_configure_csi()
+	 * 会通过 csi_set_imagpara() 按用户选择的 width/height 覆盖这里。
+	 */
 	imag_para = (640 << 16) | 960;
 	__raw_writel(imag_para, csi_dev->regbase + CSI_CSIIMAG_PARA);
 
+	/* 刷新嵌入式 DMA 控制器的 RxFIFO 状态。 */
 	val = BIT_DMA_REFLASH_RFF;
 	__raw_writel(val, csi_dev->regbase + CSI_CSICR3);
 }
@@ -589,6 +614,7 @@ static void csi_dmareq_rff_disable(struct mx6s_csi_dev *csi_dev)
 {
 	unsigned long cr3 = __raw_readl(csi_dev->regbase + CSI_CSICR3);
 
+	/* 禁止 RxFIFO 触发 DMA 请求，并关闭 HRESP 错误中断使能。 */
 	cr3 &= ~BIT_DMA_REQ_EN_RFF;
 	cr3 &= ~BIT_HRESP_ERR_EN;
 	__raw_writel(cr3, csi_dev->regbase + CSI_CSICR3);
@@ -697,9 +723,13 @@ static void mx6s_update_csi_buf(struct mx6s_csi_dev *csi_dev,
 
 static void mx6s_csi_init(struct mx6s_csi_dev *csi_dev)
 {
+	/* 1. 打开 CSI 寄存器访问、总线传输和模块运行所需的时钟。 */
 	csi_clk_enable(csi_dev);
+	/* 2. 将 CSI 控制寄存器恢复到已知默认状态。 */
 	csihw_reset(csi_dev);
+	/* 3. 写入基础输入时序、默认图像参数和 DMA 刷新配置。 */
 	csi_init_interface(csi_dev);
+	/* 4. open 阶段只初始化控制器，不立即让 RxFIFO 发起 DMA 请求。 */
 	csi_dmareq_rff_disable(csi_dev);
 }
 
@@ -1144,39 +1174,74 @@ static irqreturn_t mx6s_csi_irq_handler(int irq, void *data)
 /*
  * File operations for the device
  */
+/**
+ * mx6s_csi_open - 打开 V4L2 视频采集节点
+ * @file: 本次 open("/dev/videoX") 对应的文件实例。
+ *
+ * 返回: 成功返回 0，失败返回负 errno 值。
+ */
 static int mx6s_csi_open(struct file *file)
 {
+	/*
+	 * video_drvdata() 通过 file 对应的 video_device 取回 probe 阶段
+	 * video_set_drvdata() 绑定的设备级私有数据。
+	 */
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
+	/* 已异步绑定的摄像头 sensor subdev，例如本工程中的 OV5640。 */
 	struct v4l2_subdev *sd = csi_dev->sd;
+	/* 本 CSI 设备的 videobuf2 采集队列，管理用户态 buffer 和 DMA。 */
 	struct vb2_queue *q = &csi_dev->vb2_vidq;
 	int ret = 0;
 
+	/*
+	 * file->private_data 属于本次 open 文件实例。这里保存 csi_dev，
+	 * 后续 V4L2 ioctl core 会把它作为 priv/fh 参数传给 vidioc 回调。
+	 */
 	file->private_data = csi_dev;
 
+	/*
+	 * open 路径会初始化共享队列、电源和硬件寄存器，因此用设备锁串行化，
+	 * 可被信号打断时返回 -ERESTARTSYS。
+	 */
 	if (mutex_lock_interruptible(&csi_dev->lock))
 		return -ERESTARTSYS;
 
+	/*
+	 * 为 vb2_dma_contig_memops 创建分配上下文。上下文里保存 struct device，
+	 * 之后 REQBUFS/USERPTR 路径可据此分配或映射适合 CSI DMA 的连续内存。
+	 */
 	csi_dev->alloc_ctx = vb2_dma_contig_init_ctx(csi_dev->dev);
 	if (IS_ERR(csi_dev->alloc_ctx))
 		goto unlock;
 
+	/*
+	 * 配置 videobuf2 队列的必需字段。vb2_queue_init() 会检查 type、
+	 * io_modes、ops、mem_ops 等字段，并初始化队列内部链表、等待队列和锁。
+	 */
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	q->io_modes = VB2_MMAP | VB2_USERPTR;
 	q->drv_priv = csi_dev;
 	q->ops = &mx6s_videobuf_ops;
 	q->mem_ops = &vb2_dma_contig_memops;
+	/* 每个 vb2_buffer 外包一层 mx6s_buffer，用于挂入驱动自己的链表。 */
 	q->buf_struct_size = sizeof(struct mx6s_buffer);
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	/* 让 V4L2/VB2 core 在队列 ioctl 路径复用本驱动的设备锁。 */
 	q->lock = &csi_dev->lock;
 
 	ret = vb2_queue_init(q);
 	if (ret < 0)
 		goto eallocctx;
 
+	/* 增加 runtime PM 使用计数并同步恢复 CSI 设备，确保寄存器可访问。 */
 	pm_runtime_get_sync(csi_dev->dev);
 
+	/* 采集期间提高 i.MX6 总线/DDR 频率，避免 CSI DMA 带宽不足。 */
 	request_bus_freq(BUS_FREQ_HIGH);
 
+	/*
+	 * 通知 sensor subdev 退出低功耗，随后初始化 CSI 控制器寄存器和内部状态。
+	 */
 	v4l2_subdev_call(sd, core, s_power, 1);
 	mx6s_csi_init(csi_dev);
 
@@ -1697,6 +1762,20 @@ static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 	return 0;
 }
 
+/**
+ * mx6s_csi_mux_sel() - 根据设备树 mux 信息选择 CSI 输入路径。
+ * @csi_dev: CSI 私有数据。其内嵌的 device 指针必须对应 CSI 设备树节点。
+ *
+ * 解析 CSI 设备节点中可选的 "csi-mux-mipi" 属性。该属性包含 3 个
+ * cell：cell 0 是用于访问 IOMUXC GPR 寄存器块的 GPR syscon phandle，
+ * cell 1 是传给 regmap_update_bits() 的 GPR 寄存器偏移，cell 2 是
+ * 需要置位的 bit 编号，用于将输入路径切换到 MIPI CSI。
+ *
+ * 如果设备树中没有该属性，则保持默认 CSI 输入路径，并将 csi_mux_mipi
+ * 标记为 false。
+ *
+ * Return: 成功返回 0，失败返回负 errno 值。
+ */
 static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
 {
 	struct device_node *np = csi_dev->dev->of_node;
@@ -1737,21 +1816,41 @@ static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
 	return ret;
 }
 
+/**
+ * mx6sx_register_subdevs() - 注册设备树 OF graph 描述的 sensor subdev。
+ * @csi_dev: CSI 私有数据。其内嵌的 device 指针提供要解析 port endpoint
+ *           的 CSI 设备树节点。
+ *
+ * 遍历 CSI 设备树 graph，找到连接到 CSI endpoint 的远端 sensor 节点，
+ * 并为它注册 V4L2 async notifier。notifier 使用 V4L2_ASYNC_MATCH_OF，
+ * 表示通过比较 sensor 驱动的 dev->of_node 指针和 asd.match.of.node 来
+ * 匹配远端 sensor。本板级配置中，预期的远端节点是 I2C 地址 0x3c 的
+ * OV5640 sensor。
+ *
+ * Return: 成功返回 0，失败返回负 errno 值。
+ */
 static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 {
+	/* parent 指向 CSI 设备树节点。 */
 	struct device_node *parent = csi_dev->dev->of_node;
 	struct device_node *node, *port, *rem;
 	int ret;
 
 	/* Attach sensors linked to csi receivers */
 	for_each_available_child_of_node(parent, node) {
+		/* of_node_cmp() 在节点名相等时返回 0。 */
 		if (of_node_cmp(node->name, "port"))
 			continue;
 
 		/* The csi node can have only port subnode. */
+		/* 获取 port 节点下的 endpoint 子节点。 */
 		port = of_get_next_child(node, NULL);
 		if (!port)
 			continue;
+		/*
+		 * 沿 remote-endpoint 找到 sensor 节点。返回的节点已经增加引用计数，
+		 * 使用完后必须通过 of_node_put() 释放。
+		 */
 		rem = of_graph_get_remote_port_parent(port);
 		of_node_put(port);
 		if (rem == NULL) {
@@ -1761,6 +1860,10 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 			return -1;
 		}
 
+		/*
+		 * 等待远端 sensor subdev。V4L2_ASYNC_MATCH_OF 表示 async core
+		 * 会比较 dev->of_node 和 match.of.node。
+		 */
 		csi_dev->asd.match_type = V4L2_ASYNC_MATCH_OF;
 		csi_dev->asd.match.of.node = rem;
 		csi_dev->async_subdevs[0] = &csi_dev->asd;
@@ -1769,10 +1872,18 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 		break;
 	}
 
+	/*
+	 * 注册一个期望绑定的 subdev。当 OV5640 subdev probe 完成，且 OF node
+	 * 匹配成功时，bound 回调会被调用。
+	 */
 	csi_dev->subdev_notifier.subdevs = csi_dev->async_subdevs;
 	csi_dev->subdev_notifier.num_subdevs = 1;
 	csi_dev->subdev_notifier.bound = subdev_notifier_bound;
 
+	/*
+	 * 如果 OV5640 subdev 已经注册，这里会立即完成绑定；否则 async core
+	 * 会保存匹配规则，直到 sensor probe 时再尝试匹配。
+	 */
 	ret = v4l2_async_notifier_register(&csi_dev->v4l2_dev,
 					&csi_dev->subdev_notifier);
 	if (ret)
@@ -1782,8 +1893,18 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 	return ret;
 }
 
+/**
+ * mx6s_csi_probe - CSI 设备探测函数
+ * @pdev: 平台设备指针
+ *
+ * 返回: 成功返回 0，失败返回负 errno 值。
+ */
 static int mx6s_csi_probe(struct platform_device *pdev)
 {
+	/*
+	 * probe 前，DT 中的 reg/interrupts 已经被转换为 platform resource，
+	 * 因此驱动可以直接从 platform_device 中获取这些资源。
+	 */
 	struct device *dev = &pdev->dev;
 	struct mx6s_csi_dev *csi_dev;
 	struct video_device *vdev;
@@ -1793,19 +1914,30 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	dev_dbg(dev, "initialising\n");
 
 	/* Prepare our private structure */
+	/*
+	 * devm_kzalloc() 分配归 dev 管理且已清零的内核内存，设备解绑时
+	 * 这块内存会自动释放。
+	 */
 	csi_dev = devm_kzalloc(dev, sizeof(struct mx6s_csi_dev), GFP_ATOMIC);
 	if (!csi_dev) {
 		dev_err(dev, "Can't allocate private structure\n");
 		return -ENODEV;
 	}
 
+	/*
+	 * 资源索引 0 是 DT reg 属性描述的 CSI 寄存器窗口。
+	 * IORESOURCE_MEM 表示内存映射 I/O，不是普通 RAM。
+	 */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	/* IRQ 索引 0 是 DT interrupts 属性描述的 CSI 中断。 */
 	csi_dev->irq = platform_get_irq(pdev, 0);
+	/* 缺少寄存器或 IRQ 资源，说明这个 platform device 描述不完整。 */
 	if (res == NULL || csi_dev->irq < 0) {
 		dev_err(dev, "Missing platform resources data\n");
 		return -ENODEV;
 	}
 
+	/* 将 CSI MMIO 资源映射到内核虚拟地址空间。 */
 	csi_dev->regbase = devm_ioremap_resource(dev, res);
 	if (IS_ERR(csi_dev->regbase)) {
 		dev_err(dev, "Failed platform resources map\n");
@@ -1813,10 +1945,14 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	}
 
 	/* init video dma queues */
+	/* 等待 CSI DMA 填充的 buffer 队列。 */
 	INIT_LIST_HEAD(&csi_dev->capture);
+	/* 当前已经交给 CSI DMA 使用的 buffer 队列。 */
 	INIT_LIST_HEAD(&csi_dev->active_bufs);
+	/* 丢帧时使用的临时 buffer 队列。 */
 	INIT_LIST_HEAD(&csi_dev->discard);
 
+	/* clock 名称来自 CSI 节点的 clock-names 属性。 */
 	csi_dev->clk_disp_axi = devm_clk_get(dev, "disp-axi");
 	if (IS_ERR(csi_dev->clk_disp_axi)) {
 		dev_err(dev, "Could not get csi axi clock\n");
@@ -1837,11 +1973,16 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 
 	csi_dev->dev = dev;
 
+	/* 如果存在可选的 csi-mux-mipi 属性，则选择 MIPI CSI 输入路径。 */
 	mx6s_csi_mux_sel(csi_dev);
 
 	snprintf(csi_dev->v4l2_dev.name,
 		 sizeof(csi_dev->v4l2_dev.name), "CSI");
 
+	/*
+	 * 将 V4L2 device 包装对象绑定到真实 struct device，初始化 V4L2
+	 * 内部状态，并持有 dev 引用。
+	 */
 	ret = v4l2_device_register(dev, &csi_dev->v4l2_dev);
 	if (ret < 0) {
 		dev_err(dev, "v4l2_device_register() failed: %d\n", ret);
@@ -1853,12 +1994,13 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	spin_lock_init(&csi_dev->slock);
 
 	/* Allocate memory for video device */
+	/* 分配面向 /dev/videoX 的 video_device。 */
 	vdev = video_device_alloc();
 	if (vdev == NULL) {
 		ret = -ENOMEM;
 		goto err_vdev;
 	}
-
+	/* 配置 V4L2 file operations 和 ioctl operations。 */
 	snprintf(vdev->name, sizeof(vdev->name), "mx6s-csi");
 
 	vdev->v4l2_dev		= &csi_dev->v4l2_dev;
@@ -1871,9 +2013,14 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 
 	csi_dev->vdev = vdev;
 
+	/* 让 file operations 可以通过 video_drvdata(file) 取回 csi_dev。 */
 	video_set_drvdata(csi_dev->vdev, csi_dev);
 	mutex_lock(&csi_dev->lock);
 
+	/*
+	 * 注册视频采集设备。VFL_TYPE_GRABBER 表示视频采集类型，-1 表示让
+	 * V4L2 自动分配 /dev/videoX 的次设备号。
+	 */
 	ret = video_register_device(csi_dev->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret < 0) {
 		video_device_release(csi_dev->vdev);
@@ -1881,7 +2028,10 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 		goto err_vdev;
 	}
 
-	/* install interrupt handler */
+	/*
+	 * 注册 CSI IRQ 处理函数。irqflags 为 0 表示使用 firmware/irqchip
+	 * 已描述的触发类型；dev_id 会传给中断处理函数。
+	 */
 	if (devm_request_irq(dev, csi_dev->irq, mx6s_csi_irq_handler,
 				0, "csi", (void *)csi_dev)) {
 		mutex_unlock(&csi_dev->lock);
@@ -1896,6 +2046,10 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err_irq;
 
+	/*
+	 * 启用 runtime PM。之后 open/close 路径可以通过 pm_runtime_get_sync()
+	 * 和 pm_runtime_put_sync_suspend() 平衡设备电源状态。
+	 */
 	pm_runtime_enable(csi_dev->dev);
 	return 0;
 
