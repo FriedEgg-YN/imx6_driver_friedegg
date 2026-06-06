@@ -28,3 +28,4 @@ Module.symvers
 # Local/private agent configuration
 .agents/
 AGENTS.md
+*.pdf
