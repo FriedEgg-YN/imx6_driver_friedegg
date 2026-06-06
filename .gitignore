@@ -24,3 +24,7 @@ Module.symvers
 .DS_Store
 *~
 *.swp
+
+# Local/private agent configuration
+.agents/
+AGENTS.md
