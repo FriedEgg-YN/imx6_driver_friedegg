@@ -1,6 +1,12 @@
 #ifndef AP3216C_H
 #define AP3216C_H
 
+#ifdef __KERNEL__
+#include <linux/ioctl.h>
+#else
+#include <sys/ioctl.h>
+#endif
+
 /*
  * AP3216C 3-in-1 ALS + PS + IRLED 传感器寄存器表。
  *
@@ -371,5 +377,71 @@
 #define AP3216C_PS_HIGH_TH_LOW_DEFAULT       0x00
 #define AP3216C_PS_HIGH_TH_HIGH_DEFAULT      0x80
 
+
+/* -------------------------------------------------------------------------- */
+/* Shared cdev ABI                                                            */
+/* -------------------------------------------------------------------------- */
+
+#define AP3216C_CH_ALS                       (1U << 0)
+#define AP3216C_CH_IR                        (1U << 1)
+#define AP3216C_CH_PS                        (1U << 2)
+
+#define AP3216C_EVT_ALS                      (1U << 0)
+#define AP3216C_EVT_PS                       (1U << 1)
+
+struct ap3216c_sample {
+    unsigned int valid_mask;
+    unsigned int overflow_mask;
+    unsigned int mode;
+    unsigned int event_status;
+
+    unsigned short ir_raw;
+    unsigned short als_raw;
+    unsigned short ps_raw;
+
+    unsigned int als_mlux;
+    unsigned char ps_object;
+    unsigned char reserved[3];
+};
+
+struct ap3216c_threshold {
+    unsigned int low;
+    unsigned int high;
+};
+
+struct ap3216c_config {
+    unsigned int mode;
+    unsigned int event_mask;
+    unsigned int als_range;
+    unsigned int als_persist;
+    unsigned int als_calibration;
+    unsigned int ps_integration;
+    unsigned int ps_gain;
+    unsigned int ps_persist;
+    struct ap3216c_threshold als_th;
+    struct ap3216c_threshold ps_th;
+};
+
+struct ap3216c_stats {
+    unsigned int irq_count;
+    unsigned int event_count;
+    unsigned int als_event_count;
+    unsigned int ps_event_count;
+    unsigned int ignored_irq_count;
+    unsigned int read_count;
+    unsigned int last_status;
+    struct ap3216c_sample last_sample;
+};
+
+#define AP3216C_IOC_MAGIC                    'A'
+
+#define AP3216C_CMD_SET_MODE                 _IOW(AP3216C_IOC_MAGIC, 0x01, unsigned int)
+#define AP3216C_CMD_GET_CONFIG               _IOR(AP3216C_IOC_MAGIC, 0x02, struct ap3216c_config)
+#define AP3216C_CMD_SET_CONFIG               _IOW(AP3216C_IOC_MAGIC, 0x03, struct ap3216c_config)
+#define AP3216C_CMD_SET_EVENT_MASK           _IOW(AP3216C_IOC_MAGIC, 0x04, unsigned int)
+#define AP3216C_CMD_SET_ALS_RANGE            _IOW(AP3216C_IOC_MAGIC, 0x05, unsigned int)
+#define AP3216C_CMD_SET_ALS_TH               _IOW(AP3216C_IOC_MAGIC, 0x06, struct ap3216c_threshold)
+#define AP3216C_CMD_SET_PS_TH                _IOW(AP3216C_IOC_MAGIC, 0x07, struct ap3216c_threshold)
+#define AP3216C_CMD_GET_STATS                _IOR(AP3216C_IOC_MAGIC, 0x08, struct ap3216c_stats)
 
 #endif
