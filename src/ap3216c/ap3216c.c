@@ -3,11 +3,19 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <asm/uaccess.h>
 #include "ap3216c.h"
 
 #define AP3216C_CNT 1
 #define AP3216C_NAME "ap3216c"
+
+struct ap3216c_threshold {
+    unsigned int low;
+    unsigned int high;
+};
 
 struct ap3216c_dev
 {
@@ -17,6 +25,21 @@ struct ap3216c_dev
     struct device *device;
     int major;
     struct i2c_client *client;
+
+    int irq;
+    bool irq_requested;
+
+    struct mutex bus_lock;
+    spinlock_t data_lock;
+
+    unsigned short ir;
+    unsigned short als;
+    unsigned short ps;
+
+    struct ap3216c_threshold ps_th;
+    struct ap3216c_threshold als_th;
+    unsigned int irq_count;
+    unsigned int last_status;
 };
 
 static struct ap3216c_dev ap3216c_device;
@@ -86,18 +109,81 @@ static int ap3216c_write_reg(struct ap3216c_dev *dev, u8 reg, u8 val)
     return ap3216c_write_regs(dev, reg, &val, 1);
 }
 
-static int ap3216c_read_data_regs(struct ap3216c_dev *dev, u8 raw[6])
+static int ap3216c_read_alspsir(struct ap3216c_dev *dev)
 {
     int i;
     int ret;
+    u8 raw[6];
+    unsigned short ir, als, ps;
+    unsigned long flags;
 
     for (i = 0; i < 6; i++) {
-        ret = ap3216c_read_regs(dev, AP3216C_IRDATALOW + i, &raw[i], 1);
+        ret = ap3216c_read_regs(dev, AP3216C_IR_DATA_LOW + i, &raw[i], 1);
         if (ret)
             return ret;
     }
 
+    if (raw[0] & AP3216C_IR_OVERFLOW_BIT)
+        ir = 0;
+    else
+        ir = ((unsigned short)raw[1] << 2) | (raw[0] & AP3216C_IR_DATA_LOW_MASK); /* IR */
+    als = ((unsigned short)raw[3] << 8) | raw[2];
+    if (raw[4] & AP3216C_PS_IR_OVERFLOW_BIT)
+        ps = 0;
+    else
+        ps = ((unsigned short)(raw[5] & AP3216C_PS_DATA_HIGH_MASK) << 4) | (raw[4] & AP3216C_PS_DATA_LOW_MASK); /* PS */
+
+    spin_lock_irqsave(&dev->data_lock, flags);
+    dev->ir = ir;
+    dev->als = als;
+    dev->ps = ps;
+    spin_unlock_irqrestore(&dev->data_lock, flags);
+    
     return 0;
+}
+
+static int ap3216c_write_ps_threshold_locked(struct ap3216c_dev *dev,
+                                             unsigned int low,
+                                             unsigned int high)
+{
+    int ret;
+
+    if (low > high || high > AP3216C_PS_MAX_VALUE)
+        return -EINVAL;
+
+    ret = ap3216c_write_reg(dev, AP3216C_PS_LOW_TH_LOW, low & AP3216C_PS_TH_LOW_MASK);
+    if (ret)
+        return ret;
+    ret = ap3216c_write_reg(dev, AP3216C_PS_LOW_TH_HIGH, (low >> 2) & AP3216C_PS_TH_HIGH_MASK);
+    if (ret)
+        return ret;
+
+    ret = ap3216c_write_reg(dev, AP3216C_PS_HIGH_TH_LOW, high & AP3216C_PS_TH_LOW_MASK);
+    if (ret)
+        return ret;
+    return ap3216c_write_reg(dev, AP3216C_PS_HIGH_TH_HIGH, (high >> 2) & AP3216C_PS_TH_HIGH_MASK);
+}
+
+static int ap3216c_write_als_threshold_locked(struct ap3216c_dev *dev,
+                                              unsigned int low,
+                                              unsigned int high)
+{
+    int ret;
+
+    if (low > high || high > AP3216C_ALS_MAX_VALUE)
+        return -EINVAL;
+
+    ret = ap3216c_write_reg(dev, AP3216C_ALS_LOW_TH_LOW, low & AP3216C_ALS_TH_LOW_MASK);
+    if (ret)
+        return ret;
+    ret = ap3216c_write_reg(dev, AP3216C_ALS_LOW_TH_HIGH, (low >> 8) & AP3216C_ALS_TH_HIGH_MASK);
+    if (ret)
+        return ret;
+
+    ret = ap3216c_write_reg(dev, AP3216C_ALS_HIGH_TH_LOW, high & AP3216C_ALS_TH_LOW_MASK);
+    if (ret)
+        return ret;
+    return ap3216c_write_reg(dev, AP3216C_ALS_HIGH_TH_HIGH, (high >> 8) & AP3216C_ALS_TH_HIGH_MASK);
 }
 
 static int ap3216c_hw_init(struct ap3216c_dev *dev)
@@ -105,7 +191,7 @@ static int ap3216c_hw_init(struct ap3216c_dev *dev)
     int ret;
     struct i2c_client *client = dev->client;
 
-    ret = ap3216c_write_reg(dev, AP3216C_SYSTEMCONG, AP3216C_SW_RESET); // 软复位
+    ret = ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG, AP3216C_MODE_SW_RESET); // 软复位
     if (ret)
     {
         dev_err(&client->dev, "reset sensor failed: ret=%d\n", ret);
@@ -113,26 +199,25 @@ static int ap3216c_hw_init(struct ap3216c_dev *dev)
     }
 
     msleep(50);
-    ret = ap3216c_write_reg(dev, AP3216C_SYSTEMCONG, AP3216C_MODE_ALS_PS_IR);
+    ret = ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG, AP3216C_MODE_ALS_PS_IR);
     if (ret)
     {
         dev_err(&client->dev, "mode init failed: ret=%d\n", ret);
         return ret;
     }
 
-    u8 sys = 0;
-    u8 alscfg = 0;
-    u8 pscfg = 0;
-    u8 intst = 0;
+    // u8 sys = 0;
+    // u8 alscfg = 0;
+    // u8 pscfg = 0;
+    // u8 intst = 0;
+    // ap3216c_read_regs(dev, AP3216C_SYSTEM_CONFIG, &sys, 1);
+    // ap3216c_read_regs(dev, AP3216C_INT_STATUS, &intst, 1);
+    // ap3216c_read_regs(dev, AP3216C_ALS_CONFIG, &alscfg, 1);
+    // ap3216c_read_regs(dev, AP3216C_PS_CONFIG, &pscfg, 1);
+    // dev_info(&client->dev,
+    //          "cfg: sys=0x%02x int=0x%02x alscfg=0x%02x pscfg=0x%02x\n",
+    //          sys, intst, alscfg, pscfg);
 
-    ap3216c_read_regs(dev, AP3216C_SYSTEMCONG, &sys, 1);
-    ap3216c_read_regs(dev, AP3216C_INTSTATUS, &intst, 1);
-    ap3216c_read_regs(dev, AP3216C_ALSCONFIG, &alscfg, 1);
-    ap3216c_read_regs(dev, AP3216C_PSCONFIG, &pscfg, 1);
-
-    dev_info(&client->dev,
-             "cfg: sys=0x%02x int=0x%02x alscfg=0x%02x pscfg=0x%02x\n",
-             sys, intst, alscfg, pscfg);
     return ret;
 }
 
@@ -154,8 +239,8 @@ static int ap3216c_open(struct inode *inode, struct file *filp)
 static ssize_t ap3216c_read(struct file *filp, char __user *buf, size_t cnt, loff_t *off)
 {
     int ret;
-    u8 raw[6];
     unsigned short data[3];
+    unsigned long flags;
 
     struct ap3216c_dev *dev = (struct ap3216c_dev *)filp->private_data;
     struct i2c_client *client = (struct i2c_client *)dev->client;
@@ -166,25 +251,16 @@ static ssize_t ap3216c_read(struct file *filp, char __user *buf, size_t cnt, lof
         return -EINVAL;
     }
 
-    ret = ap3216c_read_data_regs(dev, raw);
-    // ret = ap3216c_read_regs(dev, AP3216C_IRDATALOW, raw, sizeof(raw));
+    ret = ap3216c_read_alspsir(dev);
+    // ret = ap3216c_read_regs(dev, AP3216C_IR_DATA_LOW, raw, sizeof(raw));
     if (ret)
         return ret;
 
-    dev_info(&client->dev,
-             "raw=%02x %02x %02x %02x %02x %02x ir_of=%d ps_ir_of=%d obj=%d\n",
-             raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-             !!(raw[0] & 0x80), !!(raw[4] & 0x40), !!(raw[4] & 0x80));
-
-    if (raw[0] & AP3216C_IR_OF_BIT)
-        data[0] = 0;
-    else
-        data[0] = ((unsigned short)raw[1] << 2) | (raw[0] & AP3216C_IR_DATA_L_MASK); /* IR */
-    data[1] = ((unsigned short)raw[3] << 8) | raw[2];
-    if (raw[4] & AP3216C_PS_OF_BIT)
-        data[2] = 0;
-    else
-        data[2] = ((unsigned short)(raw[5] & AP3216C_PS_DATA_H_MASK) << 4) | (raw[4] & AP3216C_PS_DATA_L_MASK); /* PS */
+    spin_lock_irqsave(&dev->data_lock, flags);
+    data[0] = dev->ir;
+    data[1] = dev->als;
+    data[2] = dev->ps;
+    spin_unlock_irqrestore(&dev->data_lock, flags);
 
     if (copy_to_user(buf, data, sizeof(data)))
     {
@@ -195,7 +271,7 @@ static ssize_t ap3216c_read(struct file *filp, char __user *buf, size_t cnt, lof
     return sizeof(data);
 }
 
-static long ap3216c_unlocked_iotcl(struct file *filp, unsigned int cmd, unsigned long arg)
+static long ap3216c_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     return 0;
 }
@@ -219,7 +295,7 @@ static const struct file_operations ap3216c_ops = {
     .owner = THIS_MODULE,
     .open = ap3216c_open,
     .read = ap3216c_read,
-    .unlocked_ioctl = ap3216c_unlocked_iotcl,
+    .unlocked_ioctl = ap3216c_unlocked_ioctl,
     .release = ap3216c_release,
 };
 
