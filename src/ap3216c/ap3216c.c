@@ -1,34 +1,149 @@
+#include <linux/types.h>
 #include <linux/bitops.h>
-#include <linux/debugfs.h>
-#include <linux/delay.h>
-#include <linux/err.h>
-#include <linux/i2c.h>
-#include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/mutex.h>
-#include <linux/seq_file.h>
-#include <linux/slab.h>
 #include <linux/string.h>
-
+#include <linux/delay.h>
+#include <linux/ide.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/iio/events.h>
+#include <linux/module.h>
+#include <linux/errno.h>
+#include <linux/gpio.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
+#include <linux/of_gpio.h>
+#include <linux/semaphore.h>
+#include <linux/timer.h>
+#include <linux/i2c.h>
+#include <linux/math64.h>
+#include <asm/mach/map.h>
+#include <asm/uaccess.h>
+#include <asm/io.h>
+#include <linux/regmap.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/iio/trigger_consumer.h>
+#include <linux/iio/buffer.h>
+#include <linux/iio/triggered_buffer.h>
+#include <linux/unaligned/be_byteshift.h>
+#include <linux/iio/trigger.h>
 
-#include "ap3216c.h"
+/* Device constants */
+#define AP3216C_NAME "ap3216c"
+#define AP3216C_ADDR 0x1E
 
-static const unsigned int ap3216c_als_scale_micro[] = {
-	350000, 78800, 19700, 4900,
-};
+#define AP3216C_U10_MAX 1023
+#define AP3216C_U16_MAX 65535
+#define AP3216C_IR_MAX_VALUE AP3216C_U10_MAX
+#define AP3216C_PS_MAX_VALUE AP3216C_U10_MAX
+#define AP3216C_ALS_MAX_VALUE AP3216C_U16_MAX
 
-static const unsigned int ap3216c_als_ranges[] = {
-	AP3216C_ALS_RANGE_20661_LUX,
-	AP3216C_ALS_RANGE_5162_LUX,
-	AP3216C_ALS_RANGE_1291_LUX,
-	AP3216C_ALS_RANGE_323_LUX,
-};
+/* System registers */
+#define AP3216C_SYSTEM_CONFIG 0x00
+#define AP3216C_SYSTEM_MODE_MASK 0x07
+#define AP3216C_MODE_POWER_DOWN 0x00
+#define AP3216C_MODE_ALS_ONLY 0x01
+#define AP3216C_MODE_PS_IR_ONLY 0x02
+#define AP3216C_MODE_ALS_PS_IR 0x03
+#define AP3216C_MODE_SW_RESET 0x04
 
-static const char * const ap3216c_mode_names[] = {
+#define AP3216C_INT_STATUS 0x01
+#define AP3216C_INTSTATUS_PS_BIT 0x02
+#define AP3216C_INTSTATUS_ALS_BIT 0x01
+#define AP3216C_INT_STATUS_MASK \
+	(AP3216C_INTSTATUS_PS_BIT | AP3216C_INTSTATUS_ALS_BIT)
+
+#define AP3216C_INT_CLEAR_MANNER 0x02
+#define AP3216C_INT_CLEAR_BY_READ 0x00
+#define AP3216C_INT_CLEAR_BY_WRITE 0x01
+
+/* Data registers */
+#define AP3216C_IR_DATA_LOW 0x0A
+#define AP3216C_IR_OVERFLOW_BIT 0x80
+#define AP3216C_IR_DATA_LOW_MASK 0x03
+#define AP3216C_IR_DATA_HIGH 0x0B
+
+#define AP3216C_ALS_DATA_LOW 0x0C
+#define AP3216C_ALS_DATA_HIGH 0x0D
+
+#define AP3216C_PS_DATA_LOW 0x0E
+#define AP3216C_PS_OBJECT_BIT 0x80
+#define AP3216C_PS_IR_OVERFLOW_BIT 0x40
+#define AP3216C_PS_DATA_LOW_MASK 0x0F
+#define AP3216C_PS_DATA_HIGH 0x0F
+#define AP3216C_PS_DATA_HIGH_MASK 0x3F
+
+/* ALS registers */
+#define AP3216C_ALS_CONFIG 0x10
+#define AP3216C_ALS_CONFIG_DEFAULT 0x00
+#define AP3216C_ALS_RANGE_MASK 0x30
+#define AP3216C_ALS_RANGE_SHIFT 4
+#define AP3216C_ALS_RANGE_20661_LUX 0x00
+#define AP3216C_ALS_RANGE_5162_LUX 0x10
+#define AP3216C_ALS_RANGE_1291_LUX 0x20
+#define AP3216C_ALS_RANGE_323_LUX 0x30
+#define AP3216C_ALS_PERSIST_MASK 0x0F
+#define AP3216C_ALS_PERSIST_DEFAULT 0x00
+#define AP3216C_ALS_PERSIST_MAX 0x0F
+
+#define AP3216C_ALS_CALIBRATION 0x19
+#define AP3216C_ALS_CALIBRATION_DEFAULT 0x40
+#define AP3216C_ALS_CALIBRATION_MASK 0xFF
+
+#define AP3216C_ALS_LOW_TH_LOW 0x1A
+#define AP3216C_ALS_LOW_TH_HIGH 0x1B
+#define AP3216C_ALS_LOW_TH_DEFAULT 0x0000
+#define AP3216C_ALS_TH_LOW_MASK 0xFF
+#define AP3216C_ALS_TH_HIGH_MASK 0xFF
+
+#define AP3216C_ALS_HIGH_TH_LOW 0x1C
+#define AP3216C_ALS_HIGH_TH_HIGH 0x1D
+#define AP3216C_ALS_HIGH_TH_DEFAULT 0xFFFF
+
+/* PS registers */
+#define AP3216C_PS_CONFIG 0x20
+#define AP3216C_PS_CONFIG_DEFAULT 0x05
+#define AP3216C_PS_LED_CTRL 0x21
+#define AP3216C_PS_INTEGRATION_MASK 0xF0
+#define AP3216C_PS_INTEGRATION_1T 0x00
+#define AP3216C_PS_GAIN_MASK 0x0C
+#define AP3216C_PS_GAIN_X2 0x04
+#define AP3216C_PS_PERSIST_MASK 0x03
+#define AP3216C_PS_PERSIST_1_TIME 0x00
+#define AP3216C_PS_PERSIST_2_TIMES 0x01
+
+#define AP3216C_PS_INT_MODE 0x22
+#define AP3216C_PS_INT_ALGO_MASK 0x01
+#define AP3216C_PS_INT_ALGO_ZONE 0x00
+#define AP3216C_PS_INT_ALGO_HYSTERESIS 0x01
+
+#define AP3216C_PS_LOW_TH_LOW 0x2A
+#define AP3216C_PS_LOW_TH_HIGH 0x2B
+#define AP3216C_PS_TH_LOW_MASK 0x03
+#define AP3216C_PS_TH_HIGH_MASK 0xFF
+
+#define AP3216C_PS_HIGH_TH_LOW 0x2C
+#define AP3216C_PS_HIGH_TH_HIGH 0x2D
+
+/* Internal driver masks */
+#define AP3216C_SAMPLE_ALS BIT(0)
+#define AP3216C_SAMPLE_IR BIT(1)
+#define AP3216C_SAMPLE_PS BIT(2)
+#define AP3216C_SAMPLE_ALL \
+	(AP3216C_SAMPLE_ALS | AP3216C_SAMPLE_IR | AP3216C_SAMPLE_PS)
+
+#define AP3216C_EVENT_ALS_RISING BIT(0)
+#define AP3216C_EVENT_ALS_FALLING BIT(1)
+#define AP3216C_EVENT_PS_RISING BIT(2)
+#define AP3216C_EVENT_PS_FALLING BIT(3)
+#define AP3216C_EVENT_ALS_MASK \
+	(AP3216C_EVENT_ALS_RISING | AP3216C_EVENT_ALS_FALLING)
+#define AP3216C_EVENT_PS_MASK \
+	(AP3216C_EVENT_PS_RISING | AP3216C_EVENT_PS_FALLING)
+
+/* Static lookup tables */
+static const char *const ap3216c_mode_names[] = {
 	"power_down",
 	"als",
 	"ps_ir",
@@ -42,911 +157,131 @@ static const unsigned int ap3216c_mode_values[] = {
 	AP3216C_MODE_ALS_PS_IR,
 };
 
-static unsigned int ap3216c_mode_to_channels(unsigned int mode)
+static const char *const ap3216c_ps_int_algo_names[] = {
+	"zone",
+	"hysteresis",
+};
+
+static const unsigned int ap3216c_ps_int_algo_values[] = {
+	AP3216C_PS_INT_ALGO_ZONE,
+	AP3216C_PS_INT_ALGO_HYSTERESIS,
+};
+
+/*
+ * ap3216c环境光传感器分辨率,扩大1000000倍,
+ * 量程依次为0～20661，0～5162，0～1291，0～323。单位：lux
+ */
+static const int als_scale_ap3216c[] = {315000, 78800, 19700, 4900};
+
+/* Private data structures */
+struct ap3216c_threshold
 {
-	switch (mode) {
+	u16 low;
+	u16 high;
+};
+
+struct ap3216c_sample
+{
+	u16 als;
+	u16 ir;
+	u16 ps;
+	bool ps_object;
+	bool ir_overflow;
+	bool ps_overflow;
+};
+
+struct ap3216c_dev
+{
+	struct i2c_client *client; /* i2c 设备 */
+	struct regmap *regmap;	   /* regmap */
+	struct regmap_config regmap_config;
+	struct mutex lock;
+	struct iio_trigger *trig;
+	u8 mode;
+	int irq;
+	unsigned int event_enable_mask;
+	struct ap3216c_threshold als_th;
+	struct ap3216c_threshold ps_th;
+	u8 ps_int_algo;
+	u8 last_int_status;
+};
+
+/* Generic mapping helpers */
+static int ap3216c_mode_to_index(unsigned int mode)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ap3216c_mode_values); i++)
+	{
+		if (ap3216c_mode_values[i] == mode)
+			return i;
+	}
+
+	return 0;
+}
+
+static unsigned int ap3216c_mode_to_sample_mask(u8 mode)
+{
+	switch (mode)
+	{
 	case AP3216C_MODE_POWER_DOWN:
 		return 0;
+
 	case AP3216C_MODE_ALS_ONLY:
 		return AP3216C_SAMPLE_ALS;
+
 	case AP3216C_MODE_PS_IR_ONLY:
 		return AP3216C_SAMPLE_PS | AP3216C_SAMPLE_IR;
+
 	case AP3216C_MODE_ALS_PS_IR:
-		return AP3216C_SAMPLE_ALS | AP3216C_SAMPLE_PS | AP3216C_SAMPLE_IR;
+		return AP3216C_SAMPLE_ALL;
+
 	default:
 		return 0;
 	}
 }
 
-static unsigned int ap3216c_channel_to_sample_bit(unsigned long address)
+static unsigned int ap3216c_chan_to_sample_mask(const struct iio_chan_spec *chan)
 {
-	switch (address) {
-	case AP3216C_CHAN_ALS:
+	switch (chan->address)
+	{
+	case AP3216C_ALS_DATA_LOW:
 		return AP3216C_SAMPLE_ALS;
-	case AP3216C_CHAN_IR:
+	case AP3216C_IR_DATA_LOW:
 		return AP3216C_SAMPLE_IR;
-	case AP3216C_CHAN_PS:
+	case AP3216C_PS_DATA_LOW:
 		return AP3216C_SAMPLE_PS;
 	default:
 		return 0;
 	}
 }
 
-static int ap3216c_mode_to_index(unsigned int mode)
+static int ap3216c_channel_read_mask(u8 mode,
+									 const struct iio_chan_spec *chan,
+									 unsigned int *read_mask)
 {
-	size_t i;
+	unsigned int requested = ap3216c_chan_to_sample_mask(chan);
+	unsigned int active = ap3216c_mode_to_sample_mask(mode);
 
-	for (i = 0; i < ARRAY_SIZE(ap3216c_mode_values); i++)
-		if (ap3216c_mode_values[i] == mode)
-			return i;
+	if (!requested)
+		return -EINVAL;
 
+	if (!(active & requested))
+		return -EAGAIN;
+
+	*read_mask = requested;
 	return 0;
-}
-
-static int ap3216c_validate_mode(unsigned int mode)
-{
-	switch (mode) {
-	case AP3216C_MODE_POWER_DOWN:
-	case AP3216C_MODE_ALS_ONLY:
-	case AP3216C_MODE_PS_IR_ONLY:
-	case AP3216C_MODE_ALS_PS_IR:
-		return 0;
-	default:
-		return -EINVAL;
-	}
-}
-
-static int ap3216c_validate_range(unsigned int range)
-{
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(ap3216c_als_ranges); i++)
-		if (ap3216c_als_ranges[i] == range)
-			return 0;
-
-	return -EINVAL;
-}
-
-static int ap3216c_validate_config(const struct ap3216c_config *cfg)
-{
-	int ret;
-
-	ret = ap3216c_validate_mode(cfg->mode);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_validate_range(cfg->als_range);
-	if (ret)
-		return ret;
-
-	if (cfg->als_persist > AP3216C_ALS_PERSIST_MAX)
-		return -EINVAL;
-	if (cfg->als_calibration > AP3216C_ALS_CALIBRATION_MASK)
-		return -EINVAL;
-	if (cfg->ps_integration & ~AP3216C_PS_INTEGRATION_MASK)
-		return -EINVAL;
-	if (cfg->ps_gain & ~AP3216C_PS_GAIN_MASK)
-		return -EINVAL;
-	if (cfg->ps_persist & ~AP3216C_PS_PERSIST_MASK)
-		return -EINVAL;
-	if (cfg->als_th.low > cfg->als_th.high ||
-	    cfg->als_th.high > AP3216C_ALS_MAX_VALUE)
-		return -EINVAL;
-	if (cfg->ps_th.low > cfg->ps_th.high ||
-	    cfg->ps_th.high > AP3216C_PS_MAX_VALUE)
-		return -EINVAL;
-
-	return 0;
-}
-
-static void ap3216c_fill_default_config(struct ap3216c_config *cfg)
-{
-	memset(cfg, 0, sizeof(*cfg));
-	cfg->mode = AP3216C_MODE_ALS_PS_IR;
-	cfg->als_range = AP3216C_ALS_RANGE_20661_LUX;
-	cfg->als_persist = AP3216C_ALS_PERSIST_DEFAULT;
-	cfg->als_calibration = AP3216C_ALS_CALIBRATION_DEFAULT;
-	cfg->ps_integration = AP3216C_PS_INTEGRATION_1T;
-	cfg->ps_gain = AP3216C_PS_GAIN_X2;
-	cfg->ps_persist = AP3216C_PS_PERSIST_2_TIMES;
-	cfg->als_th.low = AP3216C_ALS_LOW_TH_DEFAULT;
-	cfg->als_th.high = AP3216C_ALS_HIGH_TH_DEFAULT;
-	cfg->ps_th.low = 100;
-	cfg->ps_th.high = 200;
-}
-
-/**
- * ap3216c_read_regs() - read a consecutive register block over I2C
- * @dev: AP3216C device state.
- * @reg: First register address to read.
- * @buf: Destination buffer.
- * @len: Number of bytes to read, must be positive.
- *
- * Context: caller serializes hardware access with bus_lock when the read is
- * part of a larger hardware transaction.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-static int ap3216c_read_regs(struct ap3216c_dev *dev, u8 reg, void *buf, int len)
-{
-	int ret;
-	struct i2c_msg msg[2];
-	struct i2c_client *client = dev->client;
-
-	if (len <= 0)
-		return -EINVAL;
-
-	msg[0].addr = client->addr;
-	msg[0].flags = 0;
-	msg[0].buf = &reg;
-	msg[0].len = 1;
-
-	msg[1].addr = client->addr;
-	msg[1].flags = I2C_M_RD;
-	msg[1].buf = buf;
-	msg[1].len = len;
-
-	ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
-	if (ret == ARRAY_SIZE(msg))
-		return 0;
-
-	dev_err(&client->dev, "i2c read failed: ret=%d reg=0x%02x len=%d\n",
-		ret, reg, len);
-	return ret < 0 ? ret : -EREMOTEIO;
-}
-
-/**
- * ap3216c_write_regs() - write a consecutive register block over I2C
- * @dev: AP3216C device state.
- * @reg: First register address to write.
- * @buf: Source buffer.
- * @len: Number of payload bytes to write.
- *
- * Context: caller serializes hardware access with bus_lock when the write is
- * part of a larger hardware transaction.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-static int ap3216c_write_regs(struct ap3216c_dev *dev, u8 reg,
-				      const u8 *buf, u8 len)
-{
-	int ret;
-	u8 tmp[32];
-	struct i2c_msg msg;
-	struct i2c_client *client = dev->client;
-
-	if (len > sizeof(tmp) - 1)
-		return -EINVAL;
-
-	tmp[0] = reg;
-	memcpy(&tmp[1], buf, len);
-
-	msg.addr = client->addr;
-	msg.flags = 0;
-	msg.buf = tmp;
-	msg.len = len + 1;
-
-	ret = i2c_transfer(client->adapter, &msg, 1);
-	if (ret == 1)
-		return 0;
-
-	dev_err(&client->dev, "i2c write failed: ret=%d reg=0x%02x len=%u\n",
-		ret, reg, len);
-	return ret < 0 ? ret : -EREMOTEIO;
-}
-
-static int ap3216c_write_reg(struct ap3216c_dev *dev, u8 reg, u8 val)
-{
-	return ap3216c_write_regs(dev, reg, &val, 1);
-}
-
-/**
- * ap3216c_update_bits_locked() - update selected bits in a register
- * @dev: AP3216C device state.
- * @reg: Register address.
- * @mask: Bits to update.
- * @val: New bit values before masking.
- *
- * Context: caller must hold bus_lock.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-static int ap3216c_update_bits_locked(struct ap3216c_dev *dev,
-				       u8 reg, u8 mask, u8 val)
-{
-	int ret;
-	u8 old_val;
-	u8 new_val;
-
-	ret = ap3216c_read_regs(dev, reg, &old_val, 1);
-	if (ret)
-		return ret;
-
-	new_val = (old_val & ~mask) | (val & mask);
-	if (new_val == old_val)
-		return 0;
-
-	return ap3216c_write_reg(dev, reg, new_val);
-}
-
-static int ap3216c_als_range_index(unsigned int range)
-{
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(ap3216c_als_ranges); i++)
-		if (ap3216c_als_ranges[i] == range)
-			return i;
-
-	return 0;
-}
-
-static int ap3216c_scale_to_range(int val, int val2, unsigned int *range)
-{
-	size_t i;
-
-	if (val != 0 || val2 < 0)
-		return -EINVAL;
-
-	for (i = 0; i < ARRAY_SIZE(ap3216c_als_scale_micro); i++) {
-		if (val2 == ap3216c_als_scale_micro[i]) {
-			*range = ap3216c_als_ranges[i];
-			return 0;
-		}
-	}
-
-	return -EINVAL;
-}
-
-static int ap3216c_calibration_to_reg(int val, int val2, unsigned int *reg)
-{
-	int calibration;
-
-	if (val < 0 || val > 3 || val2 < 0 || val2 >= 1000000)
-		return -EINVAL;
-
-	calibration = val * 64 + DIV_ROUND_CLOSEST(val2 * 64, 1000000);
-	if (calibration < 0 || calibration > AP3216C_ALS_CALIBRATION_MASK)
-		return -EINVAL;
-
-	*reg = calibration;
-	return 0;
-}
-
-#ifdef CONFIG_AP3216C_STATS
-/**
- * ap3216c_als_raw_to_mlux() - convert ALS raw data to milli-lux
- * @raw: Raw ALS ADC count.
- * @range: Cached AP3216C ALS range register bits.
- * @calibration: Cached AP3216C ALS calibration register value.
- *
- * Return: Converted milli-lux using integer arithmetic.
- */
-static u32 ap3216c_als_raw_to_mlux(u16 raw, unsigned int range,
-					   unsigned int calibration)
-{
-	unsigned int idx = ap3216c_als_range_index(range);
-	u64 mlux;
-
-	mlux = raw;
-	mlux *= ap3216c_als_scale_micro[idx];
-	mlux *= calibration;
-
-	return (u32)DIV_ROUND_CLOSEST_ULL(mlux, 64 * 1000);
-}
-#endif
-
-/**
- * ap3216c_read_sample_locked() - read and decode AP3216C raw sample registers
- * @dev: AP3216C device state.
- * @sample: Destination sample cache.
- * @channels: Bitmask of channels expected to be valid in the current mode.
- * @event_status: Interrupt status bits associated with this sample, or 0.
- *
- * Context: caller must hold bus_lock. The chip latches each channel's high
- * byte when its low byte is read, so read low/high as separate register pairs.
- * Reading ALS high and PS high also clears pending AP3216C interrupts when
- * configured for clear-by-read.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-static int ap3216c_read_pair_locked(struct ap3216c_dev *dev,
-				    u8 low_reg, u8 high_reg,
-				    u8 *low, u8 *high)
-{
-	int ret;
-
-	ret = ap3216c_read_regs(dev, low_reg, low, 1);
-	if (ret)
-		return ret;
-
-	return ap3216c_read_regs(dev, high_reg, high, 1);
-}
-
-static int ap3216c_read_sample_locked(struct ap3216c_dev *dev,
-				      struct ap3216c_raw_sample *sample,
-				      unsigned int channels,
-				      unsigned int event_status)
-{
-	int ret;
-	u8 low;
-	u8 high;
-
-	memset(sample, 0, sizeof(*sample));
-	sample->valid_mask = channels;
-	sample->event_status = event_status;
-
-	if (channels & AP3216C_SAMPLE_IR) {
-		ret = ap3216c_read_pair_locked(dev, AP3216C_IR_DATA_LOW,
-					       AP3216C_IR_DATA_HIGH,
-					       &low, &high);
-		if (ret)
-			return ret;
-
-		if (low & AP3216C_IR_OVERFLOW_BIT) {
-			sample->overflow_mask |= AP3216C_SAMPLE_IR;
-		} else {
-			sample->ir_raw = ((u16)high << 2) |
-				(low & AP3216C_IR_DATA_LOW_MASK);
-		}
-	}
-
-	if (channels & AP3216C_SAMPLE_ALS) {
-		ret = ap3216c_read_pair_locked(dev, AP3216C_ALS_DATA_LOW,
-					       AP3216C_ALS_DATA_HIGH,
-					       &low, &high);
-		if (ret)
-			return ret;
-
-		sample->als_raw = ((u16)high << 8) | low;
-	}
-
-	if (channels & AP3216C_SAMPLE_PS) {
-		ret = ap3216c_read_pair_locked(dev, AP3216C_PS_DATA_LOW,
-					       AP3216C_PS_DATA_HIGH,
-					       &low, &high);
-		if (ret)
-			return ret;
-
-		sample->ps_object = !!((low | high) & AP3216C_PS_OBJECT_BIT);
-		if ((low | high) & AP3216C_PS_IR_OVERFLOW_BIT) {
-			sample->overflow_mask |= AP3216C_SAMPLE_PS;
-		} else {
-			sample->ps_raw = ((u16)(high & AP3216C_PS_DATA_HIGH_MASK) << 4) |
-				(low & AP3216C_PS_DATA_LOW_MASK);
-		}
-	}
-
-	return 0;
-}
-
-static int ap3216c_clear_pending_events_locked(struct ap3216c_dev *dev)
-{
-	u8 low;
-	u8 high;
-	int ret;
-
-	ret = ap3216c_read_pair_locked(dev, AP3216C_ALS_DATA_LOW,
-				       AP3216C_ALS_DATA_HIGH, &low, &high);
-	if (ret)
-		return ret;
-
-	return ap3216c_read_pair_locked(dev, AP3216C_PS_DATA_LOW,
-					AP3216C_PS_DATA_HIGH, &low, &high);
-}
-
-static void ap3216c_clear_pending_events_best_effort_locked(struct ap3216c_dev *dev)
-{
-	int ret;
-
-	ret = ap3216c_clear_pending_events_locked(dev);
-	if (ret)
-		dev_warn(&dev->client->dev,
-			 "clear pending events failed: ret=%d\n", ret);
-}
-
-static int ap3216c_write_ps_threshold_locked(struct ap3216c_dev *dev,
-					     unsigned int low,
-					     unsigned int high)
-{
-	int ret;
-
-	if (low > high || high > AP3216C_PS_MAX_VALUE)
-		return -EINVAL;
-
-	ret = ap3216c_write_reg(dev, AP3216C_PS_LOW_TH_LOW,
-				  low & AP3216C_PS_TH_LOW_MASK);
-	if (ret)
-		return ret;
-	ret = ap3216c_write_reg(dev, AP3216C_PS_LOW_TH_HIGH,
-				  (low >> 2) & AP3216C_PS_TH_HIGH_MASK);
-	if (ret)
-		return ret;
-	ret = ap3216c_write_reg(dev, AP3216C_PS_HIGH_TH_LOW,
-				  high & AP3216C_PS_TH_LOW_MASK);
-	if (ret)
-		return ret;
-
-	return ap3216c_write_reg(dev, AP3216C_PS_HIGH_TH_HIGH,
-				       (high >> 2) & AP3216C_PS_TH_HIGH_MASK);
-}
-
-static int ap3216c_write_als_threshold_locked(struct ap3216c_dev *dev,
-					      unsigned int low,
-					      unsigned int high)
-{
-	int ret;
-
-	if (low > high || high > AP3216C_ALS_MAX_VALUE)
-		return -EINVAL;
-
-	ret = ap3216c_write_reg(dev, AP3216C_ALS_LOW_TH_LOW,
-				  low & AP3216C_ALS_TH_LOW_MASK);
-	if (ret)
-		return ret;
-	ret = ap3216c_write_reg(dev, AP3216C_ALS_LOW_TH_HIGH,
-				  (low >> 8) & AP3216C_ALS_TH_HIGH_MASK);
-	if (ret)
-		return ret;
-	ret = ap3216c_write_reg(dev, AP3216C_ALS_HIGH_TH_LOW,
-				  high & AP3216C_ALS_TH_LOW_MASK);
-	if (ret)
-		return ret;
-
-	return ap3216c_write_reg(dev, AP3216C_ALS_HIGH_TH_HIGH,
-				       (high >> 8) & AP3216C_ALS_TH_HIGH_MASK);
-}
-
-static int ap3216c_program_als_config_locked(struct ap3216c_dev *dev,
-					     const struct ap3216c_config *cfg)
-{
-	int ret;
-	u8 val = cfg->als_range | (cfg->als_persist & AP3216C_ALS_PERSIST_MASK);
-
-	ret = ap3216c_update_bits_locked(dev, AP3216C_ALS_CONFIG,
-					  AP3216C_ALS_RANGE_MASK |
-					  AP3216C_ALS_PERSIST_MASK,
-					  val);
-	if (ret)
-		return ret;
-
-	return ap3216c_write_reg(dev, AP3216C_ALS_CALIBRATION,
-				       cfg->als_calibration & AP3216C_ALS_CALIBRATION_MASK);
-}
-
-static int ap3216c_program_ps_config_locked(struct ap3216c_dev *dev,
-					    const struct ap3216c_config *cfg)
-{
-	int ret;
-	u8 val = cfg->ps_integration | cfg->ps_gain | cfg->ps_persist;
-
-	ret = ap3216c_update_bits_locked(dev, AP3216C_PS_CONFIG,
-					  AP3216C_PS_INTEGRATION_MASK |
-					  AP3216C_PS_GAIN_MASK |
-					  AP3216C_PS_PERSIST_MASK,
-					  val);
-	if (ret)
-		return ret;
-
-	return ap3216c_update_bits_locked(dev, AP3216C_PS_INT_MODE,
-					AP3216C_PS_INT_ALGO_MASK,
-					AP3216C_PS_INT_ALGO_HYSTERESIS);
-}
-
-static int ap3216c_program_event_thresholds_locked(struct ap3216c_dev *dev,
-						   const struct ap3216c_config *cfg)
-{
-	unsigned int als_low = 0;
-	unsigned int als_high = AP3216C_ALS_MAX_VALUE;
-	unsigned int ps_low = 0;
-	unsigned int ps_high = AP3216C_PS_MAX_VALUE;
-	int ret;
-
-	if (dev->event_enable_mask & AP3216C_EVENT_ALS_FALLING)
-		als_low = cfg->als_th.low;
-	if (dev->event_enable_mask & AP3216C_EVENT_ALS_RISING)
-		als_high = cfg->als_th.high;
-
-	if (dev->event_enable_mask & AP3216C_EVENT_PS_MASK) {
-		ps_low = cfg->ps_th.low;
-		ps_high = cfg->ps_th.high;
-	}
-
-	ret = ap3216c_write_als_threshold_locked(dev, als_low, als_high);
-	if (ret)
-		return ret;
-
-	return ap3216c_write_ps_threshold_locked(dev, ps_low, ps_high);
-}
-
-/**
- * ap3216c_apply_config_locked() - program cached AP3216C configuration
- * @dev: AP3216C device state.
- * @cfg: New validated configuration to apply.
- *
- * Context: caller must hold bus_lock.
- *
- * Return: 0 on success, negative errno otherwise.
- */
-static int ap3216c_apply_config_locked(struct ap3216c_dev *dev,
-				       const struct ap3216c_config *cfg)
-{
-	int ret;
-
-	ret = ap3216c_validate_config(cfg);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG,
-				  AP3216C_MODE_POWER_DOWN);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_program_als_config_locked(dev, cfg);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_program_ps_config_locked(dev, cfg);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_program_event_thresholds_locked(dev, cfg);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_write_reg(dev, AP3216C_INT_CLEAR_MANNER,
-				  AP3216C_INT_CLEAR_BY_READ);
-	if (ret)
-		return ret;
-
-	ret = ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG,
-				  cfg->mode & AP3216C_SYSTEM_MODE_MASK);
-	if (ret)
-		return ret;
-
-	msleep(20);
-	dev->config = *cfg;
-
-	return 0;
-}
-
-static int ap3216c_hw_init(struct ap3216c_dev *dev)
-{
-	int ret;
-	struct i2c_client *client = dev->client;
-
-	mutex_lock(&dev->bus_lock);
-	ret = ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG, AP3216C_MODE_SW_RESET);
-	if (ret) {
-		dev_err(&client->dev, "reset sensor failed: ret=%d\n", ret);
-		goto out_unlock;
-	}
-
-	msleep(50);
-	ret = ap3216c_apply_config_locked(dev, &dev->config);
-	if (ret)
-		dev_err(&client->dev, "default config apply failed: ret=%d\n", ret);
-
-out_unlock:
-	mutex_unlock(&dev->bus_lock);
-	return ret;
-}
-
-#ifdef CONFIG_AP3216C_STATS
-static void ap3216c_stats_read_inc(struct ap3216c_dev *dev,
-					   const struct ap3216c_raw_sample *sample)
-{
-	unsigned long flags;
-
-	if (!dev->stats_enable)
-		return;
-
-	spin_lock_irqsave(&dev->data_lock, flags);
-	dev->stats.read_raw_count++;
-	dev->stats.last_sample = *sample;
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-}
-
-static void ap3216c_stats_irq_inc(struct ap3216c_dev *dev)
-{
-	unsigned long flags;
-
-	if (!dev->stats_enable)
-		return;
-
-	spin_lock_irqsave(&dev->data_lock, flags);
-	dev->stats.irq_count++;
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-}
-
-static void ap3216c_stats_ignored_irq(struct ap3216c_dev *dev,
-				       unsigned int status)
-{
-	unsigned long flags;
-
-	if (!dev->stats_enable)
-		return;
-
-	spin_lock_irqsave(&dev->data_lock, flags);
-	dev->stats.ignored_irq_count++;
-	dev->stats.last_status = status;
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-}
-
-static void ap3216c_stats_event_update(struct ap3216c_dev *dev,
-					       unsigned int status,
-					       unsigned int event_bit,
-					       const struct ap3216c_raw_sample *sample)
-{
-	unsigned long flags;
-
-	if (!dev->stats_enable)
-		return;
-
-	spin_lock_irqsave(&dev->data_lock, flags);
-	dev->stats.event_count++;
-	if (event_bit & AP3216C_EVENT_ALS_MASK)
-		dev->stats.als_event_count++;
-	if (event_bit & AP3216C_EVENT_PS_MASK)
-		dev->stats.ps_event_count++;
-	dev->stats.last_status = status;
-	dev->stats.last_sample = *sample;
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-}
-
-static int ap3216c_stats_show(struct seq_file *s, void *unused)
-{
-	struct ap3216c_dev *dev = s->private;
-	struct ap3216c_config cfg;
-	struct ap3216c_stats stats;
-	u32 als_mlux;
-	unsigned long flags;
-
-	mutex_lock(&dev->bus_lock);
-	cfg = dev->config;
-	spin_lock_irqsave(&dev->data_lock, flags);
-	stats = dev->stats;
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-	mutex_unlock(&dev->bus_lock);
-
-	als_mlux = ap3216c_als_raw_to_mlux(stats.last_sample.als_raw,
-					 cfg.als_range, cfg.als_calibration);
-
-	seq_printf(s, "stats_enable=%u\n", dev->stats_enable ? 1 : 0);
-	seq_printf(s, "irq_count=%u\n", stats.irq_count);
-	seq_printf(s, "event_count=%u\n", stats.event_count);
-	seq_printf(s, "als_event_count=%u\n", stats.als_event_count);
-	seq_printf(s, "ps_event_count=%u\n", stats.ps_event_count);
-	seq_printf(s, "ignored_irq_count=%u\n", stats.ignored_irq_count);
-	seq_printf(s, "read_raw_count=%u\n", stats.read_raw_count);
-	seq_printf(s, "last_status=0x%x\n", stats.last_status);
-	seq_printf(s, "last_valid_mask=0x%x\n", stats.last_sample.valid_mask);
-	seq_printf(s, "last_overflow_mask=0x%x\n", stats.last_sample.overflow_mask);
-	seq_printf(s, "last_ir_raw=%u\n", stats.last_sample.ir_raw);
-	seq_printf(s, "last_als_raw=%u\n", stats.last_sample.als_raw);
-	seq_printf(s, "last_als_mlux=%u\n", als_mlux);
-	seq_printf(s, "last_ps_raw=%u\n", stats.last_sample.ps_raw);
-	seq_printf(s, "last_ps_object=%u\n", stats.last_sample.ps_object ? 1 : 0);
-
-	return 0;
-}
-
-static int ap3216c_stats_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, ap3216c_stats_show, inode->i_private);
-}
-
-static const struct file_operations ap3216c_stats_fops = {
-	.owner = THIS_MODULE,
-	.open = ap3216c_stats_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static ssize_t ap3216c_stats_reset_write(struct file *file,
-					 const char __user *buf,
-					 size_t count, loff_t *ppos)
-{
-	struct ap3216c_dev *dev = file->private_data;
-	unsigned long flags;
-
-	spin_lock_irqsave(&dev->data_lock, flags);
-	memset(&dev->stats, 0, sizeof(dev->stats));
-	spin_unlock_irqrestore(&dev->data_lock, flags);
-
-	return count;
-}
-
-static const struct file_operations ap3216c_stats_reset_fops = {
-	.owner = THIS_MODULE,
-	.open = simple_open,
-	.write = ap3216c_stats_reset_write,
-	.llseek = noop_llseek,
-};
-
-static void ap3216c_debugfs_init(struct iio_dev *indio_dev)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct dentry *root = iio_get_debugfs_dentry(indio_dev);
-
-	if (!root)
-		return;
-
-	dev->stats_dentry = debugfs_create_dir("stats", root);
-	if (IS_ERR_OR_NULL(dev->stats_dentry)) {
-		dev->stats_dentry = NULL;
-		return;
-	}
-
-	debugfs_create_bool("stats_enable", S_IRUGO | S_IWUSR,
-			    dev->stats_dentry, &dev->stats_enable);
-	debugfs_create_file("stats", S_IRUGO, dev->stats_dentry,
-			    dev, &ap3216c_stats_fops);
-	debugfs_create_file("stats_reset", S_IWUSR, dev->stats_dentry,
-			    dev, &ap3216c_stats_reset_fops);
-}
-
-static void ap3216c_debugfs_remove(struct ap3216c_dev *dev)
-{
-	debugfs_remove_recursive(dev->stats_dentry);
-	dev->stats_dentry = NULL;
-}
-#else
-static void ap3216c_stats_read_inc(struct ap3216c_dev *dev,
-					   const struct ap3216c_raw_sample *sample) { }
-static void ap3216c_stats_irq_inc(struct ap3216c_dev *dev) { }
-static void ap3216c_stats_ignored_irq(struct ap3216c_dev *dev,
-				       unsigned int status) { }
-static void ap3216c_stats_event_update(struct ap3216c_dev *dev,
-					       unsigned int status,
-					       unsigned int event_bit,
-					       const struct ap3216c_raw_sample *sample) { }
-static void ap3216c_debugfs_init(struct iio_dev *indio_dev) { }
-static void ap3216c_debugfs_remove(struct ap3216c_dev *dev) { }
-#endif
-
-static int ap3216c_read_raw(struct iio_dev *indio_dev,
-			    struct iio_chan_spec const *chan,
-			    int *val, int *val2, long mask)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct ap3216c_raw_sample sample;
-	unsigned int active;
-	unsigned int bit;
-	int idx;
-	int ret = 0;
-
-	switch (mask) {
-	case IIO_CHAN_INFO_RAW:
-		bit = ap3216c_channel_to_sample_bit(chan->address);
-		if (!bit)
-			return -EINVAL;
-
-		mutex_lock(&dev->bus_lock);
-		active = ap3216c_mode_to_channels(dev->config.mode);
-		if (!(active & bit)) {
-			ret = -EAGAIN;
-			goto out_unlock;
-		}
-
-		ret = ap3216c_read_sample_locked(dev, &sample, active, 0);
-		if (ret)
-			goto out_unlock;
-
-		switch (chan->address) {
-		case AP3216C_CHAN_ALS:
-			*val = sample.als_raw;
-			break;
-		case AP3216C_CHAN_IR:
-			if (sample.overflow_mask & AP3216C_SAMPLE_IR) {
-				ret = -EOVERFLOW;
-				goto out_unlock;
-			}
-			*val = sample.ir_raw;
-			break;
-		case AP3216C_CHAN_PS:
-			if (sample.overflow_mask & AP3216C_SAMPLE_PS) {
-				ret = -EOVERFLOW;
-				goto out_unlock;
-			}
-			*val = sample.ps_raw;
-			break;
-		default:
-			ret = -EINVAL;
-			goto out_unlock;
-		}
-
-		ap3216c_stats_read_inc(dev, &sample);
-		mutex_unlock(&dev->bus_lock);
-		return IIO_VAL_INT;
-	case IIO_CHAN_INFO_SCALE:
-		mutex_lock(&dev->bus_lock);
-		idx = ap3216c_als_range_index(dev->config.als_range);
-		mutex_unlock(&dev->bus_lock);
-		*val = 0;
-		*val2 = ap3216c_als_scale_micro[idx];
-		ret = IIO_VAL_INT_PLUS_MICRO;
-		break;
-	case IIO_CHAN_INFO_CALIBSCALE:
-		mutex_lock(&dev->bus_lock);
-		*val = dev->config.als_calibration / 64;
-		*val2 = DIV_ROUND_CLOSEST((dev->config.als_calibration % 64) * 1000000,
-					   64);
-		mutex_unlock(&dev->bus_lock);
-		ret = IIO_VAL_INT_PLUS_MICRO;
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
-
-out_unlock:
-	mutex_unlock(&dev->bus_lock);
-	return ret;
-}
-
-static int ap3216c_write_raw(struct iio_dev *indio_dev,
-			     struct iio_chan_spec const *chan,
-			     int val, int val2, long mask)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct ap3216c_config cfg;
-	unsigned int new_val;
-	int ret;
-
-	if (chan->type != IIO_LIGHT)
-		return -EINVAL;
-
-	mutex_lock(&dev->bus_lock);
-	cfg = dev->config;
-
-	switch (mask) {
-	case IIO_CHAN_INFO_SCALE:
-		ret = ap3216c_scale_to_range(val, val2, &new_val);
-		if (ret)
-			break;
-		cfg.als_range = new_val;
-		ret = ap3216c_apply_config_locked(dev, &cfg);
-		break;
-	case IIO_CHAN_INFO_CALIBSCALE:
-		ret = ap3216c_calibration_to_reg(val, val2, &new_val);
-		if (ret)
-			break;
-		cfg.als_calibration = new_val;
-		ret = ap3216c_apply_config_locked(dev, &cfg);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	mutex_unlock(&dev->bus_lock);
-	return ret;
-}
-
-static int ap3216c_write_raw_get_fmt(struct iio_dev *indio_dev,
-				     struct iio_chan_spec const *chan,
-				     long mask)
-{
-	switch (mask) {
-	case IIO_CHAN_INFO_SCALE:
-	case IIO_CHAN_INFO_CALIBSCALE:
-		return IIO_VAL_INT_PLUS_MICRO;
-	default:
-		return -EINVAL;
-	}
 }
 
 static int ap3216c_event_bit(const struct iio_chan_spec *chan,
-			     enum iio_event_type type,
-			     enum iio_event_direction dir)
+							 enum iio_event_type type,
+							 enum iio_event_direction dir)
 {
 	if (type != IIO_EV_TYPE_THRESH)
 		return -EINVAL;
 
-	switch (chan->type) {
+	switch (chan->type)
+	{
 	case IIO_LIGHT:
 		if (dir == IIO_EV_DIR_RISING)
 			return AP3216C_EVENT_ALS_RISING;
@@ -966,10 +301,505 @@ static int ap3216c_event_bit(const struct iio_chan_spec *chan,
 	return -EINVAL;
 }
 
+static int ap3216c_ps_int_algo_to_index(u8 algo)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ap3216c_ps_int_algo_values); i++)
+	{
+		if (ap3216c_ps_int_algo_values[i] == algo)
+			return i;
+	}
+
+	return 1;
+}
+
+/* Hardware access helpers */
+static unsigned char ap3216c_read_reg(struct ap3216c_dev *dev, u8 reg)
+{
+	unsigned int data = 0;
+
+	regmap_read(dev->regmap, reg, &data);
+	return (u8)data;
+}
+
+static int ap3216c_set_mode(struct ap3216c_dev *dev, u8 mode)
+{
+	int ret;
+
+	if (mode > AP3216C_MODE_ALS_PS_IR)
+		return -EINVAL;
+
+	ret = regmap_update_bits(dev->regmap, AP3216C_SYSTEM_CONFIG,
+							 AP3216C_SYSTEM_MODE_MASK, mode);
+	if (ret)
+		return ret;
+
+	dev->mode = mode;
+	msleep(20);
+
+	return 0;
+}
+
+static int ap3216c_write_als_scale(struct ap3216c_dev *dev, int val)
+{
+	int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(als_scale_ap3216c); i++)
+	{
+		if (als_scale_ap3216c[i] == val)
+		{
+			ret = regmap_update_bits(dev->regmap, AP3216C_ALS_CONFIG,
+									 AP3216C_ALS_RANGE_MASK,
+									 i << AP3216C_ALS_RANGE_SHIFT);
+			if (ret)
+				return ret;
+			/*
+			 * 切换scale后需要一定时间保证生效，50ms不够
+			 * 当前只在 write_raw中被调用，先会获取mutex再sleep，读同样需要mutex
+			 * 保证修改后读取串行化
+			 */
+			msleep(100);
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int ap3216c_read_sample(struct ap3216c_dev *dev,
+							   struct ap3216c_sample *sample,
+							   unsigned int read_mask)
+{
+	u8 data[2];
+	int ret;
+
+	if (read_mask & ~AP3216C_SAMPLE_ALL)
+		return -EINVAL;
+
+	memset(sample, 0, sizeof(*sample));
+
+	if (read_mask & AP3216C_SAMPLE_ALS)
+	{
+		ret = regmap_bulk_read(dev->regmap, AP3216C_ALS_DATA_LOW,
+							   data, 2);
+		if (ret)
+			return ret;
+
+		sample->als = ((u16)data[1] << 8) | data[0];
+	}
+
+	if (read_mask & AP3216C_SAMPLE_IR)
+	{
+		ret = regmap_bulk_read(dev->regmap, AP3216C_IR_DATA_LOW,
+							   data, 2);
+		if (ret)
+			return ret;
+
+		sample->ir_overflow = data[0] & AP3216C_IR_OVERFLOW_BIT;
+		if (!sample->ir_overflow)
+			sample->ir = ((u16)data[1] << 2) |
+						 (data[0] & AP3216C_IR_DATA_LOW_MASK);
+	}
+
+	if (read_mask & AP3216C_SAMPLE_PS)
+	{
+		ret = regmap_bulk_read(dev->regmap, AP3216C_PS_DATA_LOW,
+							   data, 2);
+		if (ret)
+			return ret;
+
+		sample->ps_object = !!((data[0] | data[1]) &
+							   AP3216C_PS_OBJECT_BIT);
+		sample->ps_overflow = !!((data[0] | data[1]) &
+								 AP3216C_PS_IR_OVERFLOW_BIT);
+		if (!sample->ps_overflow)
+			sample->ps = ((u16)(data[1] & AP3216C_PS_DATA_HIGH_MASK) << 4) |
+						 (data[0] & AP3216C_PS_DATA_LOW_MASK);
+	}
+
+	return 0;
+}
+
+static int ap3216c_read_als_processed(struct ap3216c_dev *dev,
+									  u16 raw, int *val, int *val2)
+{
+	int ret;
+	unsigned int regdata;
+	unsigned int range;
+	u64 lux_micro;
+	u32 rem;
+
+	ret = regmap_read(dev->regmap, AP3216C_ALS_CONFIG, &regdata);
+	if (ret)
+		return ret;
+
+	range = (regdata & AP3216C_ALS_RANGE_MASK) >>
+			AP3216C_ALS_RANGE_SHIFT;
+
+	lux_micro = (u64)raw * als_scale_ap3216c[range];
+
+	*val = div_u64_rem(lux_micro, 1000000, &rem);
+	*val2 = rem;
+
+	return IIO_VAL_INT_PLUS_MICRO;
+}
+
+static int ap3216c_write_als_threshold(struct ap3216c_dev *dev, u16 low, u16 high)
+{
+	int ret;
+
+	if (low > high || high > AP3216C_ALS_MAX_VALUE)
+		return -EINVAL;
+
+	ret = regmap_write(dev->regmap, AP3216C_ALS_LOW_TH_LOW,
+					   low & AP3216C_ALS_TH_LOW_MASK);
+	if (ret)
+		return ret;
+	ret = regmap_write(dev->regmap, AP3216C_ALS_LOW_TH_HIGH,
+					   (low >> 8) & AP3216C_ALS_TH_HIGH_MASK);
+	if (ret)
+		return ret;
+	ret = regmap_write(dev->regmap, AP3216C_ALS_HIGH_TH_LOW,
+					   high & AP3216C_ALS_TH_LOW_MASK);
+	if (ret)
+		return ret;
+
+	return regmap_write(dev->regmap, AP3216C_ALS_HIGH_TH_HIGH,
+						(high >> 8) & AP3216C_ALS_TH_HIGH_MASK);
+}
+
+static int ap3216c_write_ps_threshold(struct ap3216c_dev *dev, u16 low, u16 high)
+{
+	int ret;
+
+	if (low > high || high > AP3216C_PS_MAX_VALUE)
+		return -EINVAL;
+
+	ret = regmap_write(dev->regmap, AP3216C_PS_LOW_TH_LOW,
+					   low & AP3216C_PS_TH_LOW_MASK);
+	if (ret)
+		return ret;
+	ret = regmap_write(dev->regmap, AP3216C_PS_LOW_TH_HIGH,
+					   (low >> 2) & AP3216C_PS_TH_HIGH_MASK);
+	if (ret)
+		return ret;
+	ret = regmap_write(dev->regmap, AP3216C_PS_HIGH_TH_LOW,
+					   high & AP3216C_PS_TH_LOW_MASK);
+	if (ret)
+		return ret;
+
+	return regmap_write(dev->regmap, AP3216C_PS_HIGH_TH_HIGH,
+						(high >> 2) & AP3216C_PS_TH_HIGH_MASK);
+}
+
+static int ap3216c_program_event_thresholds(struct ap3216c_dev *dev)
+{
+	u16 als_low = 0;
+	u16 als_high = AP3216C_ALS_MAX_VALUE;
+	u16 ps_low = 0;
+	u16 ps_high = AP3216C_PS_MAX_VALUE;
+	int ret;
+
+	if (dev->event_enable_mask & AP3216C_EVENT_ALS_FALLING)
+		als_low = dev->als_th.low;
+	if (dev->event_enable_mask & AP3216C_EVENT_ALS_RISING)
+		als_high = dev->als_th.high;
+	if (dev->event_enable_mask & AP3216C_EVENT_PS_MASK)
+	{
+		ps_low = dev->ps_th.low;
+		ps_high = dev->ps_th.high;
+	}
+
+	ret = ap3216c_write_als_threshold(dev, als_low, als_high);
+	if (ret)
+		return ret;
+
+	return ap3216c_write_ps_threshold(dev, ps_low, ps_high);
+}
+
+static int ap3216c_clear_pending_events(struct ap3216c_dev *dev)
+{
+	struct ap3216c_sample sample;
+	unsigned int read_mask = AP3216C_SAMPLE_ALS | AP3216C_SAMPLE_PS;
+
+	return ap3216c_read_sample(dev, &sample, read_mask);
+}
+
+static int ap3216c_reginit(struct ap3216c_dev *dev)
+{
+	int ret;
+
+	/* 初始化AP3216C */
+	ret = regmap_write(dev->regmap, AP3216C_SYSTEM_CONFIG,
+					   AP3216C_MODE_SW_RESET);
+	if (ret)
+		return ret;
+	mdelay(50);
+
+	ret = regmap_write(dev->regmap, AP3216C_INT_CLEAR_MANNER,
+					   AP3216C_INT_CLEAR_BY_READ);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(dev->regmap, AP3216C_PS_INT_MODE,
+							 AP3216C_PS_INT_ALGO_MASK, dev->ps_int_algo);
+	if (ret)
+		return ret;
+
+	ret = ap3216c_program_event_thresholds(dev);
+	if (ret)
+		return ret;
+
+	ret = ap3216c_clear_pending_events(dev);
+	if (ret)
+		return ret;
+
+	return ap3216c_set_mode(dev, AP3216C_MODE_ALS_PS_IR);
+}
+
+/* IIO ext-info callbacks */
+static int ap3216c_set_operating_mode(struct iio_dev *indio_dev,
+									  const struct iio_chan_spec *chan,
+									  unsigned int mode)
+{
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+	int ret;
+
+	if (mode >= ARRAY_SIZE(ap3216c_mode_values))
+		return -EINVAL;
+
+	mutex_lock(&dev->lock);
+	ret = ap3216c_set_mode(dev, ap3216c_mode_values[mode]);
+	mutex_unlock(&dev->lock);
+
+	return ret;
+}
+
+static int ap3216c_get_operating_mode(struct iio_dev *indio_dev,
+									  const struct iio_chan_spec *chan)
+{
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+	int mode;
+
+	mutex_lock(&dev->lock);
+	mode = ap3216c_mode_to_index(dev->mode);
+	mutex_unlock(&dev->lock);
+
+	return mode;
+}
+
+static int ap3216c_set_ps_int_algo(struct iio_dev *indio_dev,
+								   const struct iio_chan_spec *chan,
+								   unsigned int algo)
+{
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+	int ret;
+
+	if (algo >= ARRAY_SIZE(ap3216c_ps_int_algo_values))
+		return -EINVAL;
+
+	mutex_lock(&dev->lock);
+	ret = regmap_update_bits(dev->regmap, AP3216C_PS_INT_MODE,
+							 AP3216C_PS_INT_ALGO_MASK,
+							 ap3216c_ps_int_algo_values[algo]);
+	if (!ret)
+	{
+		dev->ps_int_algo = ap3216c_ps_int_algo_values[algo];
+		ret = ap3216c_clear_pending_events(dev);
+		if (ret)
+			dev_warn(&dev->client->dev,
+					 "clear pending events failed: %d\n", ret);
+		ret = 0;
+	}
+	mutex_unlock(&dev->lock);
+
+	return ret;
+}
+
+static int ap3216c_get_ps_int_algo(struct iio_dev *indio_dev,
+								   const struct iio_chan_spec *chan)
+{
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+	int algo;
+
+	mutex_lock(&dev->lock);
+	algo = ap3216c_ps_int_algo_to_index(dev->ps_int_algo);
+	mutex_unlock(&dev->lock);
+
+	return algo;
+}
+
+static const struct iio_enum ap3216c_operating_mode_enum = {
+	.items = ap3216c_mode_names,
+	.num_items = ARRAY_SIZE(ap3216c_mode_names),
+	.set = ap3216c_set_operating_mode,
+	.get = ap3216c_get_operating_mode,
+};
+
+static const struct iio_enum ap3216c_ps_int_algo_enum = {
+	.items = ap3216c_ps_int_algo_names,
+	.num_items = ARRAY_SIZE(ap3216c_ps_int_algo_names),
+	.set = ap3216c_set_ps_int_algo,
+	.get = ap3216c_get_ps_int_algo,
+};
+
+static const struct iio_chan_spec_ext_info ap3216c_ext_info[] = {
+	IIO_ENUM("operating_mode", IIO_SHARED_BY_ALL,
+			 &ap3216c_operating_mode_enum),
+	{
+		.name = "operating_mode_available",
+		.shared = IIO_SHARED_BY_ALL,
+		.read = iio_enum_available_read,
+		.private = (uintptr_t)&ap3216c_operating_mode_enum,
+	},
+	{}};
+
+static const struct iio_chan_spec_ext_info ap3216c_ps_ext_info[] = {
+	IIO_ENUM("interrupt_algorithm", IIO_SHARED_BY_TYPE,
+			 &ap3216c_ps_int_algo_enum),
+	{
+		.name = "interrupt_algorithm_available",
+		.shared = IIO_SHARED_BY_TYPE,
+		.read = iio_enum_available_read,
+		.private = (uintptr_t)&ap3216c_ps_int_algo_enum,
+	},
+	{}};
+
+/* IIO raw callbacks */
+static int ap3216c_read_raw(struct iio_dev *indio_dev,
+							struct iio_chan_spec const *chan,
+							int *val, int *val2, long mask)
+{
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+	struct ap3216c_sample sample;
+	unsigned int read_mask;
+	unsigned char regdata = 0;
+	int ret = 0;
+
+	switch (mask)
+	{
+	case IIO_CHAN_INFO_RAW:
+		mutex_lock(&dev->lock);
+
+		ret = ap3216c_channel_read_mask(dev->mode, chan, &read_mask);
+		if (ret)
+			goto out_unlock;
+
+		ret = ap3216c_read_sample(dev, &sample, read_mask);
+		if (ret)
+			goto out_unlock;
+
+		switch (read_mask)
+		{
+		case AP3216C_SAMPLE_ALS:
+			*val = sample.als;
+			break;
+		case AP3216C_SAMPLE_IR:
+			if (sample.ir_overflow)
+			{
+				ret = -EOVERFLOW;
+				goto out_unlock;
+			}
+			*val = sample.ir;
+			break;
+		case AP3216C_SAMPLE_PS:
+			if (sample.ps_overflow)
+			{
+				ret = -EOVERFLOW;
+				goto out_unlock;
+			}
+			*val = sample.ps;
+			break;
+		default:
+			ret = -EINVAL;
+			goto out_unlock;
+		}
+
+		ret = IIO_VAL_INT;
+		break;
+	case IIO_CHAN_INFO_SCALE:
+		switch (chan->type)
+		{
+		case IIO_LIGHT: /* ALS量程 */
+			mutex_lock(&dev->lock);
+			regdata = (ap3216c_read_reg(dev, AP3216C_ALS_CONFIG) & 0X30) >> 4;
+			*val = 0;
+			*val2 = als_scale_ap3216c[regdata];
+			mutex_unlock(&dev->lock);
+			return IIO_VAL_INT_PLUS_MICRO; /* 值为val+val2/1000000 */
+		default:
+			return -EINVAL;
+		}
+	case IIO_CHAN_INFO_PROCESSED:
+		if (chan->type != IIO_LIGHT)
+			return -EINVAL;
+
+		mutex_lock(&dev->lock);
+		ret = ap3216c_channel_read_mask(dev->mode, chan, &read_mask);
+		if (ret)
+			goto out_unlock;
+
+		ret = ap3216c_read_sample(dev, &sample, read_mask);
+		if (ret)
+			goto out_unlock;
+
+		ret = ap3216c_read_als_processed(dev, sample.als, val, val2);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+out_unlock:
+	mutex_unlock(&dev->lock);
+	return ret;
+}
+
+static int ap3216c_write_raw(struct iio_dev *indio_dev,
+							 struct iio_chan_spec const *chan,
+							 int val, int val2, long mask)
+{
+	int ret = 0;
+	struct ap3216c_dev *dev = iio_priv(indio_dev);
+
+	switch (mask)
+	{
+	case IIO_CHAN_INFO_SCALE: /* 设置ALS量程 */
+		switch (chan->type)
+		{
+		case IIO_LIGHT: /* 设置ALS量程 */
+			mutex_lock(&dev->lock);
+			ret = ap3216c_write_als_scale(dev, val2);
+			mutex_unlock(&dev->lock);
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
+		break;
+
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+
+static int ap3216c_write_raw_get_fmt(struct iio_dev *indio_dev,
+									 struct iio_chan_spec const *chan, long mask)
+{
+	if (mask == IIO_CHAN_INFO_SCALE && chan->type == IIO_LIGHT)
+		return IIO_VAL_INT_PLUS_MICRO;
+	return -EINVAL;
+}
+
+/* IIO event callbacks */
 static int ap3216c_read_event_config(struct iio_dev *indio_dev,
-				     const struct iio_chan_spec *chan,
-				     enum iio_event_type type,
-				     enum iio_event_direction dir)
+									 const struct iio_chan_spec *chan,
+									 enum iio_event_type type,
+									 enum iio_event_direction dir)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
 	int bit;
@@ -979,18 +809,18 @@ static int ap3216c_read_event_config(struct iio_dev *indio_dev,
 	if (bit < 0)
 		return bit;
 
-	mutex_lock(&dev->bus_lock);
+	mutex_lock(&dev->lock);
 	enabled = !!(dev->event_enable_mask & bit);
-	mutex_unlock(&dev->bus_lock);
+	mutex_unlock(&dev->lock);
 
 	return enabled;
 }
 
 static int ap3216c_write_event_config(struct iio_dev *indio_dev,
-				      const struct iio_chan_spec *chan,
-				      enum iio_event_type type,
-				      enum iio_event_direction dir,
-				      int state)
+									  const struct iio_chan_spec *chan,
+									  enum iio_event_type type,
+									  enum iio_event_direction dir,
+									  int state)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
 	unsigned int old_mask;
@@ -1003,52 +833,60 @@ static int ap3216c_write_event_config(struct iio_dev *indio_dev,
 	if (state && dev->irq <= 0)
 		return -ENODEV;
 
-	mutex_lock(&dev->bus_lock);
+	mutex_lock(&dev->lock);
 	old_mask = dev->event_enable_mask;
 	if (state)
 		dev->event_enable_mask |= bit;
 	else
 		dev->event_enable_mask &= ~bit;
 
-	ret = ap3216c_program_event_thresholds_locked(dev, &dev->config);
-	if (ret) {
+	ret = ap3216c_program_event_thresholds(dev);
+	if (ret)
+	{
 		dev->event_enable_mask = old_mask;
-	} else {
-		ap3216c_clear_pending_events_best_effort_locked(dev);
 	}
-	mutex_unlock(&dev->bus_lock);
+	else
+	{
+		ret = ap3216c_clear_pending_events(dev);
+		if (ret)
+			dev_warn(&dev->client->dev,
+					 "clear pending events failed: %d\n", ret);
+		ret = 0;
+	}
+	mutex_unlock(&dev->lock);
 
 	return ret;
 }
 
 static int ap3216c_read_event_value(struct iio_dev *indio_dev,
-				    const struct iio_chan_spec *chan,
-				    enum iio_event_type type,
-				    enum iio_event_direction dir,
-				    enum iio_event_info info,
-				    int *val, int *val2)
+									const struct iio_chan_spec *chan,
+									enum iio_event_type type,
+									enum iio_event_direction dir,
+									enum iio_event_info info,
+									int *val, int *val2)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
 	int ret = 0;
 
-	if (info != IIO_EV_INFO_VALUE || type != IIO_EV_TYPE_THRESH)
+	if (type != IIO_EV_TYPE_THRESH || info != IIO_EV_INFO_VALUE)
 		return -EINVAL;
 
-	mutex_lock(&dev->bus_lock);
-	switch (chan->type) {
+	mutex_lock(&dev->lock);
+	switch (chan->type)
+	{
 	case IIO_LIGHT:
 		if (dir == IIO_EV_DIR_RISING)
-			*val = dev->config.als_th.high;
+			*val = dev->als_th.high;
 		else if (dir == IIO_EV_DIR_FALLING)
-			*val = dev->config.als_th.low;
+			*val = dev->als_th.low;
 		else
 			ret = -EINVAL;
 		break;
 	case IIO_PROXIMITY:
 		if (dir == IIO_EV_DIR_RISING)
-			*val = dev->config.ps_th.high;
+			*val = dev->ps_th.high;
 		else if (dir == IIO_EV_DIR_FALLING)
-			*val = dev->config.ps_th.low;
+			*val = dev->ps_th.low;
 		else
 			ret = -EINVAL;
 		break;
@@ -1056,52 +894,61 @@ static int ap3216c_read_event_value(struct iio_dev *indio_dev,
 		ret = -EINVAL;
 		break;
 	}
-	mutex_unlock(&dev->bus_lock);
+	mutex_unlock(&dev->lock);
 
 	*val2 = 0;
 	return ret ? ret : IIO_VAL_INT;
 }
 
 static int ap3216c_write_event_value(struct iio_dev *indio_dev,
-				     const struct iio_chan_spec *chan,
-				     enum iio_event_type type,
-				     enum iio_event_direction dir,
-				     enum iio_event_info info,
-				     int val, int val2)
+									 const struct iio_chan_spec *chan,
+									 enum iio_event_type type,
+									 enum iio_event_direction dir,
+									 enum iio_event_info info,
+									 int val, int val2)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct ap3216c_config cfg;
+	struct ap3216c_threshold old_als_th;
+	struct ap3216c_threshold old_ps_th;
+	struct ap3216c_threshold als_th;
+	struct ap3216c_threshold ps_th;
 	int ret = 0;
 
-	if (info != IIO_EV_INFO_VALUE || type != IIO_EV_TYPE_THRESH ||
-	    val < 0 || val2 != 0)
+	if (type != IIO_EV_TYPE_THRESH || info != IIO_EV_INFO_VALUE ||
+		val < 0 || val2 != 0)
 		return -EINVAL;
 
-	mutex_lock(&dev->bus_lock);
-	cfg = dev->config;
+	mutex_lock(&dev->lock);
+	old_als_th = dev->als_th;
+	old_ps_th = dev->ps_th;
+	als_th = old_als_th;
+	ps_th = old_ps_th;
 
-	switch (chan->type) {
+	switch (chan->type)
+	{
 	case IIO_LIGHT:
-		if (val > AP3216C_ALS_MAX_VALUE) {
+		if (val > AP3216C_ALS_MAX_VALUE)
+		{
 			ret = -EINVAL;
 			break;
 		}
 		if (dir == IIO_EV_DIR_RISING)
-			cfg.als_th.high = val;
+			als_th.high = val;
 		else if (dir == IIO_EV_DIR_FALLING)
-			cfg.als_th.low = val;
+			als_th.low = val;
 		else
 			ret = -EINVAL;
 		break;
 	case IIO_PROXIMITY:
-		if (val > AP3216C_PS_MAX_VALUE) {
+		if (val > AP3216C_PS_MAX_VALUE)
+		{
 			ret = -EINVAL;
 			break;
 		}
 		if (dir == IIO_EV_DIR_RISING)
-			cfg.ps_th.high = val;
+			ps_th.high = val;
 		else if (dir == IIO_EV_DIR_FALLING)
-			cfg.ps_th.low = val;
+			ps_th.low = val;
 		else
 			ret = -EINVAL;
 		break;
@@ -1110,99 +957,34 @@ static int ap3216c_write_event_value(struct iio_dev *indio_dev,
 		break;
 	}
 
+	if (!ret && (als_th.low > als_th.high || ps_th.low > ps_th.high))
+		ret = -EINVAL;
 	if (!ret)
-		ret = ap3216c_validate_config(&cfg);
-	if (!ret)
-		ret = ap3216c_program_event_thresholds_locked(dev, &cfg);
-	if (!ret) {
-		dev->config = cfg;
-		ap3216c_clear_pending_events_best_effort_locked(dev);
-	}
-
-	mutex_unlock(&dev->bus_lock);
-
-	return ret;
-}
-
-static int ap3216c_set_operating_mode(struct iio_dev *indio_dev,
-				      const struct iio_chan_spec *chan,
-				      unsigned int mode)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct ap3216c_config cfg;
-	int ret;
-
-	if (mode >= ARRAY_SIZE(ap3216c_mode_values))
-		return -EINVAL;
-
-	mutex_lock(&dev->bus_lock);
-	cfg = dev->config;
-	cfg.mode = ap3216c_mode_values[mode];
-	ret = ap3216c_apply_config_locked(dev, &cfg);
-	mutex_unlock(&dev->bus_lock);
-
-	return ret;
-}
-
-static int ap3216c_get_operating_mode(struct iio_dev *indio_dev,
-				      const struct iio_chan_spec *chan)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	int mode;
-
-	mutex_lock(&dev->bus_lock);
-	mode = ap3216c_mode_to_index(dev->config.mode);
-	mutex_unlock(&dev->bus_lock);
-
-	return mode;
-}
-
-static const struct iio_enum ap3216c_operating_mode_enum = {
-	.items = ap3216c_mode_names,
-	.num_items = ARRAY_SIZE(ap3216c_mode_names),
-	.set = ap3216c_set_operating_mode,
-	.get = ap3216c_get_operating_mode,
-};
-
-static const struct iio_chan_spec_ext_info ap3216c_ext_info[] = {
-	IIO_ENUM("operating_mode", IIO_SHARED_BY_ALL,
-		 &ap3216c_operating_mode_enum),
 	{
-		.name = "operating_mode_available",
-		.shared = IIO_SHARED_BY_ALL,
-		.read = iio_enum_available_read,
-		.private = (uintptr_t)&ap3216c_operating_mode_enum,
-	},
-	{ }
-};
-
-static int ap3216c_debugfs_reg_access(struct iio_dev *indio_dev,
-				      unsigned int reg, unsigned int writeval,
-				      unsigned int *readval)
-{
-	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	u8 val;
-	int ret;
-
-	if (reg > 0xff || writeval > 0xff)
-		return -EINVAL;
-
-	mutex_lock(&dev->bus_lock);
-	if (readval) {
-		ret = ap3216c_read_regs(dev, reg, &val, 1);
-		if (!ret)
-			*readval = val;
-	} else {
-		ret = ap3216c_write_reg(dev, reg, writeval);
+		dev->als_th = als_th;
+		dev->ps_th = ps_th;
+		ret = ap3216c_program_event_thresholds(dev);
+		if (ret)
+		{
+			dev->als_th = old_als_th;
+			dev->ps_th = old_ps_th;
+		}
 	}
-	mutex_unlock(&dev->bus_lock);
+	if (!ret)
+	{
+		ret = ap3216c_clear_pending_events(dev);
+		if (ret)
+			dev_warn(&dev->client->dev,
+					 "clear pending events failed: %d\n", ret);
+		ret = 0;
+	}
+	mutex_unlock(&dev->lock);
 
 	return ret;
 }
 
-static int ap3216c_push_als_event_locked(struct iio_dev *indio_dev,
-					 struct ap3216c_raw_sample *sample,
-					 unsigned int status)
+static int ap3216c_push_als_event(struct iio_dev *indio_dev,
+								  const struct ap3216c_sample *sample)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
 	enum iio_event_direction dir;
@@ -1212,13 +994,18 @@ static int ap3216c_push_als_event_locked(struct iio_dev *indio_dev,
 	if (!(dev->event_enable_mask & AP3216C_EVENT_ALS_MASK))
 		return 0;
 
-	if (sample->als_raw > dev->config.als_th.high) {
+	if (sample->als > dev->als_th.high)
+	{
 		dir = IIO_EV_DIR_RISING;
 		event_bit = AP3216C_EVENT_ALS_RISING;
-	} else if (sample->als_raw < dev->config.als_th.low) {
+	}
+	else if (sample->als < dev->als_th.low)
+	{
 		dir = IIO_EV_DIR_FALLING;
 		event_bit = AP3216C_EVENT_ALS_FALLING;
-	} else {
+	}
+	else
+	{
 		return 0;
 	}
 
@@ -1227,14 +1014,12 @@ static int ap3216c_push_als_event_locked(struct iio_dev *indio_dev,
 
 	code = IIO_UNMOD_EVENT_CODE(IIO_LIGHT, 0, IIO_EV_TYPE_THRESH, dir);
 	iio_push_event(indio_dev, code, iio_get_time_ns());
-	ap3216c_stats_event_update(dev, status, event_bit, sample);
 
 	return 1;
 }
 
-static int ap3216c_push_ps_event_locked(struct iio_dev *indio_dev,
-					struct ap3216c_raw_sample *sample,
-					unsigned int status)
+static int ap3216c_push_ps_event(struct iio_dev *indio_dev,
+								 const struct ap3216c_sample *sample)
 {
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
 	enum iio_event_direction dir;
@@ -1243,17 +1028,22 @@ static int ap3216c_push_ps_event_locked(struct iio_dev *indio_dev,
 
 	if (!(dev->event_enable_mask & AP3216C_EVENT_PS_MASK))
 		return 0;
-	if (sample->overflow_mask & AP3216C_SAMPLE_PS)
+	if (sample->ps_overflow)
+	{
+		dev_warn_ratelimited(&dev->client->dev,
+							 "PS sample overflow; proximity event skipped\n");
 		return 0;
+	}
 
-	if (sample->ps_raw > dev->config.ps_th.high) {
+	if (sample->ps_object)
+	{
 		dir = IIO_EV_DIR_RISING;
 		event_bit = AP3216C_EVENT_PS_RISING;
-	} else if (sample->ps_raw < dev->config.ps_th.low) {
+	}
+	else
+	{
 		dir = IIO_EV_DIR_FALLING;
 		event_bit = AP3216C_EVENT_PS_FALLING;
-	} else {
-		return 0;
 	}
 
 	if (!(dev->event_enable_mask & event_bit))
@@ -1261,214 +1051,191 @@ static int ap3216c_push_ps_event_locked(struct iio_dev *indio_dev,
 
 	code = IIO_UNMOD_EVENT_CODE(IIO_PROXIMITY, 0, IIO_EV_TYPE_THRESH, dir);
 	iio_push_event(indio_dev, code, iio_get_time_ns());
-	ap3216c_stats_event_update(dev, status, event_bit, sample);
 
 	return 1;
 }
 
-/**
- * ap3216c_irq_thread() - handle AP3216C threshold interrupts
- * @irq: Linux IRQ number.
- * @dev_id: IIO device pointer passed during IRQ request.
- *
- * The handler reads AP3216C status, fetches a sample to clear the hardware
- * interrupt, maps enabled ALS/PS threshold conditions to IIO events, and
- * updates optional stats.
- *
- * Return: IRQ_HANDLED after the status line is consumed.
- */
 static irqreturn_t ap3216c_irq_thread(int irq, void *dev_id)
 {
 	struct iio_dev *indio_dev = dev_id;
 	struct ap3216c_dev *dev = iio_priv(indio_dev);
-	struct ap3216c_raw_sample sample;
-	unsigned int status;
+	struct ap3216c_sample sample;
 	unsigned int active;
-	u8 status_reg;
-	int pushed = 0;
+	unsigned int read_mask;
+	unsigned int status;
+	unsigned int status_reg;
 	int ret;
 
-	ap3216c_stats_irq_inc(dev);
-
-	mutex_lock(&dev->bus_lock);
-	ret = ap3216c_read_regs(dev, AP3216C_INT_STATUS, &status_reg, 1);
-	if (ret) {
-		ap3216c_stats_ignored_irq(dev, 0);
+	mutex_lock(&dev->lock);
+	ret = regmap_read(dev->regmap, AP3216C_INT_STATUS, &status_reg);
+	if (ret)
 		goto out_unlock;
-	}
 
 	status = status_reg & AP3216C_INT_STATUS_MASK;
-	if (!status) {
-		ap3216c_stats_ignored_irq(dev, status);
+	dev->last_int_status = status;
+	if (!status)
+		goto out_unlock;
+
+	active = ap3216c_mode_to_sample_mask(dev->mode);
+	read_mask = active & AP3216C_SAMPLE_ALL;
+	if (!read_mask)
+	{
+		ap3216c_clear_pending_events(dev);
 		goto out_unlock;
 	}
 
-	active = ap3216c_mode_to_channels(dev->config.mode);
-	if (!active) {
-		ap3216c_clear_pending_events_locked(dev);
-		ap3216c_stats_ignored_irq(dev, status);
+	ret = ap3216c_read_sample(dev, &sample, read_mask);
+	if (ret)
 		goto out_unlock;
-	}
-
-	ret = ap3216c_read_sample_locked(dev, &sample, active, status);
-	if (ret) {
-		ap3216c_stats_ignored_irq(dev, status);
-		goto out_unlock;
-	}
 
 	if ((status & AP3216C_INTSTATUS_ALS_BIT) &&
-	    (active & AP3216C_SAMPLE_ALS))
-		pushed += ap3216c_push_als_event_locked(indio_dev, &sample, status);
+		(active & AP3216C_SAMPLE_ALS))
+		ap3216c_push_als_event(indio_dev, &sample);
 
 	if ((status & AP3216C_INTSTATUS_PS_BIT) &&
-	    (active & AP3216C_SAMPLE_PS))
-		pushed += ap3216c_push_ps_event_locked(indio_dev, &sample, status);
-
-	if (!pushed)
-		ap3216c_stats_ignored_irq(dev, status);
-	dev_dbg(&dev->client->dev,
-		"irq status=0x%x pushed=%d als=%u ps=%u mask=0x%x th als=[%u,%u] ps=[%u,%u]\n",
-		status, pushed, sample.als_raw, sample.ps_raw,
-		dev->event_enable_mask, dev->config.als_th.low,
-		dev->config.als_th.high, dev->config.ps_th.low,
-		dev->config.ps_th.high);
+		(active & AP3216C_SAMPLE_PS))
+		ap3216c_push_ps_event(indio_dev, &sample);
 
 out_unlock:
-	mutex_unlock(&dev->bus_lock);
+	mutex_unlock(&dev->lock);
 	return IRQ_HANDLED;
 }
 
+/* IIO descriptors */
 static const struct iio_event_spec ap3216c_als_events[] = {
-	{
-		.type = IIO_EV_TYPE_THRESH,
-		.dir = IIO_EV_DIR_RISING,
-		.mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE),
-	},
-	{
-		.type = IIO_EV_TYPE_THRESH,
-		.dir = IIO_EV_DIR_FALLING,
-		.mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE),
-	},
+	{.type = IIO_EV_TYPE_THRESH, .dir = IIO_EV_DIR_RISING, .mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE)},
+	{.type = IIO_EV_TYPE_THRESH, .dir = IIO_EV_DIR_FALLING, .mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE)},
 };
 
 static const struct iio_event_spec ap3216c_ps_events[] = {
-	{
-		.type = IIO_EV_TYPE_THRESH,
-		.dir = IIO_EV_DIR_RISING,
-		.mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE),
-	},
-	{
-		.type = IIO_EV_TYPE_THRESH,
-		.dir = IIO_EV_DIR_FALLING,
-		.mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE),
-	},
+	{.type = IIO_EV_TYPE_THRESH, .dir = IIO_EV_DIR_RISING, .mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE)},
+	{.type = IIO_EV_TYPE_THRESH, .dir = IIO_EV_DIR_FALLING, .mask_separate = BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_ENABLE)},
 };
 
+/*
+ * ap3216c通道，1路ALS(环境关)，1路PS(距离传感器)，1路IR
+ */
 static const struct iio_chan_spec ap3216c_channels[] = {
+	/* ALS通道 */
 	{
 		.type = IIO_LIGHT,
-		.address = AP3216C_CHAN_ALS,
+		.address = AP3216C_ALS_DATA_LOW,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
-			BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_CALIBSCALE),
+							  BIT(IIO_CHAN_INFO_SCALE) | BIT(IIO_CHAN_INFO_PROCESSED),
+		.ext_info = ap3216c_ext_info,
 		.event_spec = ap3216c_als_events,
 		.num_event_specs = ARRAY_SIZE(ap3216c_als_events),
-		.ext_info = ap3216c_ext_info,
 	},
+
+	/* PS通道 */
+	{
+		.type = IIO_PROXIMITY,
+		.address = AP3216C_PS_DATA_LOW,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.ext_info = ap3216c_ps_ext_info,
+		.event_spec = ap3216c_ps_events,
+		.num_event_specs = ARRAY_SIZE(ap3216c_ps_events),
+	},
+
+	/* IR通道 */
 	{
 		.type = IIO_INTENSITY,
 		.modified = 1,
 		.channel2 = IIO_MOD_LIGHT_IR,
-		.address = AP3216C_CHAN_IR,
+		.address = AP3216C_IR_DATA_LOW,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 	},
-	{
-		.type = IIO_PROXIMITY,
-		.address = AP3216C_CHAN_PS,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.event_spec = ap3216c_ps_events,
-		.num_event_specs = ARRAY_SIZE(ap3216c_ps_events),
-	},
 };
 
-static IIO_CONST_ATTR(in_illuminance_scale_available,
-		      "0.350000 0.078800 0.019700 0.004900");
-
-static struct attribute *ap3216c_attrs[] = {
-	&iio_const_attr_in_illuminance_scale_available.dev_attr.attr,
-	NULL,
-};
-
-static const struct attribute_group ap3216c_attr_group = {
-	.attrs = ap3216c_attrs,
-};
-
+/*
+ * iio_info结构体变量
+ */
 static const struct iio_info ap3216c_info = {
-	.driver_module = THIS_MODULE,
-	.attrs = &ap3216c_attr_group,
 	.read_raw = ap3216c_read_raw,
 	.write_raw = ap3216c_write_raw,
-	.write_raw_get_fmt = ap3216c_write_raw_get_fmt,
+	.write_raw_get_fmt = &ap3216c_write_raw_get_fmt, /* 用户空间写数据格式 */
 	.read_event_config = ap3216c_read_event_config,
 	.write_event_config = ap3216c_write_event_config,
 	.read_event_value = ap3216c_read_event_value,
 	.write_event_value = ap3216c_write_event_value,
-	.debugfs_reg_access = ap3216c_debugfs_reg_access,
 };
 
-static int ap3216c_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+/* I2C driver entry */
+static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
-	struct iio_dev *indio_dev;
-	struct ap3216c_dev *dev;
 	int ret;
+	struct ap3216c_dev *dev;
+	struct iio_dev *indio_dev;
 
+	/*  1、申请iio_dev内存 */
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*dev));
 	if (!indio_dev)
 		return -ENOMEM;
 
+	/* 2、获取ap3216c_dev结构体地址 */
 	dev = iio_priv(indio_dev);
 	dev->client = client;
-	dev->irq = client->irq;
-	mutex_init(&dev->bus_lock);
-	spin_lock_init(&dev->data_lock);
-	ap3216c_fill_default_config(&dev->config);
 
-	indio_dev->dev.parent = &client->dev;
-	indio_dev->name = AP3216C_NAME;
-	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = ap3216c_channels;
-	indio_dev->num_channels = ARRAY_SIZE(ap3216c_channels);
-	indio_dev->info = &ap3216c_info;
+	i2c_set_clientdata(client, indio_dev); /* 保存ap3216cdev结构体 */
 
-	i2c_set_clientdata(client, indio_dev);
+	/* 初始化regmap_config设置 */
+	dev->regmap_config.reg_bits = 8; /* 寄存器长度8bit */
+	dev->regmap_config.val_bits = 8; /* 值长度8bit */
 
-	ret = ap3216c_hw_init(dev);
-	if (ret)
-		return ret;
-
-	ret = devm_iio_device_register(&client->dev, indio_dev);
-	if (ret)
-		return ret;
-
-	if (dev->irq > 0) {
-		ret = devm_request_threaded_irq(&client->dev, dev->irq, NULL,
-						ap3216c_irq_thread,
-						IRQF_ONESHOT | IRQF_TRIGGER_LOW,
-						AP3216C_NAME, indio_dev);
-		if (ret) {
-			dev_err(&client->dev, "request threaded irq %d failed: ret=%d\n",
-				dev->irq, ret);
-			return ret;
-		}
-	} else {
-		dev_warn(&client->dev, "no irq from DTS; raw channels remain available\n");
+	/* 初始化IIC接口的regmap */
+	dev->regmap = regmap_init_i2c(client, &dev->regmap_config);
+	if (IS_ERR(dev->regmap))
+	{
+		ret = PTR_ERR(dev->regmap);
+		goto err_regmap_exit;
 	}
 
-	ap3216c_debugfs_init(indio_dev);
-	dev_info(&client->dev, "ap3216c IIO ready: irq=%d\n", dev->irq);
+	mutex_init(&dev->lock);
 
+	/* 中断号及相关初始化参数 */
+	dev->irq = client->irq;
+	dev->als_th.low = 0;
+	dev->als_th.high = AP3216C_ALS_MAX_VALUE;
+	dev->event_enable_mask = 0;
+	dev->last_int_status = 0;
+	dev->ps_th.low = 100;
+	dev->ps_th.high = 200;
+	dev->ps_int_algo = AP3216C_PS_INT_ALGO_HYSTERESIS;
+
+	if (dev->irq > 0)
+	{
+		ret = devm_request_threaded_irq(&client->dev, dev->irq, NULL,
+										ap3216c_irq_thread,
+										IRQF_ONESHOT | IRQF_TRIGGER_LOW,
+										AP3216C_NAME, indio_dev);
+		if (ret)
+			goto err_regmap_exit;
+	}
+
+	ret = ap3216c_reginit(dev);
+	if (ret)
+		goto err_regmap_exit;
+
+	/* 4、iio_dev的其他成员变量 */
+	indio_dev->dev.parent = &client->dev;
+	indio_dev->info = &ap3216c_info;
+	indio_dev->name = AP3216C_NAME;
+	indio_dev->modes = INDIO_DIRECT_MODE; /* 直接模式，提供sysfs接口 */
+	indio_dev->channels = ap3216c_channels;
+	indio_dev->num_channels = ARRAY_SIZE(ap3216c_channels);
+
+	/* 5、注册iio_dev */
+	ret = iio_device_register(indio_dev);
+	if (ret < 0)
+	{
+		dev_err(&client->dev, "iio_device_register failed\n");
+		goto err_regmap_exit;
+	}
 	return 0;
+
+err_regmap_exit:
+	regmap_exit(dev->regmap);
+	return ret;
 }
 
 static int ap3216c_remove(struct i2c_client *client)
@@ -1476,37 +1243,31 @@ static int ap3216c_remove(struct i2c_client *client)
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct ap3216c_dev *dev;
 
-	if (!indio_dev)
-		return 0;
-
 	dev = iio_priv(indio_dev);
-	ap3216c_debugfs_remove(dev);
+	mutex_lock(&dev->lock);
+	ap3216c_set_mode(dev, AP3216C_MODE_POWER_DOWN);
+	mutex_unlock(&dev->lock);
 
-	mutex_lock(&dev->bus_lock);
-	ap3216c_write_reg(dev, AP3216C_SYSTEM_CONFIG, AP3216C_MODE_POWER_DOWN);
-	mutex_unlock(&dev->bus_lock);
+	iio_device_unregister(indio_dev);
+	regmap_exit(dev->regmap);
 
 	return 0;
 }
 
 static const struct i2c_device_id ap3216c_id[] = {
-	{ "ap3216c", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, ap3216c_id);
+	{"alientek,ap3216c", 0},
+	{}};
 
 static const struct of_device_id ap3216c_of_match[] = {
-	{ .compatible = "alientek,ap3216c" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, ap3216c_of_match);
+	{.compatible = "alientek,ap3216c"},
+	{/* Sentinel */}};
 
 static struct i2c_driver ap3216c_driver = {
 	.probe = ap3216c_probe,
 	.remove = ap3216c_remove,
 	.driver = {
-		.name = AP3216C_NAME,
 		.owner = THIS_MODULE,
+		.name = "ap3216c",
 		.of_match_table = ap3216c_of_match,
 	},
 	.id_table = ap3216c_id,
@@ -1516,4 +1277,3 @@ module_i2c_driver(ap3216c_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("FriedEgg");
-MODULE_DESCRIPTION("AP3216C ALS/IR/PS IIO driver");
