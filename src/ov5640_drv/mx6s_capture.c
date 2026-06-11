@@ -179,6 +179,20 @@
 #define NUM_FORMATS ARRAY_SIZE(formats)
 #define MX6SX_MAX_SENSORS    1
 
+/**
+ * struct csi_signal_cfg_t - CSI 输入信号极性和位宽描述
+ * @data_width: sensor 数据线宽度，对应并口输入的有效数据位数。
+ * @clk_mode: sensor 时钟模式，通常描述 gated/non-gated pixel clock。
+ * @ext_vsync: 是否使用外部 VSYNC 信号。
+ * @Vsync_pol: VSYNC 有效极性。
+ * @Hsync_pol: HSYNC 有效极性。
+ * @pixclk_pol: pixel clock 采样边沿/极性。
+ * @data_pol: 数据线极性，置位时表示输入数据取反。
+ * @sens_clksrc: sensor 时钟源选择。
+ *
+ * 这是 Freescale 原始驱动保留下来的信号配置位图描述。本文件当前主要
+ * 直接写 CSI 控制寄存器，未实例化该结构，但字段命名可帮助对照手册。
+ */
 struct csi_signal_cfg_t {
 	unsigned data_width:3;
 	unsigned clk_mode:2;
@@ -190,6 +204,52 @@ struct csi_signal_cfg_t {
 	unsigned sens_clksrc:1;
 };
 
+/**
+ * struct csi_config_t - CSI 控制寄存器位图缓存描述
+ * @swap16_en: CSICR1 SWAP16_EN，16-bit halfword 交换控制。
+ * @ext_vsync: CSICR1 EXT_VSYNC，外部 VSYNC 选择。
+ * @eof_int_en: CSICR1 EOF_INT_EN，帧结束中断使能。
+ * @prp_if_en: CSICR1 PRP_IF_EN，预处理接口使能。
+ * @ccir_mode: CSICR1 CCIR_MODE，BT.656/TV decoder 输入模式。
+ * @cof_int_en: CSICR1 COF_INT_EN，change-of-field 中断使能。
+ * @sf_or_inten: CSICR1 STAT FIFO overflow 中断使能。
+ * @rf_or_inten: CSICR1 RxFIFO overflow 中断使能。
+ * @sff_dma_done_inten: CSICR1 STAT FIFO DMA done 中断使能。
+ * @statff_inten: CSICR1 STAT FIFO 中断使能。
+ * @fb2_dma_done_inten: CSICR1 framebuffer 2 DMA done 中断使能。
+ * @fb1_dma_done_inten: CSICR1 framebuffer 1 DMA done 中断使能。
+ * @rxff_inten: CSICR1 RxFIFO data ready 中断使能。
+ * @sof_pol: CSICR1 SOF 极性。
+ * @sof_inten: CSICR1 SOF 中断使能。
+ * @mclkdiv: CSICR1 MCLK 分频值。
+ * @hsync_pol: CSICR1 HSYNC 极性。
+ * @ccir_en: CSICR1 CCIR 使能。
+ * @mclken: CSICR1 sensor MCLK 输出使能。
+ * @fcc: CSICR1 FIFO control。
+ * @pack_dir: CSICR1 打包方向。
+ * @gclk_mode: CSICR1 gated clock 模式。
+ * @inv_data: CSICR1 输入数据反相。
+ * @inv_pclk: CSICR1 pixel clock 反相。
+ * @redge: CSICR1 上升沿采样。
+ * @pixel_bit: CSICR1 pixel bit 选择。
+ * @frmcnt: CSICR3 帧计数器。
+ * @frame_reset: CSICR3 帧计数器复位。
+ * @dma_reflash_rff: CSICR3 RxFIFO DMA 刷新。
+ * @dma_reflash_sff: CSICR3 STAT FIFO DMA 刷新。
+ * @dma_req_en_rff: CSICR3 RxFIFO DMA 请求使能。
+ * @dma_req_en_sff: CSICR3 STAT FIFO DMA 请求使能。
+ * @statff_level: CSICR3 STAT FIFO 触发水位。
+ * @hresp_err_en: CSICR3 AHB HRESP 错误中断使能。
+ * @rxff_level: CSICR3 RxFIFO 触发水位。
+ * @two_8bit_sensor: CSICR3 双 8-bit sensor 输入模式。
+ * @zero_pack_en: CSICR3 零填充打包使能。
+ * @ecc_int_en: CSICR3 ECC 中断使能。
+ * @ecc_auto_en: CSICR3 ECC 自动校验使能。
+ * @rxcnt: RxFIFO 计数器。
+ *
+ * 这是寄存器位语义的结构化镜像。本驱动当前使用 BIT_* 宏直接读改写
+ * MMIO 寄存器，因此它主要作为学习和对照手册的辅助描述。
+ */
 struct csi_config_t {
 	/* control reg 1 */
 	unsigned int swap16_en:1;
@@ -237,8 +297,17 @@ struct csi_config_t {
 	unsigned int rxcnt;
 };
 
-/*
- * Basic structures
+/**
+ * struct mx6s_fmt - CSI host 支持的视频格式映射
+ * @name: 给 VIDIOC_ENUM_FMT 返回的人类可读格式名。
+ * @fourcc: V4L2 fourcc。保留字段，当前和 @pixelformat 相同。
+ * @pixelformat: 用户态 V4L2_PIX_FMT_* 像素格式。
+ * @mbus_code: sensor subdev 端 media bus code。
+ * @bpp: 每像素字节数，用于计算 sizeimage/bytesperline。
+ *
+ * CSI host 需要把用户态看到的 V4L2 pixel format 映射到 sensor subdev
+ * 能协商的 media-bus format。OV5640 的枚举结果会通过 @mbus_code
+ * 反查到这里的条目。
  */
 struct mx6s_fmt {
 	char  name[32];
@@ -282,25 +351,77 @@ static struct mx6s_fmt formats[] = {
 	}
 };
 
+/**
+ * struct mx6s_buf_internal - 驱动内部 buffer 队列节点
+ * @queue: Linux 内核侵入式链表节点，用于 capture/active/discard 队列。
+ * @bufnum: 当前写入 CSI_CSIDMASA_FB1/FB2 的硬件 buffer 槽号。
+ * @discard: true 表示该节点指向丢帧用的内部 DMA buffer，不返回用户态。
+ */
 struct mx6s_buf_internal {
 	struct list_head	queue;
 	int					bufnum;
 	bool				discard;
 };
 
-/* buffer for one video frame */
+/**
+ * struct mx6s_buffer - 单帧视频 buffer
+ * @vb: videobuf2 的公共 buffer 对象。必须放在本结构体开头，便于旧代码
+ *      和 VB2 core 使用外层对象地址。
+ * @internal: CSI host 私有的链表节点和硬件槽位信息。
+ */
 struct mx6s_buffer {
-	/* common v4l buffer stuff -- must be first */
 	struct vb2_buffer			vb;
 	struct mx6s_buf_internal	internal;
 };
 
+/**
+ * struct mx6s_csi_mux - IOMUXC GPR 中的 CSI 输入 mux 描述
+ * @gpr: syscon_node_to_regmap() 得到的 GPR regmap。
+ * @req_gpr: 需要更新的 GPR 寄存器偏移，来自设备树 csi-mux-mipi。
+ * @req_bit: 需要置位的 bit 编号，来自设备树 csi-mux-mipi。
+ */
 struct mx6s_csi_mux {
 	struct regmap *gpr;
 	u8 req_gpr;
 	u8 req_bit;
 };
 
+/**
+ * struct mx6s_csi_dev - i.MX6S/6ULL CSI host 驱动私有数据
+ * @dev: 绑定的 platform device 的 struct device。
+ * @vdev: 注册到 V4L2 core 的 /dev/videoX 设备。
+ * @sd: 已绑定的 sensor v4l2_subdev，本工程通常是 OV5640。
+ * @v4l2_dev: V4L2 顶层设备对象，承载 video node 和 subdev。
+ * @vb2_vidq: videobuf2 capture 队列，管理用户 buffer 生命周期。
+ * @alloc_ctx: vb2-dma-contig 分配上下文，保存 DMA 设备信息。
+ * @ctrl_handler: V4L2 控件处理器，本驱动当前未填充控件。
+ * @lock: 进程上下文互斥锁，保护 open/close/ioctl 队列配置路径。
+ * @slock: IRQ 和进程上下文共享的自旋锁，保护 buffer 链表和硬件槽位。
+ * @clk_disp_axi: CSI/显示子系统访问 AXI 总线所需时钟。
+ * @clk_disp_dcic: 显示/DCIC 相关时钟，CSI 模块依赖该时钟域。
+ * @clk_csi_mclk: 输出给 sensor 或 CSI 模块自身使用的 MCLK。
+ * @regbase: devm_ioremap_resource() 映射后的 CSI MMIO 基址。
+ * @irq: platform_get_irq() 获取的 CSI 中断号。
+ * @type: 当前 V4L2 buffer type，通常为 V4L2_BUF_TYPE_VIDEO_CAPTURE。
+ * @bytesperline: 每行字节数缓存，当前主要使用 @pix.bytesperline。
+ * @std: 模拟制式 ID，用于隔行/TV decoder 模式。
+ * @fmt: 当前选中的 host 格式映射。
+ * @pix: 当前 V4L2 capture pixel format。
+ * @mbus_code: 当前 sensor media-bus code。
+ * @frame_count: 已完成帧序号，写入 v4l2_buffer.sequence。
+ * @capture: 用户态已 QBUF、等待交给 CSI DMA 的 buffer 队列。
+ * @active_bufs: 已写入 CSI FB1/FB2、正在被硬件 DMA 使用的队列。
+ * @discard: 用户 buffer 不足时可复用的内部丢帧队列。
+ * @discard_buffer: dma_alloc_coherent() 分配的丢帧 buffer CPU 地址。
+ * @discard_buffer_dma: @discard_buffer 对应的 DMA 地址。
+ * @discard_size: 丢帧 buffer 的图像有效大小。
+ * @buf_discard: 两个内部队列节点，对应 CSI 双 buffer 槽。
+ * @asd: 描述异步等待的 OV5640 subdev。
+ * @subdev_notifier: V4L2 async notifier，负责等待 sensor probe。
+ * @async_subdevs: notifier 使用的 subdev 匹配表，以 NULL 结尾。
+ * @csi_mux_mipi: true 表示 CSI 输入来自 MIPI CSI bridge。
+ * @csi_mux: MIPI 输入路径的 GPR mux 配置。
+ */
 struct mx6s_csi_dev {
 	struct device		*dev;
 	struct video_device *vdev;
@@ -348,22 +469,57 @@ struct mx6s_csi_dev {
 	struct mx6s_csi_mux csi_mux;
 };
 
+/**
+ * csi_read() - 读取 CSI MMIO 寄存器
+ * @csi: CSI 私有数据，@regbase 必须已经映射。
+ * @offset: 相对 CSI 寄存器基址的偏移，例如 CSI_CSICR1。
+ *
+ * __raw_readl() 是低层 MMIO 读 API，不做 endian 转换，也不提供额外
+ * 内存屏障。这里访问的是 SoC 内部寄存器，偏移均由本驱动宏定义控制。
+ *
+ * Return: 寄存器当前 32-bit 原始值。
+ */
 static inline int csi_read(struct mx6s_csi_dev *csi, unsigned int offset)
 {
 	return __raw_readl(csi->regbase + offset);
 }
+
+/**
+ * csi_write() - 写入 CSI MMIO 寄存器
+ * @csi: CSI 私有数据，@regbase 必须已经映射。
+ * @value: 要写入寄存器的 32-bit 值。
+ * @offset: 相对 CSI 寄存器基址的偏移，例如 CSI_CSIDMASA_FB1。
+ *
+ * __raw_writel() 直接向 MMIO 地址写入原始值。调用者负责按硬件手册
+ * 组织 bit，并负责需要的读改写顺序。
+ */
 static inline void csi_write(struct mx6s_csi_dev *csi, unsigned int value,
 			     unsigned int offset)
 {
 	__raw_writel(value, csi->regbase + offset);
 }
 
+/**
+ * notifier_to_mx6s_dev() - 由 async notifier 指针取回 CSI 私有对象
+ * @n: 嵌入在 struct mx6s_csi_dev 中的 v4l2_async_notifier。
+ *
+ * container_of() 是内核常用的“由成员指针反推外层结构体”宏。这里
+ * async core 只把 notifier 传给回调，驱动需要借它回到 mx6s_csi_dev。
+ *
+ * Return: 包含 @n 的 struct mx6s_csi_dev 指针。
+ */
 static inline struct mx6s_csi_dev
 				*notifier_to_mx6s_dev(struct v4l2_async_notifier *n)
 {
 	return container_of(n, struct mx6s_csi_dev, subdev_notifier);
 }
 
+/**
+ * format_by_fourcc() - 按 V4L2 fourcc 查找 host 格式描述
+ * @fourcc: 用户态传入的 V4L2_PIX_FMT_* 像素格式。
+ *
+ * Return: 找到时返回 formats[] 中的条目，未找到时返回 NULL。
+ */
 struct mx6s_fmt *format_by_fourcc(int fourcc)
 {
 	int i;
@@ -377,6 +533,12 @@ struct mx6s_fmt *format_by_fourcc(int fourcc)
 	return NULL;
 }
 
+/**
+ * format_by_mbus() - 按 media-bus code 查找 host 格式描述
+ * @code: sensor subdev 枚举出的 MEDIA_BUS_FMT_* code。
+ *
+ * Return: 找到时返回 formats[] 中的条目，未找到时返回 NULL。
+ */
 struct mx6s_fmt *format_by_mbus(u32 code)
 {
 	int i;
@@ -390,11 +552,24 @@ struct mx6s_fmt *format_by_mbus(u32 code)
 	return NULL;
 }
 
+/**
+ * mx6s_ibuf_to_buf() - 由内部队列节点取回用户态 mx6s_buffer
+ * @int_buf: 嵌入在 struct mx6s_buffer 中的 internal 节点。
+ *
+ * 丢帧节点不是 struct mx6s_buffer 的成员，调用前必须确认
+ * @int_buf->discard 为 false。
+ *
+ * Return: 包含 @int_buf 的 struct mx6s_buffer 指针。
+ */
 static struct mx6s_buffer *mx6s_ibuf_to_buf(struct mx6s_buf_internal *int_buf)
 {
 	return container_of(int_buf, struct mx6s_buffer, internal);
 }
 
+/**
+ * csi_clk_enable() - 打开 CSI 访问和采集所需时钟
+ * @csi_dev: CSI 私有数据，三个 clk 指针必须已由 devm_clk_get() 获取。
+ */
 void csi_clk_enable(struct mx6s_csi_dev *csi_dev)
 {
 	/*
@@ -406,6 +581,10 @@ void csi_clk_enable(struct mx6s_csi_dev *csi_dev)
 	clk_prepare_enable(csi_dev->clk_csi_mclk);
 }
 
+/**
+ * csi_clk_disable() - 关闭 CSI 访问和采集所需时钟
+ * @csi_dev: CSI 私有数据。
+ */
 void csi_clk_disable(struct mx6s_csi_dev *csi_dev)
 {
 	/*
@@ -417,6 +596,10 @@ void csi_clk_disable(struct mx6s_csi_dev *csi_dev)
 	clk_disable_unprepare(csi_dev->clk_disp_axi);
 }
 
+/**
+ * csihw_reset() - 将 CSI 控制寄存器恢复为硬件复位默认值
+ * @csi_dev: CSI 私有数据，寄存器和时钟必须可访问。
+ */
 static void csihw_reset(struct mx6s_csi_dev *csi_dev)
 {
 	/*
@@ -432,6 +615,13 @@ static void csihw_reset(struct mx6s_csi_dev *csi_dev)
 	__raw_writel(CSICR3_RESET_VAL, csi_dev->regbase + CSI_CSICR3);
 }
 
+/**
+ * csisw_reset() - 对运行中的 CSI 做软件复位
+ * @csi_dev: CSI 私有数据。
+ *
+ * 复位顺序是：关闭 CSI、清 RxFIFO、刷新嵌入式 DMA、清 pending 状态、
+ * 再重新打开 CSI。msleep() 会让出 CPU，只能在可睡眠上下文中使用。
+ */
 static void csisw_reset(struct mx6s_csi_dev *csi_dev)
 {
 	int cr1, cr3, cr18, isr;
@@ -452,6 +642,7 @@ static void csisw_reset(struct mx6s_csi_dev *csi_dev)
 	cr3 |= BIT_DMA_REFLASH_RFF | BIT_FRMCNT_RST;
 	csi_write(csi_dev, cr3, CSI_CSICR3);
 
+	/* msleep() 至少睡眠指定毫秒数，用来等待硬件 FIFO/DMA 状态稳定。 */
 	msleep(2);
 
 	cr1 = csi_read(csi_dev, CSI_CSICR1);
@@ -460,14 +651,17 @@ static void csisw_reset(struct mx6s_csi_dev *csi_dev)
 	isr = csi_read(csi_dev, CSI_CSISR);
 	csi_write(csi_dev, isr, CSI_CSISR);
 
-	/* Ensable csi  */
+	/* Enable csi */
 	cr18 |= BIT_CSI_ENABLE;
 	csi_write(csi_dev, cr18, CSI_CSICR18);
 }
 
-/*!
- * csi_init_interface
- *    Init csi interface
+/**
+ * csi_init_interface() - 初始化 CSI 基础接口寄存器
+ * @csi_dev: CSI 私有数据。
+ *
+ * 这里只配置保守默认值。真正的宽高、MIPI 数据类型和隔行模式在
+ * mx6s_configure_csi() 中按当前 V4L2 格式重新设置。
  */
 static void csi_init_interface(struct mx6s_csi_dev *csi_dev)
 {
@@ -503,6 +697,11 @@ static void csi_init_interface(struct mx6s_csi_dev *csi_dev)
 	__raw_writel(val, csi_dev->regbase + CSI_CSICR3);
 }
 
+/**
+ * csi_enable_int() - 使能 CSI 采集中断
+ * @csi_dev: CSI 私有数据。
+ * @arg: 为 1 时额外使能 FB1/FB2 DMA done 中断；其他值只开 SOF/overflow。
+ */
 static void csi_enable_int(struct mx6s_csi_dev *csi_dev, int arg)
 {
 	unsigned long cr1 = __raw_readl(csi_dev->regbase + CSI_CSICR1);
@@ -510,13 +709,17 @@ static void csi_enable_int(struct mx6s_csi_dev *csi_dev, int arg)
 	cr1 |= BIT_SOF_INTEN;
 	cr1 |= BIT_RFF_OR_INT;
 	if (arg == 1) {
-		/* still capture needs DMA intterrupt */
+		/* Still capture needs DMA interrupt. */
 		cr1 |= BIT_FB1_DMA_DONE_INTEN;
 		cr1 |= BIT_FB2_DMA_DONE_INTEN;
 	}
 	__raw_writel(cr1, csi_dev->regbase + CSI_CSICR1);
 }
 
+/**
+ * csi_disable_int() - 关闭 CSI 采集中断
+ * @csi_dev: CSI 私有数据。
+ */
 static void csi_disable_int(struct mx6s_csi_dev *csi_dev)
 {
 	unsigned long cr1 = __raw_readl(csi_dev->regbase + CSI_CSICR1);
@@ -528,6 +731,11 @@ static void csi_disable_int(struct mx6s_csi_dev *csi_dev)
 	__raw_writel(cr1, csi_dev->regbase + CSI_CSICR1);
 }
 
+/**
+ * csi_enable() - 打开或关闭 CSI 模块
+ * @csi_dev: CSI 私有数据。
+ * @arg: 1 表示置位 BIT_CSI_ENABLE，其他值表示清除此位。
+ */
 static void csi_enable(struct mx6s_csi_dev *csi_dev, int arg)
 {
 	unsigned long cr = __raw_readl(csi_dev->regbase + CSI_CSICR18);
@@ -539,11 +747,21 @@ static void csi_enable(struct mx6s_csi_dev *csi_dev, int arg)
 	__raw_writel(cr, csi_dev->regbase + CSI_CSICR18);
 }
 
+/**
+ * csi_buf_stride_set() - 设置 CSI frame buffer 行跨度
+ * @csi_dev: CSI 私有数据。
+ * @stride: 写入 CSI_CSIFBUF_PARA 的 stride，隔行模式下通常为图像宽度。
+ */
 static void csi_buf_stride_set(struct mx6s_csi_dev *csi_dev, u32 stride)
 {
 	__raw_writel(stride, csi_dev->regbase + CSI_CSIFBUF_PARA);
 }
 
+/**
+ * csi_deinterlace_enable() - 配置 CSI 硬件去隔行开关
+ * @csi_dev: CSI 私有数据。
+ * @enable: true 置位 BIT_DEINTERLACE_EN，false 清除此位。
+ */
 static void csi_deinterlace_enable(struct mx6s_csi_dev *csi_dev, bool enable)
 {
 	unsigned long cr18 = __raw_readl(csi_dev->regbase + CSI_CSICR18);
@@ -556,6 +774,11 @@ static void csi_deinterlace_enable(struct mx6s_csi_dev *csi_dev, bool enable)
 	__raw_writel(cr18, csi_dev->regbase + CSI_CSICR18);
 }
 
+/**
+ * csi_deinterlace_mode() - 配置去隔行制式模式
+ * @csi_dev: CSI 私有数据。
+ * @mode: V4L2 标准 ID。V4L2_STD_NTSC 置位 BIT_NTSC_EN，否则按 PAL 类模式处理。
+ */
 static void csi_deinterlace_mode(struct mx6s_csi_dev *csi_dev, int mode)
 {
 	unsigned long cr18 = __raw_readl(csi_dev->regbase + CSI_CSICR18);
@@ -568,6 +791,14 @@ static void csi_deinterlace_mode(struct mx6s_csi_dev *csi_dev, int mode)
 	__raw_writel(cr18, csi_dev->regbase + CSI_CSICR18);
 }
 
+/**
+ * csi_tvdec_enable() - 配置 CSI 的 TV decoder/BT.656 输入模式
+ * @csi_dev: CSI 私有数据。
+ * @enable: true 使能 TV decoder 输入、base address 自动切换和 CCIR 模式。
+ *
+ * 隔行输入需要硬件按 field0/field1 切换写入地址，因此这里同时设置
+ * BIT_BASEADDR_SWITCH_*。非隔行并口输入则恢复 SOF 极性和上升沿采样。
+ */
 static void csi_tvdec_enable(struct mx6s_csi_dev *csi_dev, bool enable)
 {
 	unsigned long cr18 = __raw_readl(csi_dev->regbase + CSI_CSICR18);
@@ -593,6 +824,13 @@ static void csi_tvdec_enable(struct mx6s_csi_dev *csi_dev, bool enable)
 	__raw_writel(cr1, csi_dev->regbase + CSI_CSICR1);
 }
 
+/**
+ * csi_dmareq_rff_enable() - 允许 RxFIFO 向嵌入式 DMA 发起请求
+ * @csi_dev: CSI 私有数据。
+ *
+ * RxFIFO 水位达到配置阈值后，CSI 会把数据 DMA 到当前 FB1/FB2 地址。
+ * 同时使能 HRESP 错误检测，便于发现总线访问异常。
+ */
 static void csi_dmareq_rff_enable(struct mx6s_csi_dev *csi_dev)
 {
 	unsigned long cr3 = __raw_readl(csi_dev->regbase + CSI_CSICR3);
@@ -610,6 +848,10 @@ static void csi_dmareq_rff_enable(struct mx6s_csi_dev *csi_dev)
 	__raw_writel(cr2, csi_dev->regbase + CSI_CSICR2);
 }
 
+/**
+ * csi_dmareq_rff_disable() - 禁止 RxFIFO DMA 请求
+ * @csi_dev: CSI 私有数据。
+ */
 static void csi_dmareq_rff_disable(struct mx6s_csi_dev *csi_dev)
 {
 	unsigned long cr3 = __raw_readl(csi_dev->regbase + CSI_CSICR3);
@@ -620,6 +862,15 @@ static void csi_dmareq_rff_disable(struct mx6s_csi_dev *csi_dev)
 	__raw_writel(cr3, csi_dev->regbase + CSI_CSICR3);
 }
 
+/**
+ * csi_set_imagpara() - 设置 CSI 输入图像宽高参数
+ * @csi: CSI 私有数据。
+ * @width: 写入 CSI_CSIIMAG_PARA 高 16 位的宽度参数。
+ * @height: 写入 CSI_CSIIMAG_PARA 低 16 位的高度参数。
+ *
+ * 并口 8-bit 输入 YUV/RGB565 时，一个像素占两个 byte cycle，所以调用者
+ * 会把 @width 调整成 pix->width * 2；MIPI 输入则保持像素宽度。
+ */
 static void csi_set_imagpara(struct mx6s_csi_dev *csi,
 					int width, int height)
 {
@@ -629,12 +880,24 @@ static void csi_set_imagpara(struct mx6s_csi_dev *csi,
 	imag_para = (width << 16) | height;
 	__raw_writel(imag_para, csi->regbase + CSI_CSIIMAG_PARA);
 
-	/* reflash the embeded DMA controller */
+	/* Refresh the embedded DMA controller. */
 	__raw_writel(cr3 | BIT_DMA_REFLASH_RFF, csi->regbase + CSI_CSICR3);
 }
 
-/*
- *  Videobuf operations
+/* Videobuf2 queue operations. */
+/**
+ * mx6s_videobuf_setup() - 配置 VB2 buffer 数量、平面大小和分配上下文
+ * @vq: VB2 capture 队列，open() 中的 q->drv_priv 指向 CSI 私有数据。
+ * @fmt: VIDIOC_CREATE_BUFS 传入的目标格式；本驱动暂不支持该路径。
+ * @count: 输入为用户请求的 buffer 数，输出为驱动允许的 buffer 数。
+ * @num_planes: 输出为 plane 数。本驱动所有格式都是单 plane。
+ * @sizes: 输出每个 plane 的最小字节数。
+ * @alloc_ctxs: 输出每个 plane 使用的 vb2 allocator 上下文。
+ *
+ * vb2_get_drv_priv() 返回 q->drv_priv，也就是 mx6s_csi_open() 填进去的
+ * csi_dev。VB2 core 在 VIDIOC_REQBUFS 时调用该回调来决定分配多少内存。
+ *
+ * Return: 成功返回 0；不支持 CREATE_BUFS 时返回 -ENOTTY。
  */
 static int mx6s_videobuf_setup(struct vb2_queue *vq,
 			const struct v4l2_format *fmt,
@@ -649,8 +912,13 @@ static int mx6s_videobuf_setup(struct vb2_queue *vq,
 	if (fmt != NULL)
 		return -ENOTTY;
 
+	/*
+	 * alloc_ctxs[0] 告诉 vb2_dma_contig_memops：第 0 个 plane 使用
+	 * open() 中创建的连续 DMA 分配上下文。
+	 */
 	alloc_ctxs[0] = csi_dev->alloc_ctx;
 
+	/* sizeimage 来自 TRY/S_FMT 后的当前像素格式，是单帧最小 DMA 大小。 */
 	sizes[0] = csi_dev->pix.sizeimage;
 
 	pr_debug("size=%d\n", sizes[0]);
@@ -665,6 +933,15 @@ static int mx6s_videobuf_setup(struct vb2_queue *vq,
 	return 0;
 }
 
+/**
+ * mx6s_videobuf_prepare() - 在 buffer 入队前校验并设置有效载荷大小
+ * @vb: VB2 core 管理的单个 buffer。
+ *
+ * VB2 在 QBUF 路径调用该回调。驱动把 plane 0 的 payload 设置为当前
+ * sizeimage，并检查映射出的平面容量是否足够容纳一帧。
+ *
+ * Return: 成功返回 0；buffer 太小时返回 -EINVAL。
+ */
 static int mx6s_videobuf_prepare(struct vb2_buffer *vb)
 {
 	struct mx6s_csi_dev *csi_dev = vb2_get_drv_priv(vb->vb2_queue);
@@ -683,6 +960,7 @@ static int mx6s_videobuf_prepare(struct vb2_buffer *vb)
 		       0xaa, vb2_get_plane_payload(vb, 0));
 #endif
 
+	/* vb2_set_plane_payload() 设置 DQBUF 时用户可见的 bytesused。 */
 	vb2_set_plane_payload(vb, 0, csi_dev->pix.sizeimage);
 	if (vb2_plane_vaddr(vb, 0) &&
 	    vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0)) {
@@ -696,6 +974,13 @@ out:
 	return ret;
 }
 
+/**
+ * mx6s_videobuf_queue() - 将用户 QBUF 的 buffer 放入 CSI 等待队列
+ * @vb: 已由 VB2 core 准备好的 buffer。
+ *
+ * VB2 在 VIDIOC_QBUF 后调用该回调。这里不立即写硬件地址，只把 buffer
+ * 挂到 capture 链表；start_streaming() 和 IRQ frame_done 路径再取用。
+ */
 static void mx6s_videobuf_queue(struct vb2_buffer *vb)
 {
 	struct mx6s_csi_dev *csi_dev = vb2_get_drv_priv(vb->vb2_queue);
@@ -705,13 +990,24 @@ static void mx6s_videobuf_queue(struct vb2_buffer *vb)
 	dev_dbg(csi_dev->dev, "%s (vb=0x%p) 0x%p %lu\n", __func__,
 		vb, vb2_plane_vaddr(vb, 0), vb2_get_plane_payload(vb, 0));
 
+	/*
+	 * capture 链表也会被 IRQ handler 消费。spin_lock_irqsave() 在进程
+	 * 上下文关本地中断并加锁，避免和硬中断并发修改链表。
+	 */
 	spin_lock_irqsave(&csi_dev->slock, flags);
 
+	/* list_add_tail() 保持用户 QBUF 顺序，CSI 按 FIFO 顺序采集。 */
 	list_add_tail(&buf->internal.queue, &csi_dev->capture);
 
 	spin_unlock_irqrestore(&csi_dev->slock, flags);
 }
 
+/**
+ * mx6s_update_csi_buf() - 更新 CSI 双 buffer 中某个槽的 DMA 目标地址
+ * @csi_dev: CSI 私有数据。
+ * @phys: vb2_dma_contig_plane_dma_addr() 返回的 DMA 地址。
+ * @bufnum: 0 对应 FB1，1 对应 FB2。
+ */
 static void mx6s_update_csi_buf(struct mx6s_csi_dev *csi_dev,
 				 unsigned long phys, int bufnum)
 {
@@ -721,6 +1017,10 @@ static void mx6s_update_csi_buf(struct mx6s_csi_dev *csi_dev,
 		csi_write(csi_dev, phys, CSI_CSIDMASA_FB1);
 }
 
+/**
+ * mx6s_csi_init() - open 阶段初始化 CSI 硬件
+ * @csi_dev: CSI 私有数据。
+ */
 static void mx6s_csi_init(struct mx6s_csi_dev *csi_dev)
 {
 	/* 1. 打开 CSI 寄存器访问、总线传输和模块运行所需的时钟。 */
@@ -733,6 +1033,10 @@ static void mx6s_csi_init(struct mx6s_csi_dev *csi_dev)
 	csi_dmareq_rff_disable(csi_dev);
 }
 
+/**
+ * mx6s_csi_deinit() - close 阶段复位 CSI 并关闭时钟
+ * @csi_dev: CSI 私有数据。
+ */
 static void mx6s_csi_deinit(struct mx6s_csi_dev *csi_dev)
 {
 	csihw_reset(csi_dev);
@@ -741,6 +1045,17 @@ static void mx6s_csi_deinit(struct mx6s_csi_dev *csi_dev)
 	csi_clk_disable(csi_dev);
 }
 
+/**
+ * mx6s_csi_enable() - 按当前输入路径启动 CSI 采集硬件
+ * @csi_dev: CSI 私有数据，格式和 DMA buffer 地址必须已配置。
+ *
+ * 并口输入路径等待 SOF 后刷新 DMA，再打开 RxFIFO DMA 请求，避免 sensor
+ * 刚输出时丢字节导致图像错位。MIPI 输入路径不需要这个 SOF 等待流程。
+ * local_irq_save() 临时关闭本地中断，保证等待 SOF 到使能 DMA 的窗口不被
+ * 本 CPU 上的中断打断。
+ *
+ * Return: 成功返回 0；等待 SOF 或 DMA refresh 超时返回 -ETIME。
+ */
 static int mx6s_csi_enable(struct mx6s_csi_dev *csi_dev)
 {
 	struct v4l2_pix_format *pix = &csi_dev->pix;
@@ -801,6 +1116,10 @@ static int mx6s_csi_enable(struct mx6s_csi_dev *csi_dev)
 	return 0;
 }
 
+/**
+ * mx6s_csi_disable() - 停止 CSI 采集硬件
+ * @csi_dev: CSI 私有数据。
+ */
 static void mx6s_csi_disable(struct mx6s_csi_dev *csi_dev)
 {
 	struct v4l2_pix_format *pix = &csi_dev->pix;
@@ -822,6 +1141,15 @@ static void mx6s_csi_disable(struct mx6s_csi_dev *csi_dev)
 	csi_enable(csi_dev, 0);
 }
 
+/**
+ * mx6s_configure_csi() - 按当前 V4L2 格式配置 CSI 图像参数和输入模式
+ * @csi_dev: CSI 私有数据，@fmt 和 @pix 必须已经由 S_FMT 更新。
+ *
+ * 该函数负责把 V4L2 像素格式转换为 CSI 寄存器里的宽度、MIPI data type
+ * 和隔行相关设置。并口 8-bit YUV/RGB565 需要把宽度转换成 byte cycle。
+ *
+ * Return: 成功返回 0；格式不支持时返回 -EINVAL。
+ */
 static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 {
 	struct v4l2_pix_format *pix = &csi_dev->pix;
@@ -884,6 +1212,18 @@ static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 	return 0;
 }
 
+/**
+ * mx6s_start_streaming() - VB2 streamon 时装载初始 DMA buffer 并启动 CSI
+ * @vq: VB2 capture 队列。
+ * @count: VB2 core 已准备好的 queued buffer 数量。
+ *
+ * CSI 硬件有 FB1/FB2 两个 DMA 目标槽，因此至少需要两个用户 buffer。
+ * 当用户后续补 buffer 不及时，驱动会把帧写入 discard_buffer，保证硬件
+ * 可以持续运行而不是因为没有目标地址停住。
+ *
+ * Return: 成功返回 0；buffer 不足返回 -ENOBUFS；丢帧 DMA buffer 分配失败
+ * 返回 -ENOMEM；硬件启动失败返回相应负 errno。
+ */
 static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct mx6s_csi_dev *csi_dev = vb2_get_drv_priv(vq);
@@ -903,6 +1243,10 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 	 * Feel free to work on this ;)
 	 */
 	csi_dev->discard_size = csi_dev->pix.sizeimage;
+	/*
+	 * dma_alloc_coherent() 同时返回 CPU 可访问虚拟地址和硬件可用 DMA
+	 * 地址，且该内存对设备/CPU 保持一致性，不需要手工 cache sync。
+	 */
 	csi_dev->discard_buffer = dma_alloc_coherent(csi_dev->v4l2_dev.dev,
 					PAGE_ALIGN(csi_dev->discard_size),
 					&csi_dev->discard_buffer_dma,
@@ -927,6 +1271,7 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 	vb = &buf->vb;
 	vb->state = VB2_BUF_STATE_ACTIVE;
 
+	/* vb2_dma_contig_plane_dma_addr() 取 plane 0 的连续 DMA 总线地址。 */
 	phys = vb2_dma_contig_plane_dma_addr(vb, 0);
 
 	mx6s_update_csi_buf(csi_dev, phys, buf->internal.bufnum);
@@ -948,6 +1293,13 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 	return mx6s_csi_enable(csi_dev);
 }
 
+/**
+ * mx6s_stop_streaming() - VB2 streamoff 时停止 CSI 并归还所有未完成 buffer
+ * @vq: VB2 capture 队列。
+ *
+ * VB2 要求驱动在 stop_streaming() 返回前，把已经交给硬件或驱动持有的
+ * 所有 buffer 通过 vb2_buffer_done() 还给 core。
+ */
 static void mx6s_stop_streaming(struct vb2_queue *vq)
 {
 	struct mx6s_csi_dev *csi_dev = vb2_get_drv_priv(vq);
@@ -963,6 +1315,7 @@ static void mx6s_stop_streaming(struct vb2_queue *vq)
 				&csi_dev->active_bufs, internal.queue) {
 		list_del_init(&buf->internal.queue);
 		if (buf->vb.state == VB2_BUF_STATE_ACTIVE)
+			/* 标记 ERROR 后，阻塞在 DQBUF/read/poll 的用户会被唤醒。 */
 			vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
 	}
 
@@ -982,6 +1335,7 @@ static void mx6s_stop_streaming(struct vb2_queue *vq)
 
 	spin_unlock_irqrestore(&csi_dev->slock, flags);
 
+	/* size、CPU 地址和 DMA 地址必须与 dma_alloc_coherent() 时匹配。 */
 	dma_free_coherent(csi_dev->v4l2_dev.dev,
 				csi_dev->discard_size, b,
 				csi_dev->discard_buffer_dma);
@@ -997,6 +1351,16 @@ static struct vb2_ops mx6s_videobuf_ops = {
 	.stop_streaming	 = mx6s_stop_streaming,
 };
 
+/**
+ * mx6s_csi_frame_done() - 处理某个 CSI DMA buffer 槽的一帧完成事件
+ * @csi_dev: CSI 私有数据，调用者必须持有 @slock。
+ * @bufnum: 完成的硬件槽号，0 表示 FB1，1 表示 FB2。
+ * @err: true 表示该帧应以 VB2_BUF_STATE_ERROR 返回。
+ *
+ * 该函数把 active buffer 还给 VB2，然后从 capture 队列取下一个用户
+ * buffer 重新装入同一个硬件槽；如果用户没有及时 QBUF，则装入 discard
+ * buffer 丢弃后续帧。
+ */
 static void mx6s_csi_frame_done(struct mx6s_csi_dev *csi_dev,
 		int bufnum, bool err)
 {
@@ -1035,6 +1399,7 @@ static void mx6s_csi_frame_done(struct mx6s_csi_dev *csi_dev,
 				vb2_get_plane_payload(vb, 0));
 
 		list_del_init(&buf->internal.queue);
+		/* v4l2_get_timestamp() 填充单调时间戳，sequence 是驱动帧计数。 */
 		v4l2_get_timestamp(&vb->v4l2_buf.timestamp);
 		vb->v4l2_buf.sequence = csi_dev->frame_count;
 		if (err)
@@ -1079,15 +1444,28 @@ static void mx6s_csi_frame_done(struct mx6s_csi_dev *csi_dev,
 	mx6s_update_csi_buf(csi_dev, phys, bufnum);
 }
 
+/**
+ * mx6s_csi_irq_handler() - CSI 硬中断处理函数
+ * @irq: Linux IRQ number，由 devm_request_irq() 注册时传入。
+ * @data: dev_id，注册时传入的 struct mx6s_csi_dev 指针。
+ *
+ * 中断中读取并清除 CSI_CSISR，处理 FIFO overflow/HRESP/base-address 错误，
+ * 并在 FB1/FB2 DMA done 时推进 VB2 buffer 队列。硬中断上下文不可睡眠，
+ * 所以这里只做寄存器读写和链表操作。
+ *
+ * Return: IRQ_HANDLED 表示该中断已由本驱动处理。
+ */
 static irqreturn_t mx6s_csi_irq_handler(int irq, void *data)
 {
 	struct mx6s_csi_dev *csi_dev =  data;
 	unsigned long status;
 	u32 cr1, cr3, cr18;
 
+	/* hardirq 中已经关闭本地中断，使用 spin_lock() 保护共享队列即可。 */
 	spin_lock(&csi_dev->slock);
 
 	status = csi_read(csi_dev, CSI_CSISR);
+	/* CSI 状态位采用写 1 清除语义，读到什么 pending 位就写回什么位。 */
 	csi_write(csi_dev, status, CSI_CSISR);
 
 	if (list_empty(&csi_dev->active_bufs)) {
@@ -1127,7 +1505,7 @@ static irqreturn_t mx6s_csi_irq_handler(int irq, void *data)
 		cr3 |= BIT_DMA_REFLASH_RFF;
 		csi_write(csi_dev, cr3, CSI_CSICR3);
 
-		/* Ensable csi  */
+		/* Enable csi */
 		cr18 |= BIT_CSI_ENABLE;
 		csi_write(csi_dev, cr18, CSI_CSICR18);
 	}
@@ -1143,7 +1521,7 @@ static irqreturn_t mx6s_csi_irq_handler(int irq, void *data)
 		cr3 |= BIT_DMA_REFLASH_RFF;
 		csi_write(csi_dev, cr3, CSI_CSICR3);
 
-		/* Ensable csi  */
+		/* Enable csi */
 		cr18 |= BIT_CSI_ENABLE;
 		csi_write(csi_dev, cr18, CSI_CSICR18);
 
@@ -1255,6 +1633,15 @@ unlock:
 	return ret;
 }
 
+/**
+ * mx6s_csi_close() - 关闭 V4L2 视频采集节点
+ * @file: 本次 close 对应的文件实例。
+ *
+ * 释放 VB2 队列、关闭 sensor 电源、清理 DMA 分配上下文，并降低 runtime PM
+ * 使用计数。调用顺序和 mx6s_csi_open() 基本相反。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_csi_close(struct file *file)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
@@ -1262,6 +1649,7 @@ static int mx6s_csi_close(struct file *file)
 
 	mutex_lock(&csi_dev->lock);
 
+	/* vb2_queue_release() 释放 REQBUFS 创建的队列资源并归还残留 buffer。 */
 	vb2_queue_release(&csi_dev->vb2_vidq);
 
 	mx6s_csi_deinit(csi_dev);
@@ -1278,6 +1666,18 @@ static int mx6s_csi_close(struct file *file)
 	return 0;
 }
 
+/**
+ * mx6s_csi_read() - 支持 read() 方式读取视频帧
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @buf: 用户空间目标缓冲区。
+ * @count: 用户缓冲区长度。
+ * @ppos: 文件偏移，视频设备通常不使用实际位置语义。
+ *
+ * vb2_read() 是 VB2 file-io 辅助 API，会在内部执行 buffer 分配、排队、
+ * 等待完成和拷贝到用户空间。
+ *
+ * Return: 成功返回拷贝的字节数；失败返回负 errno。
+ */
 static ssize_t mx6s_csi_read(struct file *file, char __user *buf,
 			       size_t count, loff_t *ppos)
 {
@@ -1293,6 +1693,16 @@ static ssize_t mx6s_csi_read(struct file *file, char __user *buf,
 	return ret;
 }
 
+/**
+ * mx6s_csi_mmap() - 将 VB2 MMAP buffer 映射到用户空间
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @vma: 用户进程的虚拟内存区域描述。
+ *
+ * vb2_mmap() 根据 QUERYBUF 返回的 offset 找到对应 buffer，并建立用户态
+ * VMA 到 DMA buffer 的映射。
+ *
+ * Return: 成功返回 0；失败返回负 errno。
+ */
 static int mx6s_csi_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
@@ -1311,6 +1721,10 @@ static int mx6s_csi_mmap(struct file *file, struct vm_area_struct *vma)
 	return ret;
 }
 
+/*
+ * V4L2 file operations。video_ioctl2() 是 V4L2 ioctl 分发入口，它会把
+ * 用户态 VIDIOC_* 命令解码后调用 mx6s_csi_ioctl_ops 中对应的 vidioc 回调。
+ */
 static struct v4l2_file_operations mx6s_csi_fops = {
 	.owner		= THIS_MODULE,
 	.open		= mx6s_csi_open,
@@ -1321,8 +1735,16 @@ static struct v4l2_file_operations mx6s_csi_fops = {
 	.mmap		= mx6s_csi_mmap,
 };
 
-/*
- * Video node IOCTLs
+/* Video node IOCTL callbacks. */
+/**
+ * mx6s_vidioc_enum_input() - 实现 VIDIOC_ENUMINPUT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle，本驱动期望等于 file->private_data。
+ * @inp: 用户传入/返回的输入源描述。
+ *
+ * 本 CSI host 只有一个 camera 输入，index 只能为 0。
+ *
+ * Return: 成功返回 0；输入 index 非 0 返回 -EINVAL。
  */
 static int mx6s_vidioc_enum_input(struct file *file, void *priv,
 				 struct v4l2_input *inp)
@@ -1337,6 +1759,14 @@ static int mx6s_vidioc_enum_input(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_g_input() - 实现 VIDIOC_G_INPUT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @i: 返回当前输入源 index。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_vidioc_g_input(struct file *file, void *priv, unsigned int *i)
 {
 	*i = 0;
@@ -1344,6 +1774,14 @@ static int mx6s_vidioc_g_input(struct file *file, void *priv, unsigned int *i)
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_s_input() - 实现 VIDIOC_S_INPUT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @i: 要选择的输入源 index，只支持 0。
+ *
+ * Return: 成功返回 0；输入 index 非 0 返回 -EINVAL。
+ */
 static int mx6s_vidioc_s_input(struct file *file, void *priv, unsigned int i)
 {
 	if (i > 0)
@@ -1352,6 +1790,17 @@ static int mx6s_vidioc_s_input(struct file *file, void *priv, unsigned int i)
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_querystd() - 实现 VIDIOC_QUERYSTD 并转发给 sensor subdev
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 返回检测到的视频标准。
+ *
+ * v4l2_subdev_call() 会检查 subdev 对应 ops 是否存在；不存在时通常返回
+ * -ENOIOCTLCMD，存在则调用 sensor 的 video.querystd 回调。
+ *
+ * Return: subdev 回调返回值。
+ */
 static int mx6s_vidioc_querystd(struct file *file, void *priv, v4l2_std_id *a)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
@@ -1360,6 +1809,14 @@ static int mx6s_vidioc_querystd(struct file *file, void *priv, v4l2_std_id *a)
 	return v4l2_subdev_call(sd, video, querystd, a);
 }
 
+/**
+ * mx6s_vidioc_s_std() - 实现 VIDIOC_S_STD 并转发给 sensor subdev
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 用户选择的视频标准 ID。
+ *
+ * Return: subdev video.s_std 的返回值。
+ */
 static int mx6s_vidioc_s_std(struct file *file, void *priv, v4l2_std_id a)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
@@ -1368,6 +1825,14 @@ static int mx6s_vidioc_s_std(struct file *file, void *priv, v4l2_std_id a)
 	return v4l2_subdev_call(sd, video, s_std, a);
 }
 
+/**
+ * mx6s_vidioc_g_std() - 实现 VIDIOC_G_STD 并转发给 sensor subdev
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 返回当前视频标准 ID。
+ *
+ * Return: subdev video.g_std 的返回值。
+ */
 static int mx6s_vidioc_g_std(struct file *file, void *priv, v4l2_std_id *a)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
@@ -1376,6 +1841,17 @@ static int mx6s_vidioc_g_std(struct file *file, void *priv, v4l2_std_id *a)
 	return v4l2_subdev_call(sd, video, g_std, a);
 }
 
+/**
+ * mx6s_vidioc_reqbufs() - 实现 VIDIOC_REQBUFS
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @p: 用户请求的 buffer 类型、数量和内存类型。
+ *
+ * vb2_reqbufs() 会检查 memory/type，并调用 mx6s_videobuf_setup() 完成实际
+ * buffer 分配准备。
+ *
+ * Return: VB2 core 返回值。
+ */
 static int mx6s_vidioc_reqbufs(struct file *file, void *priv,
 			      struct v4l2_requestbuffers *p)
 {
@@ -1386,6 +1862,17 @@ static int mx6s_vidioc_reqbufs(struct file *file, void *priv,
 	return vb2_reqbufs(&csi_dev->vb2_vidq, p);
 }
 
+/**
+ * mx6s_vidioc_querybuf() - 实现 VIDIOC_QUERYBUF
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @p: 用户指定 index，返回该 buffer 的长度、offset、flags 等信息。
+ *
+ * vb2_querybuf() 填充标准 V4L2 buffer 信息。本驱动在 buffer 已 mmap 时把
+ * m.offset 改成 DMA 物理地址，属于 Freescale 旧驱动兼容行为。
+ *
+ * Return: VB2 core 返回值。
+ */
 static int mx6s_vidioc_querybuf(struct file *file, void *priv,
 			       struct v4l2_buffer *p)
 {
@@ -1405,6 +1892,16 @@ static int mx6s_vidioc_querybuf(struct file *file, void *priv,
 	return ret;
 }
 
+/**
+ * mx6s_vidioc_qbuf() - 实现 VIDIOC_QBUF
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @p: 用户要排队的 buffer 描述。
+ *
+ * vb2_qbuf() 完成状态检查、prepare，并最终调用 mx6s_videobuf_queue()。
+ *
+ * Return: VB2 core 返回值。
+ */
 static int mx6s_vidioc_qbuf(struct file *file, void *priv,
 			   struct v4l2_buffer *p)
 {
@@ -1415,6 +1912,17 @@ static int mx6s_vidioc_qbuf(struct file *file, void *priv,
 	return vb2_qbuf(&csi_dev->vb2_vidq, p);
 }
 
+/**
+ * mx6s_vidioc_dqbuf() - 实现 VIDIOC_DQBUF
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @p: 返回已完成 buffer 的描述。
+ *
+ * file->f_flags & O_NONBLOCK 控制无完成帧时是立即返回 -EAGAIN，还是阻塞
+ * 等待 IRQ 路径调用 vb2_buffer_done()。
+ *
+ * Return: VB2 core 返回值。
+ */
 static int mx6s_vidioc_dqbuf(struct file *file, void *priv,
 			    struct v4l2_buffer *p)
 {
@@ -1425,6 +1933,17 @@ static int mx6s_vidioc_dqbuf(struct file *file, void *priv,
 	return vb2_dqbuf(&csi_dev->vb2_vidq, p, file->f_flags & O_NONBLOCK);
 }
 
+/**
+ * mx6s_vidioc_enum_fmt_vid_cap() - 实现 VIDIOC_ENUM_FMT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @f: 用户传入格式 index，返回格式描述和 pixelformat。
+ *
+ * host 自身格式表受 sensor 能输出的 media-bus code 约束，因此先调用
+ * sensor 的 enum_mbus_fmt，再用 format_by_mbus() 映射到 V4L2 pixel format。
+ *
+ * Return: 成功返回 0；枚举结束或格式不支持返回 -EINVAL。
+ */
 static int mx6s_vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 				       struct v4l2_fmtdesc *f)
 {
@@ -1457,6 +1976,18 @@ static int mx6s_vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_try_fmt_vid_cap() - 实现 VIDIOC_TRY_FMT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @f: 输入用户期望格式，输出 sensor/host 协商后的格式。
+ *
+ * v4l2_fill_mbus_format() 把 V4L2 pix format 转成 subdev mbus format；
+ * sensor 的 s_mbus_fmt 可能调整宽高/field；v4l2_fill_pix_format() 再把
+ * 调整后的 mbus format 转回用户可见 pix format。
+ *
+ * Return: 成功返回 0；格式或尺寸非法返回 -EINVAL；sensor 返回错误则透传。
+ */
 static int mx6s_vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 				      struct v4l2_format *f)
 {
@@ -1493,10 +2024,17 @@ static int mx6s_vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 	return ret;
 }
 
-/*
- * The real work of figuring out a workable format.
+/**
+ * mx6s_vidioc_s_fmt_vid_cap() - 实现 VIDIOC_S_FMT 并应用到 CSI 硬件
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @f: 用户请求的采集格式。
+ *
+ * S_FMT 先复用 TRY_FMT 完成 sensor 协商，再把结果缓存到 csi_dev->pix/fmt，
+ * 最后调用 mx6s_configure_csi() 写入 CSI 图像参数寄存器。
+ *
+ * Return: 成功返回 0；协商失败返回负 errno。
  */
-
 static int mx6s_vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 				    struct v4l2_format *f)
 {
@@ -1523,6 +2061,14 @@ static int mx6s_vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_g_fmt_vid_cap() - 实现 VIDIOC_G_FMT
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @f: 返回当前缓存的采集格式。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_vidioc_g_fmt_vid_cap(struct file *file, void *priv,
 				    struct v4l2_format *f)
 {
@@ -1535,6 +2081,14 @@ static int mx6s_vidioc_g_fmt_vid_cap(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_querycap() - 实现 VIDIOC_QUERYCAP
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @cap: 返回驱动名、设备名、bus 信息和能力位。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_vidioc_querycap(struct file *file, void  *priv,
 			       struct v4l2_capability *cap)
 {
@@ -1542,7 +2096,6 @@ static int mx6s_vidioc_querycap(struct file *file, void  *priv,
 
 	WARN_ON(priv != file->private_data);
 
-	/* cap->name is set by the friendly caller:-> */
 	strlcpy(cap->driver, MX6S_CAM_DRV_NAME, sizeof(cap->driver));
 	strlcpy(cap->card, MX6S_CAM_DRIVER_DESCRIPTION, sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s",
@@ -1553,6 +2106,17 @@ static int mx6s_vidioc_querycap(struct file *file, void  *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_streamon() - 实现 VIDIOC_STREAMON
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @i: 要启动的 buffer 类型，只支持 V4L2_BUF_TYPE_VIDEO_CAPTURE。
+ *
+ * vb2_streamon() 会调用 mx6s_start_streaming() 启动 CSI host；成功后再通知
+ * sensor subdev 开始输出图像。
+ *
+ * Return: 成功返回 0；类型不匹配返回 -EINVAL；VB2 启动失败则透传。
+ */
 static int mx6s_vidioc_streamon(struct file *file, void *priv,
 			       enum v4l2_buf_type i)
 {
@@ -1572,6 +2136,16 @@ static int mx6s_vidioc_streamon(struct file *file, void *priv,
 	return ret;
 }
 
+/**
+ * mx6s_vidioc_streamoff() - 实现 VIDIOC_STREAMOFF
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @i: 要停止的 buffer 类型，只支持 V4L2_BUF_TYPE_VIDEO_CAPTURE。
+ *
+ * 先让 VB2 停止 host 采集并回收 buffer，再通知 sensor 停止输出。
+ *
+ * Return: 成功返回 0；类型不匹配返回 -EINVAL。
+ */
 static int mx6s_vidioc_streamoff(struct file *file, void *priv,
 				enum v4l2_buf_type i)
 {
@@ -1584,8 +2158,8 @@ static int mx6s_vidioc_streamoff(struct file *file, void *priv,
 		return -EINVAL;
 
 	/*
-	 * This calls buf_release from host driver's videobuf_queue_ops for all
-	 * remaining buffers. When the last buffer is freed, stop capture
+	 * vb2_streamoff() 会进入 stop_streaming()，归还队列中剩余 buffer，
+	 * 并把 VB2 队列状态切回非 streaming。
 	 */
 	vb2_streamoff(&csi_dev->vb2_vidq, i);
 
@@ -1594,6 +2168,16 @@ static int mx6s_vidioc_streamoff(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_cropcap() - 实现 VIDIOC_CROPCAP 的占位回调
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @fh: V4L2 core 传入的 file handle。
+ * @a: 用户传入/返回的裁剪能力参数。
+ *
+ * 当前驱动不实现实际裁剪，只校验 buffer type 后返回成功。
+ *
+ * Return: 成功返回 0；类型不匹配返回 -EINVAL。
+ */
 static int mx6s_vidioc_cropcap(struct file *file, void *fh,
 			      struct v4l2_cropcap *a)
 {
@@ -1606,6 +2190,16 @@ static int mx6s_vidioc_cropcap(struct file *file, void *fh,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_g_crop() - 实现 VIDIOC_G_CROP 的占位回调
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 用户传入/返回的裁剪参数。
+ *
+ * 当前驱动不实现实际裁剪，只校验 buffer type 后返回成功。
+ *
+ * Return: 成功返回 0；类型不匹配返回 -EINVAL。
+ */
 static int mx6s_vidioc_g_crop(struct file *file, void *priv,
 			     struct v4l2_crop *a)
 {
@@ -1618,6 +2212,16 @@ static int mx6s_vidioc_g_crop(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_s_crop() - 实现 VIDIOC_S_CROP 的占位回调
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 用户请求的裁剪参数。
+ *
+ * 当前驱动不实现实际裁剪，只校验 buffer type 后返回成功。
+ *
+ * Return: 成功返回 0；类型不匹配返回 -EINVAL。
+ */
 static int mx6s_vidioc_s_crop(struct file *file, void *priv,
 			     const struct v4l2_crop *a)
 {
@@ -1631,6 +2235,14 @@ static int mx6s_vidioc_s_crop(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_g_parm() - 实现 VIDIOC_G_PARM 并转发给 sensor subdev
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 返回当前流参数，如 timeperframe。
+ *
+ * Return: subdev video.g_parm 的返回值。
+ */
 static int mx6s_vidioc_g_parm(struct file *file, void *priv,
 			     struct v4l2_streamparm *a)
 {
@@ -1640,6 +2252,14 @@ static int mx6s_vidioc_g_parm(struct file *file, void *priv,
 	return v4l2_subdev_call(sd, video, g_parm, a);
 }
 
+/**
+ * mx6s_vidioc_s_parm() - 实现 VIDIOC_S_PARM 并转发给 sensor subdev
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @a: 用户请求的流参数，如帧率。
+ *
+ * Return: subdev video.s_parm 的返回值。
+ */
 static int mx6s_vidioc_s_parm(struct file *file, void *priv,
 				struct v4l2_streamparm *a)
 {
@@ -1649,6 +2269,17 @@ static int mx6s_vidioc_s_parm(struct file *file, void *priv,
 	return v4l2_subdev_call(sd, video, s_parm, a);
 }
 
+/**
+ * mx6s_vidioc_enum_framesizes() - 实现 VIDIOC_ENUM_FRAMESIZES
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @fsize: 输入 pixel_format/index，返回支持的帧尺寸。
+ *
+ * 该回调把用户态 pixel_format 转成 mbus code，再调用 sensor pad ops
+ * enum_frame_size 查询 OV5640 支持的分辨率。
+ *
+ * Return: 成功返回 0；格式不支持或 sensor 枚举失败返回负 errno。
+ */
 static int mx6s_vidioc_enum_framesizes(struct file *file, void *priv,
 					 struct v4l2_frmsizeenum *fsize)
 {
@@ -1689,6 +2320,14 @@ static int mx6s_vidioc_enum_framesizes(struct file *file, void *priv,
 	return 0;
 }
 
+/**
+ * mx6s_vidioc_enum_frameintervals() - 实现 VIDIOC_ENUM_FRAMEINTERVALS
+ * @file: 打开的 /dev/videoX 文件实例。
+ * @priv: V4L2 core 传入的 file handle。
+ * @interval: 输入 pixel_format/width/height/index，返回离散帧间隔。
+ *
+ * Return: 成功返回 0；格式不支持或 sensor 枚举失败返回负 errno。
+ */
 static int mx6s_vidioc_enum_frameintervals(struct file *file, void *priv,
 		struct v4l2_frmivalenum *interval)
 {
@@ -1716,6 +2355,7 @@ static int mx6s_vidioc_enum_frameintervals(struct file *file, void *priv,
 	return 0;
 }
 
+/* V4L2 ioctl operation table，供 video_ioctl2() 按 VIDIOC_* 命令分发。 */
 static const struct v4l2_ioctl_ops mx6s_csi_ioctl_ops = {
 	.vidioc_querycap          = mx6s_vidioc_querycap,
 	.vidioc_enum_fmt_vid_cap  = mx6s_vidioc_enum_fmt_vid_cap,
@@ -1743,6 +2383,18 @@ static const struct v4l2_ioctl_ops mx6s_csi_ioctl_ops = {
 	.vidioc_enum_frameintervals = mx6s_vidioc_enum_frameintervals,
 };
 
+/**
+ * subdev_notifier_bound() - V4L2 async core 找到匹配 sensor 后的绑定回调
+ * @notifier: 本 CSI host 注册的 async notifier。
+ * @subdev: 已完成 probe 并匹配 OF node 的 sensor subdev。
+ * @asd: 触发本次匹配的 async subdev 描述。
+ *
+ * async core 根据 mx6sx_register_subdevs() 设置的 V4L2_ASYNC_MATCH_OF 规则，
+ * 在 OV5640 subdev 注册时调用这里。驱动保存 subdev 指针，后续 open/ioctl
+ * 就能通过 v4l2_subdev_call() 控制 sensor。
+ *
+ * Return: 成功返回 0；subdev 为空返回 -EINVAL。
+ */
 static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 			    struct v4l2_subdev *subdev,
 			    struct v4l2_async_subdev *asd)
@@ -1784,6 +2436,10 @@ static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
 	u32 out_val[3];
 	int ret;
 
+	/*
+	 * of_property_read_u32_array() 从当前 CSI OF node 读取 3 个 u32 cell。
+	 * 返回 0 表示属性存在且长度足够；返回负 errno 表示未配置或解析失败。
+	 */
 	ret = of_property_read_u32_array(np, "csi-mux-mipi", out_val, 3);
 	if (ret) {
 		dev_dbg(csi_dev->dev, "no csi-mux-mipi property found\n");
@@ -1791,11 +2447,13 @@ static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
 	} else {
 		phandle = *out_val;
 
+		/* of_find_node_by_phandle() 返回的 node 带引用，使用后要 of_node_put()。 */
 		node = of_find_node_by_phandle(phandle);
 		if (!node) {
 			dev_dbg(csi_dev->dev, "not find gpr node by phandle\n");
 			ret = PTR_ERR(node);
 		}
+		/* syscon_node_to_regmap() 把 syscon OF node 转成可读改写 GPR 的 regmap。 */
 		csi_dev->csi_mux.gpr = syscon_node_to_regmap(node);
 		if (IS_ERR(csi_dev->csi_mux.gpr)) {
 			dev_err(csi_dev->dev, "failed to get gpr regmap\n");
@@ -1808,6 +2466,10 @@ static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
 		csi_dev->csi_mux.req_gpr = out_val[1];
 		csi_dev->csi_mux.req_bit = out_val[2];
 
+		/*
+		 * regmap_update_bits() 做寄存器 read-modify-write：mask 指定要改
+		 * 哪些位，val 指定这些位的新值。这里把 req_bit 置 1。
+		 */
 		regmap_update_bits(csi_dev->csi_mux.gpr, csi_dev->csi_mux.req_gpr,
 			1 << csi_dev->csi_mux.req_bit, 1 << csi_dev->csi_mux.req_bit);
 
@@ -1836,7 +2498,7 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 	struct device_node *node, *port, *rem;
 	int ret;
 
-	/* Attach sensors linked to csi receivers */
+	/* for_each_available_child_of_node() 只遍历 status 可用的子节点。 */
 	for_each_available_child_of_node(parent, node) {
 		/* of_node_cmp() 在节点名相等时返回 0。 */
 		if (of_node_cmp(node->name, "port"))
@@ -1881,6 +2543,7 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 	csi_dev->subdev_notifier.bound = subdev_notifier_bound;
 
 	/*
+	 * v4l2_async_notifier_register() 把等待列表交给 V4L2 async core。
 	 * 如果 OV5640 subdev 已经注册，这里会立即完成绑定；否则 async core
 	 * 会保存匹配规则，直到 sensor probe 时再尝试匹配。
 	 */
@@ -1894,10 +2557,13 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 }
 
 /**
- * mx6s_csi_probe - CSI 设备探测函数
- * @pdev: 平台设备指针
+ * mx6s_csi_probe() - CSI platform device 探测函数
+ * @pdev: platform bus 根据设备树 compatible 创建并匹配到的设备。
  *
- * 返回: 成功返回 0，失败返回负 errno 值。
+ * probe 完成资源获取、MMIO 映射、时钟获取、V4L2 device/video_device 注册、
+ * IRQ 注册、async subdev notifier 注册和 runtime PM 启用。
+ *
+ * Return: 成功返回 0，失败返回负 errno 值。
  */
 static int mx6s_csi_probe(struct platform_device *pdev)
 {
@@ -1913,10 +2579,9 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 
 	dev_dbg(dev, "initialising\n");
 
-	/* Prepare our private structure */
 	/*
-	 * devm_kzalloc() 分配归 dev 管理且已清零的内核内存，设备解绑时
-	 * 这块内存会自动释放。
+	 * devm_kzalloc() 是 device-managed 分配接口，返回清零后的内存；设备
+	 * detach 或 probe 失败后的 devres 释放路径会自动释放它。
 	 */
 	csi_dev = devm_kzalloc(dev, sizeof(struct mx6s_csi_dev), GFP_ATOMIC);
 	if (!csi_dev) {
@@ -1937,14 +2602,16 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	/* 将 CSI MMIO 资源映射到内核虚拟地址空间。 */
+	/*
+	 * devm_ioremap_resource() 同时完成 request_mem_region() 和 ioremap()，
+	 * 返回可用 __iomem 指针或 ERR_PTR。
+	 */
 	csi_dev->regbase = devm_ioremap_resource(dev, res);
 	if (IS_ERR(csi_dev->regbase)) {
 		dev_err(dev, "Failed platform resources map\n");
 		return -ENODEV;
 	}
 
-	/* init video dma queues */
 	/* 等待 CSI DMA 填充的 buffer 队列。 */
 	INIT_LIST_HEAD(&csi_dev->capture);
 	/* 当前已经交给 CSI DMA 使用的 buffer 队列。 */
@@ -1952,7 +2619,7 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	/* 丢帧时使用的临时 buffer 队列。 */
 	INIT_LIST_HEAD(&csi_dev->discard);
 
-	/* clock 名称来自 CSI 节点的 clock-names 属性。 */
+	/* devm_clk_get() 按 clock-names 查找 clock provider，并返回托管 clk。 */
 	csi_dev->clk_disp_axi = devm_clk_get(dev, "disp-axi");
 	if (IS_ERR(csi_dev->clk_disp_axi)) {
 		dev_err(dev, "Could not get csi axi clock\n");
@@ -1993,8 +2660,7 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	mutex_init(&csi_dev->lock);
 	spin_lock_init(&csi_dev->slock);
 
-	/* Allocate memory for video device */
-	/* 分配面向 /dev/videoX 的 video_device。 */
+	/* video_device_alloc() 分配面向 /dev/videoX 的 V4L2 字符设备对象。 */
 	vdev = video_device_alloc();
 	if (vdev == NULL) {
 		ret = -ENOMEM;
@@ -2006,6 +2672,7 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	vdev->v4l2_dev		= &csi_dev->v4l2_dev;
 	vdev->fops			= &mx6s_csi_fops;
 	vdev->ioctl_ops		= &mx6s_csi_ioctl_ops;
+	/* video_device_release() 是 video_device_alloc() 对应的默认释放函数。 */
 	vdev->release		= video_device_release;
 	vdev->lock			= &csi_dev->lock;
 
@@ -2018,8 +2685,8 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	mutex_lock(&csi_dev->lock);
 
 	/*
-	 * 注册视频采集设备。VFL_TYPE_GRABBER 表示视频采集类型，-1 表示让
-	 * V4L2 自动分配 /dev/videoX 的次设备号。
+	 * video_register_device() 创建 /dev/videoX 并注册到 V4L2 core；
+	 * VFL_TYPE_GRABBER 表示采集设备，第三个参数 -1 表示自动分配 minor。
 	 */
 	ret = video_register_device(csi_dev->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret < 0) {
@@ -2060,12 +2727,22 @@ err_vdev:
 	return ret;
 }
 
+/**
+ * mx6s_csi_remove() - CSI platform device 移除函数
+ * @pdev: 即将解绑的 platform device。
+ *
+ * 注销顺序与 probe 相反：先注销 async notifier，再注销 video node 和
+ * v4l2_device，最后关闭 runtime PM。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_csi_remove(struct platform_device *pdev)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(&pdev->dev);
 	struct mx6s_csi_dev *csi_dev =
 				container_of(v4l2_dev, struct mx6s_csi_dev, v4l2_dev);
 
+	/* v4l2_async_notifier_unregister() 断开与 sensor subdev 的异步绑定关系。 */
 	v4l2_async_notifier_unregister(&csi_dev->subdev_notifier);
 
 	video_unregister_device(csi_dev->vdev);
@@ -2075,28 +2752,48 @@ static int mx6s_csi_remove(struct platform_device *pdev)
 	return 0;
 }
 
+/**
+ * mx6s_csi_runtime_suspend() - runtime PM suspend 回调
+ * @dev: CSI 设备。
+ *
+ * 当前外置学习驱动只记录调试信息，实际时钟关闭在 close 路径完成。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_csi_runtime_suspend(struct device *dev)
 {
 	dev_dbg(dev, "csi v4l2 busfreq high release.\n");
 	return 0;
 }
 
+/**
+ * mx6s_csi_runtime_resume() - runtime PM resume 回调
+ * @dev: CSI 设备。
+ *
+ * 当前外置学习驱动只记录调试信息，实际时钟打开在 open 路径完成。
+ *
+ * Return: 成功返回 0。
+ */
 static int mx6s_csi_runtime_resume(struct device *dev)
 {
 	dev_dbg(dev, "csi v4l2 busfreq high request.\n");
 	return 0;
 }
 
+/* SET_RUNTIME_PM_OPS() 把 runtime suspend/resume 回调填入 dev_pm_ops。 */
 static const struct dev_pm_ops mx6s_csi_pm_ops = {
 	SET_RUNTIME_PM_OPS(mx6s_csi_runtime_suspend, mx6s_csi_runtime_resume, NULL)
 };
 
+/* of_device_id 表用于 platform bus 按 compatible 匹配设备树节点。 */
 static const struct of_device_id mx6s_csi_dt_ids[] = {
 	{ .compatible = "fsl,imx6s-csi", },
 	{ /* sentinel */ }
 };
+/* MODULE_DEVICE_TABLE() 导出 OF modalias，便于模块自动加载。 */
 MODULE_DEVICE_TABLE(of, mx6s_csi_dt_ids);
 
+/* platform_driver 把 probe/remove 与 OF match table 交给 platform bus。 */
 static struct platform_driver mx6s_csi_driver = {
 	.driver		= {
 		.name	= MX6S_CAM_DRV_NAME,
@@ -2107,6 +2804,7 @@ static struct platform_driver mx6s_csi_driver = {
 	.remove	= mx6s_csi_remove,
 };
 
+/* module_platform_driver() 生成模块 init/exit，注册/注销 platform_driver。 */
 module_platform_driver(mx6s_csi_driver);
 
 MODULE_DESCRIPTION("i.MX6Sx SoC Camera Host driver");
