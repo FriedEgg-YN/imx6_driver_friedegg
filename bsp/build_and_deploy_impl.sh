@@ -142,6 +142,24 @@ linux_build_dir() {
         2>/dev/null | sort | head -n1
 }
 
+linux_uses_override_srcdir() {
+    [ -f "$BSP_DIR/local.mk" ] && \
+        grep -q '^[[:space:]]*LINUX_OVERRIDE_SRCDIR[[:space:]]*=' "$BSP_DIR/local.mk"
+}
+
+sync_linux_override_sources() {
+    local ldir
+
+    linux_uses_override_srcdir || return 0
+
+    ldir=$(linux_build_dir || true)
+    [ -n "$ldir" ] || return 0
+
+    note "syncing Linux override source"
+    rm -f "$ldir/.stamp_rsynced"
+    br_make linux-rsync
+}
+
 busybox_build_dir() {
     find "$BUILDROOT_DIR/output/build" -maxdepth 1 -type d -name 'busybox-*' \
         2>/dev/null | sort | head -n1
@@ -586,7 +604,8 @@ build_dtb_only() {
 
     ensure_config
     require_kernel_toolchain
-    ldir=$(linux_build_dir)
+    sync_linux_override_sources
+    ldir=$(linux_build_dir || true)
     [ -n "$ldir" ] || die "Linux build directory not found; run '$SCRIPT_NAME all' or '$SCRIPT_NAME zimage' once first"
 
     cross=$(kernel_cross_prefix)
