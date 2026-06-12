@@ -146,6 +146,20 @@
 			spi-max-frequency = <100000>;
 		};
 	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_gpio_keys>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		autorepeat;
+		key0 {
+			label = "GPIO Key0 Enter";
+			linux,code = <KEY_ENTER>;
+			gpios = <&gpio1 18 GPIO_ACTIVE_LOW>;
+		};
+	};
 };
 
 &cpu0 {
@@ -286,6 +300,12 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_hog_1>;
 	imx6ul-evk {
+		pinctrl_gpio_keys: gpio_keysgrp {
+			fsl,pins = <
+				MX6UL_PAD_UART1_CTS_B__GPIO1_IO18	0x17059
+			>;
+		};
+
 		pinctrl_ap3216c: ap3216cgrp {
 			fsl,pins = <
 				MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0x17059
@@ -601,7 +621,7 @@
                                 MX6ULL_PAD_SNVS_TAMPER3__GPIO5_IO03      0x79
                         >;
                 };
-		
+
 		pinctrl_lcdif_reset: lcdifresetgrp {
                         fsl,pins = <
                                 /* used for lcd reset */
