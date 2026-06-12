@@ -1,0 +1,17 @@
+config BR2_PACKAGE_IMX6_QT5_DEMO
+	bool "imx6 Qt5 linuxfb demo"
+	depends on BR2_PACKAGE_QT5
+	select BR2_PACKAGE_QT5BASE_GUI
+	select BR2_PACKAGE_QT5BASE_WIDGETS
+	select BR2_PACKAGE_QT5BASE_LINUXFB
+	select BR2_PACKAGE_QT5BASE_FONTCONFIG
+	select BR2_PACKAGE_QT5BASE_JPEG
+	select BR2_PACKAGE_QT5BASE_PNG
+	select BR2_PACKAGE_QT5BASE_TSLIB
+	select BR2_PACKAGE_DEJAVU
+	help
+	  Minimal Qt5 Widgets test program for the i.MX6ULL linuxfb
+	  glibc rootfs.
+
+comment "imx6 Qt5 demo needs Qt5"
+	depends on !BR2_PACKAGE_QT5

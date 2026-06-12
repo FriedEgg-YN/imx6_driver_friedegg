@@ -4,6 +4,8 @@ set -euo pipefail
 
 KERNEL_IMAGE="${KERNEL_IMAGE:-zImage}"
 TARGET_DTB="${TARGET_DTB:-imx6ull-friedegg-emmc.dtb}"
+BSP_KERNEL_TOOLCHAIN_PATH="${BSP_KERNEL_TOOLCHAIN_PATH:-/usr/local/arm/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabihf}"
+BSP_KERNEL_CROSS_COMPILE="${BSP_KERNEL_CROSS_COMPILE:-$BSP_KERNEL_TOOLCHAIN_PATH/bin/arm-linux-gnueabihf-}"
 
 BSP_DIR=$(cd "$(dirname "$0")" && pwd)
 WORKSPACE_DIR=$(dirname "$BSP_DIR")
@@ -24,7 +26,13 @@ KERNEL_FILE="$OUTPUT_IMAGE_DIR/$KERNEL_IMAGE"
 DTB_FILE="$OUTPUT_IMAGE_DIR/$TARGET_DTB"
 MANIFEST_DIR="$OUTPUT_IMAGE_DIR/manifests"
 
-MAKE_OPTS=(BR2_EXTERNAL="$BSP_DIR" BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk")
+MAKE_OPTS=(
+    BR2_EXTERNAL="$BSP_DIR"
+    BR2_PACKAGE_OVERRIDE_FILE="$BSP_DIR/local.mk"
+    BR2_JLEVEL="$MAKE_JOBS"
+    BSP_KERNEL_TOOLCHAIN_PATH="$BSP_KERNEL_TOOLCHAIN_PATH"
+    BSP_KERNEL_CROSS_COMPILE="$BSP_KERNEL_CROSS_COMPILE"
+)
 SCRIPT_NAME="./bsp/build_and_deploy.sh"
 
 usage() {
@@ -66,6 +74,8 @@ Usage:
 
 Environment overrides:
   NFS_DIR=<path> TFTP_DIR=<path> MAKE_JOBS=<n> KERNEL_IMAGE=<name> TARGET_DTB=<name>
+  BSP_KERNEL_CROSS_COMPILE=<old-kernel-toolchain-prefix>
+  MAKE_JOBS also sets Buildroot BR2_JLEVEL, including CMake/Qt sub-builds.
 EOF
 }
 
@@ -112,13 +122,13 @@ guard_nfs_dir() {
 }
 
 kernel_cross_prefix() {
-    local host_prefix="$BUILDROOT_DIR/output/host/bin/arm-linux-gnueabihf-"
+    require_kernel_toolchain
+    printf '%s\n' "$BSP_KERNEL_CROSS_COMPILE"
+}
 
-    if [ -x "${host_prefix}gcc" ]; then
-        printf '%s\n' "$host_prefix"
-    else
-        printf '%s\n' "arm-linux-gnueabihf-"
-    fi
+require_kernel_toolchain() {
+    [ -x "${BSP_KERNEL_CROSS_COMPILE}gcc" ] || \
+        die "kernel toolchain not found: ${BSP_KERNEL_CROSS_COMPILE}gcc"
 }
 
 linux_build_dir() {
@@ -575,6 +585,7 @@ build_dtb_only() {
     local ldir built target cross
 
     ensure_config
+    require_kernel_toolchain
     ldir=$(linux_build_dir)
     [ -n "$ldir" ] || die "Linux build directory not found; run '$SCRIPT_NAME all' or '$SCRIPT_NAME zimage' once first"
 
@@ -601,6 +612,7 @@ build_dtb_only() {
 
 build_zimage() {
     ensure_config
+    require_kernel_toolchain
     note "running linux-rebuild"
     br_make linux-rebuild -j"$MAKE_JOBS"
     require_file "$KERNEL_FILE"
@@ -610,6 +622,7 @@ build_zimage() {
 
 build_rootfs() {
     ensure_config
+    require_kernel_toolchain
     note "building Buildroot rootfs"
     br_make -j"$MAKE_JOBS"
     deploy_rootfs_full
@@ -617,6 +630,7 @@ build_rootfs() {
 
 build_all() {
     ensure_config
+    require_kernel_toolchain
     note "running make clean"
     br_make clean
     note "building full system"
@@ -634,6 +648,7 @@ build_drv() {
 
     [ -n "$pkg" ] || die "drv requires a package name"
     ensure_config
+    require_kernel_toolchain
     pkg_mk_path "$pkg" >/dev/null
     pkg_enabled "$pkg" || die "$pkg is not enabled in buildroot/.config"
 
