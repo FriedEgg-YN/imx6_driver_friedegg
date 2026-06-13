@@ -1,0 +1,5 @@
+config BR2_PACKAGE_GT9147
+    bool "GT9147 TS driver"
+    depends on BR2_LINUX_KERNEL
+    help
+        GT9147 touch screen custom kernel module.
