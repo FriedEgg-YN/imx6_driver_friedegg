@@ -23,14 +23,13 @@ ap3216c_test scan
 通过 BSP 包构建：
 
 ```bash
-bash bsp/build_and_deploy.sh drv ap3216c
+bash buildscripts/build_and_deploy.sh drv ap3216c
 ```
 
 验证包和模块：
 
 ```bash
-bash bsp/build_and_deploy.sh verify nfs-pkg ap3216c
-bash bsp/build_and_deploy.sh verify ko ap3216c
+# 上板运行 ap3216c_test，并用 dmesg 确认驱动日志。
 ```
 
 `bsp/package/ap3216c/ap3216c.mk` 会把测试程序安装到板端：

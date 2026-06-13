@@ -31,13 +31,13 @@ OpenAI 官方说明中，Codex 可在 IDE 中使用打开文件和选中代码�
 /home/<user>/imx6_driver_friedegg
 ```
 
-不要只打开 `src/ap3216c_drv/` 或 `bsp/` 子目录。打开根目录后，Codex 才能同时读取：
+不要只打开 `src/ap3216c/`、`src/<pkg>/` 或 `bsp/` 子目录。打开根目录后，Codex 才能同时读取：
 
 - `AGENTS.md` 的项目规则。
 - `.agents/prompts/` 的任务模板。
 - `.agents/skills/` 的工作流。
 - `.agents/context/` 的稳定项目事实。
-- `bsp/`、`src/`、`docs/` 的实际工程文件。
+- `buildscripts/`、`bsp/`、`src/`、`docs/` 的实际工程文件。
 
 ### 选择 Chat 还是 Agent
 
@@ -109,9 +109,9 @@ AGENTS.md
 
 - 把本仓库定位为 i.MX6ULL embedded Linux BSP 和驱动工程。
 - 要求优先保 bootability、reproducibility、仓库边界和隐私边界。
-- 明确 `bsp/`、`src/*_drv/`、`docs/`、`.agents/` 属于 super-project。
+- 明确 `buildscripts/`、`bsp/`、`src/<pkg>/`、`docs/`、`.agents/` 属于 super-project。
 - 明确 `buildroot/`、`src/linux-friedegg/`、`src/uboot-friedegg/` 是大源码树或子模块，不能随便改。
-- 规定验证入口是 `bash bsp/build_and_deploy.sh <mode>`。
+- 规定验证入口是 `bash buildscripts/build_and_deploy.sh <mode>`。
 - 内核 API 问题默认路由到 `$kernel-api-explainer`，先用 `rg` 找定义，再给中文 kernel-doc 风格解释。
 - 要求开发后给学习总结，调试后给知识卡或建议。
 
@@ -191,7 +191,7 @@ AI component friction to watch for:
 
 - Codex 先判断任务属于 BSP、Buildroot、AP3216C、OV5640、U-Boot、Linux、rootfs 还是 AI 组件维护。
 - 技术实现交给 `$imx6-bsp-engineer`。
-- 验证命令会收敛到 `dtb`、`zimage`、`rootfs`、`drv <pkg>`、`verify ...` 之一。
+- 验证命令会收敛到 `dtb`、`zimage`、`rootfs`、`drv <pkg>` 之一。
 - 完成后生成学习总结。
 - 如果有症状、日志、假设和根因，会生成或建议调试知识卡。
 
@@ -207,9 +207,9 @@ Device facts:
 - bus/subsystem: I2C + GPIO IRQ
 - datasheet/registers: AP3216C ALS/PS/IR registers
 - DTS binding: 请检查当前 DTS
-- user-space API: /dev/ap3216c + ap3216cApp
+- user-space API: /sys/bus/iio/devices/iio:deviceX + /dev/iio:deviceX + ap3216c_test
 - interrupt/polling requirements: 支持轮询和中断模式
-- current code path: src/ap3216c_drv/ap3216c.c
+- current code path: src/ap3216c/ap3216c.c
 ```
 
 实际效果：
@@ -249,9 +249,9 @@ Use .agents/prompts/buildroot-config.md
 
 Change Buildroot/BusyBox/rootfs behavior for AP3216C test app install and mdev startup.
 Current behavior: rootfs 中需要手动处理设备节点。
-Desired behavior: 启动后具备稳定的 /dev 管理路径，并能运行 /usr/bin/ap3216cApp。
+Desired behavior: 启动后具备稳定的 IIO 设备节点，并能运行 /usr/bin/ap3216c_test。
 Target packages/config symbols if known: BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV
-Runtime validation: ls /dev/ap3216c, ps, mount, ap3216cApp
+Runtime validation: ap3216c_test scan, ls /sys/bus/iio/devices, ps, mount
 ```
 
 实际效果：
@@ -327,7 +327,7 @@ Use $kernel-api-explainer.
 
 ```text
 Use $imx6-bsp-engineer.
-帮我修复 AP3216C 驱动无法创建设备节点的问题。先检查 src/ap3216c_drv、bsp/package/ap3216c、bsp/rootfs_overlay 和 BusyBox/mdev 配置。确认归属后再改文件。
+帮我修复 AP3216C IIO 设备无法枚举的问题。先检查 src/ap3216c、bsp/package/ap3216c、bsp/rootfs_overlay 和 BusyBox/mdev 配置。确认归属后再改文件。
 ```
 
 效果：
@@ -395,7 +395,7 @@ Use $driver-learning-coach.
 
 ```text
 Use $embedded-dev-notes.
-把下面 AP3216C 中断调试过程写成 docs/AP3216C_irq_debug.md。日志只保留能证明结论的关键行，真实路径和 board IP 用占位符。
+把下面 AP3216C 中断调试过程整理到 src/ap3216c/README.md 的调试记录章节。日志只保留能证明结论的关键行，真实路径和 board IP 用占位符。
 <粘贴日志>
 ```
 
@@ -453,7 +453,7 @@ Use $ai-system-architect.
 | 文件 | 作用 | Codex 使用效果 |
 | --- | --- | --- |
 | `project.md` | 目标板、工具链、仓库地图、ownership rules | 先判断文件属于 super-project、Buildroot、kernel tree 还是 U-Boot tree |
-| `build-deploy.md` | `bsp/build_and_deploy.sh` 模式和环境变量 | 选择 `dtb`、`zimage`、`rootfs`、`drv <pkg>`、`verify ...` 等最窄命令 |
+| `build-deploy.md` | `buildscripts/build_and_deploy.sh` 模式和环境变量 | 选择 `dtb`、`zimage`、`rootfs`、`drv <pkg>` 等最窄命令 |
 | `learning-output.md` | 学习输出契约 | 开发后输出总结、简历 bullet、架构解释、权衡、面试题 |
 | `debug-note-template.md` | 调试卡片形状 | 输出短知识卡，而不是长流水账 |
 
@@ -563,16 +563,16 @@ Use $imx6-dev-learning-loop.
 
 Run an end-to-end development learning loop for AP3216C interrupt debug.
 
-Goal: modprobe 后 /dev/ap3216c 存在，并确认中断触发路径。
+Goal: modprobe 后 AP3216C IIO 设备存在，并确认中断触发路径。
 Current behavior or symptom: 驱动 probe 成功，但用户态中断测试无输出。
 Target hardware path:
 - board/peripheral: i.MX6ULL + AP3216C
-- bus/subsystem: I2C + GPIO IRQ + character device
+- bus/subsystem: I2C + GPIO IRQ + IIO
 - pins/clocks/resets/regulators/interrupts if known: 请从 DTS 检查
 Relevant files or logs: 我会粘贴 dmesg、/proc/interrupts、测试程序输出
-Expected user-space behavior: ap3216cApp 可读数据，中断模式有事件
+Expected user-space behavior: ap3216c_test 可读 IIO 数据，中断模式有事件
 Verification available:
-- build command: bash bsp/build_and_deploy.sh drv ap3216c
+- build command: bash buildscripts/build_and_deploy.sh drv ap3216c
 - board-side command: 请给出
 Learning output needed:
 - docs note: yes
@@ -621,12 +621,11 @@ Use $git-commit-assistant.
 按变更范围选择最窄命令：
 
 ```bash
-bash bsp/build_and_deploy.sh dtb
-bash bsp/build_and_deploy.sh zimage
-bash bsp/build_and_deploy.sh rootfs
-bash bsp/build_and_deploy.sh drv <pkg>
-bash bsp/build_and_deploy.sh verify all|dtb|zimage|nfs-pkg <pkg>|ko <module-or-pkg>
-bash bsp/build_and_deploy.sh config status
+bash buildscripts/build_and_deploy.sh dtb
+bash buildscripts/build_and_deploy.sh zimage
+bash buildscripts/build_and_deploy.sh rootfs
+bash buildscripts/build_and_deploy.sh drv <pkg>
+bash buildscripts/build_and_deploy.sh config status
 ```
 
 聊天框可直接要求：
