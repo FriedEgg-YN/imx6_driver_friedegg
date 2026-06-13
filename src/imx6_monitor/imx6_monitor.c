@@ -35,12 +35,12 @@
 #include <unistd.h>
 
 #define APP_NAME "imx6-monitor"
-#define DEFAULT_VIDEO_DEV "/dev/video0"
+#define DEFAULT_VIDEO_DEV "/dev/video1"
 #define DEFAULT_FB_DEV "/dev/fb0"
 #define DEFAULT_SENSOR_DEV "/dev/ap3216c"
 #define DEFAULT_HTTP_PORT 8080
-#define DEFAULT_WIDTH 320
-#define DEFAULT_HEIGHT 240
+#define DEFAULT_WIDTH 800
+#define DEFAULT_HEIGHT 480
 #define DEFAULT_FPS 10
 #define DEFAULT_JPEG_QUALITY 75
 #define CAMERA_BUFFER_COUNT 3

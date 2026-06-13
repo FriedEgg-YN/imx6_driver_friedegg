@@ -10,10 +10,11 @@ define IMX6_MONITOR_BUILD_CMDS
 		LDFLAGS="$(TARGET_LDFLAGS)"
 endef
 
+# disable the imx6-monitor auto-load by default, users can enable it by renaming the init script
 define IMX6_MONITOR_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/imx6-monitor $(TARGET_DIR)/usr/bin/imx6-monitor
-	$(INSTALL) -D -m 0755 $(BR2_EXTERNAL_BSP_PATH)/package/imx6-monitor/S90imx6-monitor \
-		$(TARGET_DIR)/etc/init.d/S90imx6-monitor
+	$(INSTALL) -D -m 0755 $(@D)/S90imx6-monitor \
+		$(TARGET_DIR)/etc/init.d/disabled-S90imx6-monitor
 endef
 
 $(eval $(generic-package))

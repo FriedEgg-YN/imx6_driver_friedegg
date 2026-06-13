@@ -3,7 +3,7 @@
 DAEMON=/usr/bin/imx6-monitor
 PIDFILE=/var/run/imx6-monitor.pid
 LOGFILE=/var/log/imx6-monitor.log
-ARGS="${IMX6_MONITOR_ARGS:--d /dev/video0 -f /dev/fb0 -s /dev/ap3216c -p 8080 -W 320 -H 240 -r 10 -q 75}"
+ARGS="${IMX6_MONITOR_ARGS:--d /dev/video1 -f /dev/fb0 -s /dev/ap3216c -p 8080 -W 800 -H 480 -r 10 -q 75}"
 
 start() {
 	printf 'Starting imx6-monitor: '
@@ -12,9 +12,9 @@ start() {
 		return 1
 	fi
 	mkdir -p /var/run /var/log
-	modprobe ap3216c >/dev/null 2>&1 || true
-	modprobe ov5640 >/dev/null 2>&1 || true
-	modprobe mx6s_capture >/dev/null 2>&1 || true
+	# modprobe ap3216c >/dev/null 2>&1 || true
+	# modprobe ov5640 >/dev/null 2>&1 || true
+	# modprobe mx6s_capture >/dev/null 2>&1 || true
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- $ARGS >>"$LOGFILE" 2>&1
 	status=$?
 	[ "$status" -eq 0 ] && echo OK || echo FAIL
