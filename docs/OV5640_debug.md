@@ -24,3 +24,44 @@
 	- 随后先 `rmmod mx6s_capture` 显示 `send error`、`camera ov5640 is not found`，再 `rmmod ov5640`
 	- 再次先后 `insmod mx6s_capture`、`insmod ov5640`显示 `camera ov5640 not found`，认为自启动可能有问题
 - 利用 `overlay` 关闭 `mdev` `autoload` 功能，测试 `module` 多次卸载安装稳定运行；重新打开 `autoload`，发现再次出现该 bug，确认是由 `mdev` 自动加载引起
+
+## 尝试复现autoload bug发现此bug消失
+
+1. 修改 nfs 的rootfs，采用 mdev 尝试复现自启动
+	1. 删除 S90imx6-monitor，避免其自动 insmod
+	2. 恢复默认 S10mdev
+	3. 恢复默认 mdev. conf
+	4. 如果 mdev 自启动没问题，去除 S90部分. ko 相关功能；如果有问题，尝试定位、解决
+
+现象如下：
+1. 临时禁用S90imx6-monitor 后，手动加载 mx6s_capture. ko 及 ov5640. ko，可以运行 test 显示摄像头内容
+2. 恢复默认 S10mdev 后，启动关键日志如下；lsmod 发现除了上述摄像头驱动，还有 evbug；i2cdetect 发现0x3c 标志位为 UU，没问题；经验证采用默认 S10mdev 没问题
+3. 恢复默认 mdev. conf，经过ov5640_test也没问题
+
+```txt
+Saving 2048 bits of non-creditable seed for next boot
+Starting syslogd: OK
+Starting klogd: OK
+Running sysctl: OK
+Starting mdev... OK
+1-003c supply DOVDD not found, using dummy regulator
+1-003c supply DVDD not found, using dummy regulator
+1-003c supply AVDD not found, using dummy regulator
+camera ov5640, is found
+CSI: Registered sensor subdevice: ov5640 1-003c
+Starting network: ip: RTNETLINK answers: File exists
+FAIL
+Starting crond: OK
+
+# i2cdetect -y 1
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:          -- -- -- -- -- -- -- -- -- -- -- -- -- 
+10: -- -- -- -- 14 -- -- -- -- -- -- -- -- -- -- -- 
+20: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+30: -- -- -- -- -- -- -- -- -- -- -- -- UU -- -- -- 
+40: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+70: -- -- -- -- -- -- -- -- 
+
+```
