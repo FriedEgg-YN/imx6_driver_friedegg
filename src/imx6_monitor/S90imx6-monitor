@@ -3,7 +3,7 @@
 DAEMON=/usr/bin/imx6-monitor
 PIDFILE=/var/run/imx6-monitor.pid
 LOGFILE=/var/log/imx6-monitor.log
-ARGS="${IMX6_MONITOR_ARGS:--d /dev/video1 -f /dev/fb0 -s /dev/ap3216c -p 8080 -W 800 -H 480 -r 10 -q 75}"
+ARGS="${IMX6_MONITOR_ARGS:--d /dev/video1 -f /dev/fb0 -s auto -p 8080 -W 800 -H 480 -r 10 -q 75}"
 
 start() {
 	printf 'Starting imx6-monitor: '

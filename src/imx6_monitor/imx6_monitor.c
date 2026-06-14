@@ -2,16 +2,22 @@
  * i.MX6ULL monitoring node
  *
  * Data path:
- *   OV5640/CSI -> V4L2 MMAP -> latest RGB565 frame -> LCD fbdev preview
+ *   OV5640/CSI -> V4L2 MMAP -> latest RGB565 frame -> optional LCD fbdev preview
  *                                                \-> JPEG -> HTTP/MJPEG
- *   AP3216C char device -> status thread -> /api/status
+ *   AP3216C IIO sysfs -> status thread -> /api/status
+ *
+ * Runtime controls are intentionally exposed only to 127.0.0.1 so a local HMI
+ * can control capture and public access without opening a board-side API.
  */
 
 #define _GNU_SOURCE
 
 #include <arpa/inet.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <stdio.h>
 #include <jpeglib.h>
 #include <linux/fb.h>
@@ -37,7 +43,7 @@
 #define APP_NAME "imx6-monitor"
 #define DEFAULT_VIDEO_DEV "/dev/video1"
 #define DEFAULT_FB_DEV "/dev/fb0"
-#define DEFAULT_SENSOR_DEV "/dev/ap3216c"
+#define DEFAULT_SENSOR_DEV "auto"
 #define DEFAULT_HTTP_PORT 8080
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 480
@@ -49,6 +55,9 @@
 #define SENSOR_POLL_MS 500
 #define LOW_LIGHT_THRESHOLD 80
 #define NEAR_OBJECT_THRESHOLD 200
+#define IIO_SYSFS_DIR "/sys/bus/iio/devices"
+#define AP3216C_IIO_NAME "ap3216c"
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 struct app_config {
 	const char *video_dev;
@@ -60,6 +69,10 @@ struct app_config {
 	int fps;
 	int jpeg_quality;
 	bool lcd_enabled;
+	bool camera_enabled;
+	bool sensor_enabled;
+	bool camera_public_enabled;
+	bool sensor_public_enabled;
 };
 
 struct camera_buffer {
@@ -91,17 +104,24 @@ struct sensor_status {
 	bool present;
 	unsigned int ir;
 	unsigned int als;
+	char als_input[32];
 	unsigned int ps;
 	unsigned long read_count;
 	unsigned long error_count;
+	char iio_dir[128];
 	char state[32];
 };
 
 struct monitor_state {
 	struct app_config cfg;
+	pthread_mutex_t control_lock;
 	pthread_mutex_t frame_lock;
 	pthread_mutex_t sensor_lock;
 	pthread_cond_t frame_cond;
+	bool camera_enabled;
+	bool sensor_enabled;
+	bool camera_public_enabled;
+	bool sensor_public_enabled;
 	uint16_t *latest_frame;
 	size_t latest_frame_bytes;
 	unsigned long frame_seq;
@@ -171,15 +191,20 @@ static void usage(const char *prog)
 	fprintf(stderr,
 		"Usage: %s [options]\n"
 		"Options:\n"
-		"  -d <dev>       V4L2 device (default: %s)\n"
-		"  -f <dev>       framebuffer device (default: %s)\n"
-		"  -s <dev>       AP3216C device (default: %s)\n"
-		"  -p <port>      HTTP port (default: %d)\n"
-		"  -W <width>     capture width (default: %d)\n"
-		"  -H <height>    capture height (default: %d)\n"
-		"  -r <fps>       target capture/MJPEG fps (default: %d)\n"
-		"  -q <quality>   JPEG quality 1..95 (default: %d)\n"
-		"  -n             disable LCD preview\n",
+		"  -d <dev>              V4L2 device (default: %s)\n"
+		"  -f <dev>              framebuffer device (default: %s)\n"
+		"  -s <dev>              AP3216C IIO device: auto, ap3216c, iio:deviceX, N or /sys/... (default: %s)\n"
+		"  -p <port>             HTTP port (default: %d)\n"
+		"  -W <width>            capture width (default: %d)\n"
+		"  -H <height>           capture height (default: %d)\n"
+		"  -r <fps>              target capture/MJPEG fps (default: %d)\n"
+		"  -q <quality>          JPEG quality 1..95 (default: %d)\n"
+		"  -n                    disable LCD preview\n"
+		"  --camera-off          start with camera capture disabled\n"
+		"  --sensor-off          start with AP3216C polling disabled\n"
+		"  --public-off          start with camera/sensor network access disabled\n"
+		"  --camera-public-off   start with camera network access disabled\n"
+		"  --sensor-public-off   start with AP3216C network access disabled\n",
 		prog, DEFAULT_VIDEO_DEV, DEFAULT_FB_DEV, DEFAULT_SENSOR_DEV,
 		DEFAULT_HTTP_PORT, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS,
 		DEFAULT_JPEG_QUALITY);
@@ -187,6 +212,31 @@ static void usage(const char *prog)
 
 static void parse_args(int argc, char **argv, struct app_config *cfg)
 {
+	enum {
+		OPT_CAMERA_ON = 1000,
+		OPT_CAMERA_OFF,
+		OPT_SENSOR_ON,
+		OPT_SENSOR_OFF,
+		OPT_PUBLIC_ON,
+		OPT_PUBLIC_OFF,
+		OPT_CAMERA_PUBLIC_ON,
+		OPT_CAMERA_PUBLIC_OFF,
+		OPT_SENSOR_PUBLIC_ON,
+		OPT_SENSOR_PUBLIC_OFF,
+	};
+	static const struct option long_options[] = {
+		{ "camera-on", no_argument, NULL, OPT_CAMERA_ON },
+		{ "camera-off", no_argument, NULL, OPT_CAMERA_OFF },
+		{ "sensor-on", no_argument, NULL, OPT_SENSOR_ON },
+		{ "sensor-off", no_argument, NULL, OPT_SENSOR_OFF },
+		{ "public-on", no_argument, NULL, OPT_PUBLIC_ON },
+		{ "public-off", no_argument, NULL, OPT_PUBLIC_OFF },
+		{ "camera-public-on", no_argument, NULL, OPT_CAMERA_PUBLIC_ON },
+		{ "camera-public-off", no_argument, NULL, OPT_CAMERA_PUBLIC_OFF },
+		{ "sensor-public-on", no_argument, NULL, OPT_SENSOR_PUBLIC_ON },
+		{ "sensor-public-off", no_argument, NULL, OPT_SENSOR_PUBLIC_OFF },
+		{ 0, 0, 0, 0 },
+	};
 	int opt;
 
 	cfg->video_dev = DEFAULT_VIDEO_DEV;
@@ -198,8 +248,12 @@ static void parse_args(int argc, char **argv, struct app_config *cfg)
 	cfg->fps = DEFAULT_FPS;
 	cfg->jpeg_quality = DEFAULT_JPEG_QUALITY;
 	cfg->lcd_enabled = true;
+	cfg->camera_enabled = true;
+	cfg->sensor_enabled = true;
+	cfg->camera_public_enabled = true;
+	cfg->sensor_public_enabled = true;
 
-	while ((opt = getopt(argc, argv, "d:f:s:p:W:H:r:q:nh")) != -1) {
+	while ((opt = getopt_long(argc, argv, "d:f:s:p:W:H:r:q:nh", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'd':
 			cfg->video_dev = optarg;
@@ -228,6 +282,38 @@ static void parse_args(int argc, char **argv, struct app_config *cfg)
 		case 'n':
 			cfg->lcd_enabled = false;
 			break;
+		case OPT_CAMERA_ON:
+			cfg->camera_enabled = true;
+			break;
+		case OPT_CAMERA_OFF:
+			cfg->camera_enabled = false;
+			break;
+		case OPT_SENSOR_ON:
+			cfg->sensor_enabled = true;
+			break;
+		case OPT_SENSOR_OFF:
+			cfg->sensor_enabled = false;
+			break;
+		case OPT_PUBLIC_ON:
+			cfg->camera_public_enabled = true;
+			cfg->sensor_public_enabled = true;
+			break;
+		case OPT_PUBLIC_OFF:
+			cfg->camera_public_enabled = false;
+			cfg->sensor_public_enabled = false;
+			break;
+		case OPT_CAMERA_PUBLIC_ON:
+			cfg->camera_public_enabled = true;
+			break;
+		case OPT_CAMERA_PUBLIC_OFF:
+			cfg->camera_public_enabled = false;
+			break;
+		case OPT_SENSOR_PUBLIC_ON:
+			cfg->sensor_public_enabled = true;
+			break;
+		case OPT_SENSOR_PUBLIC_OFF:
+			cfg->sensor_public_enabled = false;
+			break;
 		case 'h':
 		default:
 			usage(argv[0]);
@@ -245,6 +331,80 @@ static int xioctl(int fd, unsigned long request, void *arg)
 	} while (ret < 0 && errno == EINTR);
 
 	return ret;
+}
+
+struct control_status {
+	bool camera_enabled;
+	bool sensor_enabled;
+	bool camera_public_enabled;
+	bool sensor_public_enabled;
+};
+
+static const char *json_bool(bool value)
+{
+	return value ? "true" : "false";
+}
+
+static struct control_status get_control_status(struct monitor_state *state)
+{
+	struct control_status status;
+
+	pthread_mutex_lock(&state->control_lock);
+	status.camera_enabled = state->camera_enabled;
+	status.sensor_enabled = state->sensor_enabled;
+	status.camera_public_enabled = state->camera_public_enabled;
+	status.sensor_public_enabled = state->sensor_public_enabled;
+	pthread_mutex_unlock(&state->control_lock);
+	return status;
+}
+
+static bool get_camera_enabled(struct monitor_state *state)
+{
+	bool enabled;
+
+	pthread_mutex_lock(&state->control_lock);
+	enabled = state->camera_enabled;
+	pthread_mutex_unlock(&state->control_lock);
+	return enabled;
+}
+
+static bool get_sensor_enabled(struct monitor_state *state)
+{
+	bool enabled;
+
+	pthread_mutex_lock(&state->control_lock);
+	enabled = state->sensor_enabled;
+	pthread_mutex_unlock(&state->control_lock);
+	return enabled;
+}
+
+static bool get_camera_public_enabled(struct monitor_state *state)
+{
+	bool enabled;
+
+	pthread_mutex_lock(&state->control_lock);
+	enabled = state->camera_public_enabled;
+	pthread_mutex_unlock(&state->control_lock);
+	return enabled;
+}
+
+static void wake_frame_waiters(struct monitor_state *state)
+{
+	pthread_mutex_lock(&state->frame_lock);
+	pthread_cond_broadcast(&state->frame_cond);
+	pthread_mutex_unlock(&state->frame_lock);
+}
+
+static void set_control_status(struct monitor_state *state,
+				       const struct control_status *status)
+{
+	pthread_mutex_lock(&state->control_lock);
+	state->camera_enabled = status->camera_enabled;
+	state->sensor_enabled = status->sensor_enabled;
+	state->camera_public_enabled = status->camera_public_enabled;
+	state->sensor_public_enabled = status->sensor_public_enabled;
+	pthread_mutex_unlock(&state->control_lock);
+	wake_frame_waiters(state);
 }
 
 static int fb_open(struct fb_device *fb, const char *dev)
@@ -542,20 +702,13 @@ static void *camera_thread(void *arg)
 	struct camera_device cam;
 	struct fb_device fb;
 	long frame_interval_ms;
+	bool camera_opened = false;
+	bool fb_opened = false;
 
+	memset(&cam, 0, sizeof(cam));
+	cam.fd = -1;
 	memset(&fb, 0, sizeof(fb));
 	fb.fd = -1;
-
-	if (camera_open(&cam, &state->cfg) < 0) {
-		pthread_mutex_lock(&state->frame_lock);
-		state->camera_errors++;
-		pthread_mutex_unlock(&state->frame_lock);
-		state->stop = 1;
-		return NULL;
-	}
-
-	if (state->cfg.lcd_enabled)
-		fb_open(&fb, state->cfg.fb_dev);
 
 	frame_interval_ms = 1000L / state->cfg.fps;
 	if (frame_interval_ms < 1)
@@ -567,13 +720,49 @@ static void *camera_thread(void *arg)
 		long start_ms;
 		long elapsed_ms;
 
+		if (!get_camera_enabled(state)) {
+			if (fb_opened) {
+				fb_close(&fb);
+				fb_opened = false;
+			}
+			if (camera_opened) {
+				camera_close(&cam);
+				camera_opened = false;
+			}
+			sleep_interruptible_ms(100);
+			continue;
+		}
+
+		if (!camera_opened) {
+			if (camera_open(&cam, &state->cfg) < 0) {
+				camera_close(&cam);
+				pthread_mutex_lock(&state->frame_lock);
+				state->camera_errors++;
+				pthread_cond_broadcast(&state->frame_cond);
+				pthread_mutex_unlock(&state->frame_lock);
+				sleep_interruptible_ms(1000);
+				continue;
+			}
+			camera_opened = true;
+			if (state->cfg.lcd_enabled && fb_open(&fb, state->cfg.fb_dev) == 0)
+				fb_opened = true;
+		}
+
 		start_ms = monotonic_ms();
 		ret = camera_dequeue(&cam, &buf);
 		if (ret < 0) {
 			pthread_mutex_lock(&state->frame_lock);
 			state->camera_errors++;
+			pthread_cond_broadcast(&state->frame_cond);
 			pthread_mutex_unlock(&state->frame_lock);
-			break;
+			if (fb_opened) {
+				fb_close(&fb);
+				fb_opened = false;
+			}
+			camera_close(&cam);
+			camera_opened = false;
+			sleep_interruptible_ms(1000);
+			continue;
 		}
 		if (ret > 0)
 			continue;
@@ -583,16 +772,25 @@ static void *camera_thread(void *arg)
 
 			update_latest_frame(state, src, cam.width, cam.height,
 					    cam.stride_pixels);
-			fb_blit_rgb565(&fb, src, cam.width, cam.height,
-				       cam.stride_pixels);
+			if (fb_opened)
+				fb_blit_rgb565(&fb, src, cam.width, cam.height,
+					       cam.stride_pixels);
 		}
 
 		if (xioctl(cam.fd, VIDIOC_QBUF, &buf) < 0) {
 			log_msg("ERR", "VIDIOC_QBUF after capture failed: %s", strerror(errno));
 			pthread_mutex_lock(&state->frame_lock);
 			state->camera_errors++;
+			pthread_cond_broadcast(&state->frame_cond);
 			pthread_mutex_unlock(&state->frame_lock);
-			break;
+			if (fb_opened) {
+				fb_close(&fb);
+				fb_opened = false;
+			}
+			camera_close(&cam);
+			camera_opened = false;
+			sleep_interruptible_ms(1000);
+			continue;
 		}
 
 		elapsed_ms = monotonic_ms() - start_ms;
@@ -600,16 +798,245 @@ static void *camera_thread(void *arg)
 			sleep_interruptible_ms((int)(frame_interval_ms - elapsed_ms));
 	}
 
-	fb_close(&fb);
-	camera_close(&cam);
-	state->stop = 1;
+	if (fb_opened)
+		fb_close(&fb);
+	if (camera_opened)
+		camera_close(&cam);
 	return NULL;
+}
+
+static void trim_line(char *buf)
+{
+	size_t len = strlen(buf);
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
+			   isspace((unsigned char)buf[len - 1]))) {
+		buf[len - 1] = '\0';
+		len--;
+	}
+}
+
+static int make_path(char *out, size_t size, const char *dir, const char *attr)
+{
+	int ret = snprintf(out, size, "%s/%s", dir, attr);
+
+	if (ret < 0 || (size_t)ret >= size) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	return 0;
+}
+
+static bool attr_exists(const char *dir, const char *attr)
+{
+	char path[256];
+
+	if (make_path(path, sizeof(path), dir, attr) < 0)
+		return false;
+	return access(path, F_OK) == 0;
+}
+
+static int read_attr(const char *dir, const char *attr, char *buf, size_t size)
+{
+	char path[256];
+	FILE *fp;
+
+	if (make_path(path, sizeof(path), dir, attr) < 0)
+		return -1;
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, (int)size, fp)) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	trim_line(buf);
+	return 0;
+}
+
+static const char *find_existing_attr(const char *dir,
+				      const char * const *attrs, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		if (attr_exists(dir, attrs[i]))
+			return attrs[i];
+	}
+	return attrs[0];
+}
+
+static int read_attr_any(const char *dir, const char * const *attrs,
+			 size_t count, char *buf, size_t size)
+{
+	return read_attr(dir, find_existing_attr(dir, attrs, count), buf, size);
+}
+
+static int read_uint_attr_any(const char *dir, const char * const *attrs,
+			      size_t count, unsigned int *value)
+{
+	char buf[64];
+	char *endp;
+	unsigned long val;
+
+	if (read_attr_any(dir, attrs, count, buf, sizeof(buf)) < 0)
+		return -1;
+	errno = 0;
+	val = strtoul(buf, &endp, 10);
+	if (errno || !endp || *endp != '\0' || val > 0xffffffffUL) {
+		errno = EINVAL;
+		return -1;
+	}
+	*value = (unsigned int)val;
+	return 0;
+}
+
+static int parse_iio_index_from_name(const char *name)
+{
+	int index;
+
+	if (sscanf(name, "iio:device%d", &index) == 1)
+		return index;
+	return -1;
+}
+
+static int parse_iio_index_from_path(const char *path)
+{
+	const char *base = strrchr(path, '/');
+
+	return parse_iio_index_from_name(base ? base + 1 : path);
+}
+
+static int make_iio_sysfs_dir(char *out, size_t size, int index)
+{
+	int ret = snprintf(out, size, "%s/iio:device%d", IIO_SYSFS_DIR, index);
+
+	if (ret < 0 || (size_t)ret >= size) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	return 0;
+}
+
+static int find_iio_by_name(const char *name, char *out, size_t size)
+{
+	DIR *dp;
+	struct dirent *de;
+	char path[128];
+	char read_name[64];
+
+	dp = opendir(IIO_SYSFS_DIR);
+	if (!dp)
+		return -1;
+
+	while ((de = readdir(dp)) != NULL) {
+		int index;
+
+		if (strncmp(de->d_name, "iio:device", 10) != 0)
+			continue;
+		index = parse_iio_index_from_name(de->d_name);
+		if (index < 0)
+			continue;
+		if (make_iio_sysfs_dir(path, sizeof(path), index) < 0)
+			continue;
+		if (read_attr(path, "name", read_name, sizeof(read_name)) < 0)
+			continue;
+		if (strcmp(read_name, name) == 0) {
+			closedir(dp);
+			if (snprintf(out, size, "%s", path) >= (int)size) {
+				errno = ENAMETOOLONG;
+				return -1;
+			}
+			return 0;
+		}
+	}
+
+	closedir(dp);
+	errno = ENODEV;
+	return -1;
+}
+
+static int resolve_iio_device(const char *arg, char *out, size_t size)
+{
+	int index;
+	char *endp;
+	long val;
+
+	if (!arg || strcmp(arg, "auto") == 0)
+		return find_iio_by_name(AP3216C_IIO_NAME, out, size);
+	if (strncmp(arg, "/sys/", 5) == 0) {
+		if (snprintf(out, size, "%s", arg) >= (int)size) {
+			errno = ENAMETOOLONG;
+			return -1;
+		}
+		return 0;
+	}
+	if (strncmp(arg, "/dev/iio:device", 15) == 0) {
+		index = parse_iio_index_from_path(arg);
+		if (index < 0) {
+			errno = EINVAL;
+			return -1;
+		}
+		return make_iio_sysfs_dir(out, size, index);
+	}
+	if (strncmp(arg, "iio:device", 10) == 0) {
+		index = parse_iio_index_from_name(arg);
+		if (index < 0) {
+			errno = EINVAL;
+			return -1;
+		}
+		return make_iio_sysfs_dir(out, size, index);
+	}
+
+	errno = 0;
+	val = strtol(arg, &endp, 10);
+	if (errno == 0 && endp && *endp == '\0' && val >= 0)
+		return make_iio_sysfs_dir(out, size, (int)val);
+
+	return find_iio_by_name(arg, out, size);
+}
+
+static int read_ap3216c_iio(const char *device, struct sensor_status *status)
+{
+	static const char * const ir_attrs[] = {
+		"in_intensity_ir_raw",
+		"in_intensity0_ir_raw",
+	};
+	static const char * const als_attrs[] = {
+		"in_illuminance_raw",
+		"in_illuminance0_raw",
+	};
+	static const char * const als_input_attrs[] = {
+		"in_illuminance_input",
+		"in_illuminance0_input",
+	};
+	static const char * const ps_attrs[] = {
+		"in_proximity_raw",
+		"in_proximity0_raw",
+	};
+	char dir[128];
+
+	memset(status, 0, sizeof(*status));
+	if (resolve_iio_device(device, dir, sizeof(dir)) < 0)
+		return -1;
+	if (read_uint_attr_any(dir, ir_attrs, ARRAY_SIZE(ir_attrs), &status->ir) < 0 ||
+	    read_uint_attr_any(dir, als_attrs, ARRAY_SIZE(als_attrs), &status->als) < 0 ||
+	    read_uint_attr_any(dir, ps_attrs, ARRAY_SIZE(ps_attrs), &status->ps) < 0)
+		return -1;
+	if (read_attr_any(dir, als_input_attrs, ARRAY_SIZE(als_input_attrs),
+			  status->als_input, sizeof(status->als_input)) < 0)
+		status->als_input[0] = '\0';
+	status->present = true;
+	snprintf(status->iio_dir, sizeof(status->iio_dir), "%s", dir);
+	return 0;
 }
 
 static void classify_sensor_state(struct sensor_status *sensor)
 {
 	if (!sensor->present) {
-		strcpy(sensor->state, "missing");
+		if (strcmp(sensor->state, "off") != 0)
+			strcpy(sensor->state, "missing");
 		return;
 	}
 	if (sensor->ps >= NEAR_OBJECT_THRESHOLD) {
@@ -628,41 +1055,37 @@ static void *sensor_thread(void *arg)
 	struct monitor_state *state = arg;
 
 	while (!state->stop) {
-		int fd;
-		unsigned short data[3] = {0, 0, 0};
 		struct sensor_status snapshot;
 
-		memset(&snapshot, 0, sizeof(snapshot));
-		fd = open(state->cfg.sensor_dev, O_RDONLY);
-		if (fd >= 0) {
-			ssize_t ret = read(fd, data, sizeof(data));
-
-			if (ret == (ssize_t)sizeof(data)) {
-				snapshot.present = true;
-				snapshot.ir = data[0];
-				snapshot.als = data[1];
-				snapshot.ps = data[2];
-			} else {
-				snapshot.error_count++;
-			}
-			close(fd);
-		} else {
-			snapshot.error_count++;
+		if (!get_sensor_enabled(state)) {
+			pthread_mutex_lock(&state->sensor_lock);
+			state->sensor.present = false;
+			strcpy(state->sensor.state, "off");
+			pthread_mutex_unlock(&state->sensor_lock);
+			sleep_interruptible_ms(SENSOR_POLL_MS);
+			continue;
 		}
 
-		pthread_mutex_lock(&state->sensor_lock);
-		if (snapshot.present) {
+		if (read_ap3216c_iio(state->cfg.sensor_dev, &snapshot) == 0) {
+			pthread_mutex_lock(&state->sensor_lock);
 			state->sensor.present = true;
 			state->sensor.ir = snapshot.ir;
 			state->sensor.als = snapshot.als;
 			state->sensor.ps = snapshot.ps;
+			snprintf(state->sensor.als_input, sizeof(state->sensor.als_input),
+				 "%s", snapshot.als_input);
+			snprintf(state->sensor.iio_dir, sizeof(state->sensor.iio_dir),
+				 "%s", snapshot.iio_dir);
 			state->sensor.read_count++;
+			classify_sensor_state(&state->sensor);
+			pthread_mutex_unlock(&state->sensor_lock);
 		} else {
+			pthread_mutex_lock(&state->sensor_lock);
 			state->sensor.present = false;
 			state->sensor.error_count++;
+			strcpy(state->sensor.state, "missing");
+			pthread_mutex_unlock(&state->sensor_lock);
 		}
-		classify_sensor_state(&state->sensor);
-		pthread_mutex_unlock(&state->sensor_lock);
 
 		sleep_interruptible_ms(SENSOR_POLL_MS);
 	}
@@ -762,13 +1185,14 @@ static int encode_jpeg_rgb565(const uint16_t *rgb565, int width, int height,
 	return 0;
 }
 
-static int snapshot_jpeg(struct monitor_state *state, unsigned char **jpeg_buf,
-			 unsigned long *jpeg_size, unsigned long *frame_seq)
+static int copy_latest_frame(struct monitor_state *state, uint16_t **frame,
+			     size_t *frame_bytes, unsigned long *frame_seq)
 {
 	uint16_t *copy;
 	size_t bytes = state->latest_frame_bytes;
-	int ret;
 
+	if (!get_camera_enabled(state))
+		return 1;
 	copy = malloc(bytes);
 	if (!copy)
 		return -1;
@@ -784,19 +1208,49 @@ static int snapshot_jpeg(struct monitor_state *state, unsigned char **jpeg_buf,
 		*frame_seq = state->frame_seq;
 	pthread_mutex_unlock(&state->frame_lock);
 
+	*frame = copy;
+	if (frame_bytes)
+		*frame_bytes = bytes;
+	return 0;
+}
+
+static int snapshot_jpeg(struct monitor_state *state, unsigned char **jpeg_buf,
+			 unsigned long *jpeg_size, unsigned long *frame_seq)
+{
+	uint16_t *copy;
+	int ret;
+
+	ret = copy_latest_frame(state, &copy, NULL, frame_seq);
+	if (ret != 0)
+		return ret;
+
 	ret = encode_jpeg_rgb565(copy, state->cfg.width, state->cfg.height,
 				 state->cfg.jpeg_quality, jpeg_buf, jpeg_size);
 	free(copy);
 	return ret;
 }
 
-static int wait_for_new_frame(struct monitor_state *state, unsigned long last_seq)
+static int wait_for_new_frame(struct monitor_state *state, unsigned long last_seq,
+			      bool require_camera_public)
 {
 	int ret = 0;
 
 	pthread_mutex_lock(&state->frame_lock);
-	while (!state->stop && state->frame_seq <= last_seq)
-		pthread_cond_wait(&state->frame_cond, &state->frame_lock);
+	while (!state->stop && state->frame_seq <= last_seq) {
+		struct timespec ts;
+
+		if (!get_camera_enabled(state)) {
+			ret = 1;
+			break;
+		}
+		if (require_camera_public && !get_camera_public_enabled(state)) {
+			ret = 1;
+			break;
+		}
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += 1;
+		pthread_cond_timedwait(&state->frame_cond, &state->frame_lock, &ts);
+	}
 	if (state->stop)
 		ret = -1;
 	pthread_mutex_unlock(&state->frame_lock);
@@ -810,6 +1264,24 @@ static void send_not_found(int fd)
 		  "Content-Type: text/plain\r\n"
 		  "Connection: close\r\n\r\n"
 		  "not found\n");
+}
+
+static void send_forbidden(int fd, const char *msg)
+{
+	write_fmt(fd,
+		  "HTTP/1.1 403 Forbidden\r\n"
+		  "Content-Type: text/plain\r\n"
+		  "Connection: close\r\n\r\n"
+		  "%s\n", msg);
+}
+
+static void send_bad_request(int fd, const char *msg)
+{
+	write_fmt(fd,
+		  "HTTP/1.1 400 Bad Request\r\n"
+		  "Content-Type: text/plain\r\n"
+		  "Connection: close\r\n\r\n"
+		  "%s\n", msg);
 }
 
 static void send_service_unavailable(int fd, const char *msg)
@@ -853,13 +1325,20 @@ static void send_index(int fd)
 	write_all(fd, page, sizeof(page) - 1);
 }
 
-static void send_status(struct monitor_state *state, int fd)
+static void send_status(struct monitor_state *state, int fd, bool is_local)
 {
 	struct sensor_status sensor;
+	struct control_status control;
 	unsigned long frame_seq;
 	unsigned long captured_frames;
 	unsigned long camera_errors;
 	long uptime;
+	bool show_camera;
+	bool show_sensor;
+
+	control = get_control_status(state);
+	show_camera = is_local || control.camera_public_enabled;
+	show_sensor = is_local || control.sensor_public_enabled;
 
 	pthread_mutex_lock(&state->sensor_lock);
 	sensor = state->sensor;
@@ -880,16 +1359,50 @@ static void send_status(struct monitor_state *state, int fd)
 		  "{"
 		  "\"app\":\"%s\","
 		  "\"uptime_sec\":%ld,"
-		  "\"video\":{\"device\":\"%s\",\"width\":%d,\"height\":%d,\"fps_target\":%d,"
-		  "\"frame_seq\":%lu,\"captured_frames\":%lu,\"errors\":%lu},"
-		  "\"sensor\":{\"device\":\"%s\",\"present\":%s,\"ir\":%u,\"als\":%u,\"ps\":%u,"
-		  "\"state\":\"%s\",\"read_count\":%lu,\"error_count\":%lu}"
-		  "}\n",
-		  APP_NAME, uptime, state->cfg.video_dev, state->cfg.width,
-		  state->cfg.height, state->cfg.fps, frame_seq, captured_frames,
-		  camera_errors, state->cfg.sensor_dev,
-		  sensor.present ? "true" : "false", sensor.ir, sensor.als,
-		  sensor.ps, sensor.state, sensor.read_count, sensor.error_count);
+		  "\"local\":%s,",
+		  APP_NAME, uptime, json_bool(is_local));
+
+	if (is_local) {
+		write_fmt(fd,
+			  "\"controls\":{"
+			  "\"camera_enabled\":%s,"
+			  "\"sensor_enabled\":%s,"
+			  "\"camera_public_enabled\":%s,"
+			  "\"sensor_public_enabled\":%s},",
+			  json_bool(control.camera_enabled),
+			  json_bool(control.sensor_enabled),
+			  json_bool(control.camera_public_enabled),
+			  json_bool(control.sensor_public_enabled));
+	}
+
+	if (show_camera) {
+		write_fmt(fd,
+			  "\"video\":{\"public\":%s,\"enabled\":%s,\"device\":\"%s\","
+			  "\"width\":%d,\"height\":%d,\"fps_target\":%d,"
+			  "\"frame_seq\":%lu,\"captured_frames\":%lu,\"errors\":%lu},",
+			  json_bool(control.camera_public_enabled),
+			  json_bool(control.camera_enabled), state->cfg.video_dev,
+			  state->cfg.width, state->cfg.height, state->cfg.fps,
+			  frame_seq, captured_frames, camera_errors);
+	} else {
+		write_fmt(fd, "\"video\":{\"public\":false},");
+	}
+
+	if (show_sensor) {
+		write_fmt(fd,
+			  "\"sensor\":{\"public\":%s,\"enabled\":%s,\"device\":\"%s\","
+			  "\"iio_dir\":\"%s\",\"present\":%s,\"ir\":%u,\"als\":%u,"
+			  "\"als_input\":\"%s\",\"ps\":%u,\"state\":\"%s\","
+			  "\"read_count\":%lu,\"error_count\":%lu}",
+			  json_bool(control.sensor_public_enabled),
+			  json_bool(control.sensor_enabled), state->cfg.sensor_dev,
+			  sensor.iio_dir, json_bool(sensor.present), sensor.ir,
+			  sensor.als, sensor.als_input, sensor.ps, sensor.state,
+			  sensor.read_count, sensor.error_count);
+	} else {
+		write_fmt(fd, "\"sensor\":{\"public\":false}");
+	}
+	write_fmt(fd, "}\n");
 }
 
 static void send_snapshot(struct monitor_state *state, int fd)
@@ -919,9 +1432,42 @@ static void send_snapshot(struct monitor_state *state, int fd)
 	free(jpeg);
 }
 
-static void send_mjpeg(struct monitor_state *state, int fd)
+static void send_raw_frame(struct monitor_state *state, int fd)
+{
+	uint16_t *frame = NULL;
+	size_t frame_bytes = 0;
+	unsigned long seq = 0;
+	int ret;
+
+	ret = copy_latest_frame(state, &frame, &frame_bytes, &seq);
+	if (ret == 1) {
+		send_service_unavailable(fd, "no frame captured yet");
+		return;
+	}
+	if (ret < 0 || !frame) {
+		send_service_unavailable(fd, "copy frame failed");
+		return;
+	}
+
+	write_fmt(fd,
+		  "HTTP/1.1 200 OK\r\n"
+		  "Content-Type: application/octet-stream\r\n"
+		  "Content-Length: %zu\r\n"
+		  "Cache-Control: no-store\r\n"
+		  "X-Width: %d\r\n"
+		  "X-Height: %d\r\n"
+		  "X-Pixel-Format: RGB565\r\n"
+		  "X-Frame-Seq: %lu\r\n"
+		  "Connection: close\r\n\r\n",
+		  frame_bytes, state->cfg.width, state->cfg.height, seq);
+	write_all(fd, frame, frame_bytes);
+	free(frame);
+}
+
+static void send_mjpeg(struct monitor_state *state, int fd, bool is_local)
 {
 	unsigned long last_seq = 0;
+	bool require_camera_public = !is_local;
 
 	if (write_fmt(fd,
 		      "HTTP/1.1 200 OK\r\n"
@@ -937,7 +1483,13 @@ static void send_mjpeg(struct monitor_state *state, int fd)
 		unsigned long seq = 0;
 		int ret;
 
-		if (wait_for_new_frame(state, last_seq) < 0)
+		if (require_camera_public && !get_camera_public_enabled(state))
+			break;
+
+		ret = wait_for_new_frame(state, last_seq, require_camera_public);
+		if (ret != 0)
+			break;
+		if (require_camera_public && !get_camera_public_enabled(state))
 			break;
 
 		ret = snapshot_jpeg(state, &jpeg, &jpeg_size, &seq);
@@ -981,26 +1533,137 @@ static int read_request_path(int fd, char *path, size_t path_size)
 struct client_context {
 	struct monitor_state *state;
 	int fd;
+	bool is_local;
 };
 
-static void handle_client(struct monitor_state *state, int client_fd)
+static int parse_on_off(const char *value, bool *out)
+{
+	if (strcmp(value, "on") == 0 || strcmp(value, "1") == 0 ||
+	    strcmp(value, "true") == 0) {
+		*out = true;
+		return 0;
+	}
+	if (strcmp(value, "off") == 0 || strcmp(value, "0") == 0 ||
+	    strcmp(value, "false") == 0) {
+		*out = false;
+		return 0;
+	}
+	errno = EINVAL;
+	return -1;
+}
+
+static int apply_control_pair(struct control_status *control,
+			      const char *key, const char *value)
+{
+	bool enabled;
+
+	if (parse_on_off(value, &enabled) < 0)
+		return -1;
+	if (strcmp(key, "camera") == 0)
+		control->camera_enabled = enabled;
+	else if (strcmp(key, "sensor") == 0)
+		control->sensor_enabled = enabled;
+	else if (strcmp(key, "camera_public") == 0)
+		control->camera_public_enabled = enabled;
+	else if (strcmp(key, "sensor_public") == 0)
+		control->sensor_public_enabled = enabled;
+	else {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
+
+static int apply_control_query(struct monitor_state *state, const char *query)
+{
+	struct control_status control = get_control_status(state);
+	char tmp[256];
+	char *saveptr = NULL;
+	char *token;
+
+	if (!query || !*query)
+		return 0;
+	if (snprintf(tmp, sizeof(tmp), "%s", query) >= (int)sizeof(tmp)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	for (token = strtok_r(tmp, "&", &saveptr); token;
+	     token = strtok_r(NULL, "&", &saveptr)) {
+		char *eq = strchr(token, '=');
+
+		if (!eq || eq == token || !eq[1]) {
+			errno = EINVAL;
+			return -1;
+		}
+		*eq = '\0';
+		if (apply_control_pair(&control, token, eq + 1) < 0)
+			return -1;
+	}
+	set_control_status(state, &control);
+	return 0;
+}
+
+static bool is_loopback_client(const struct sockaddr_in *addr)
+{
+	uint32_t ip = ntohl(addr->sin_addr.s_addr);
+
+	return (ip & 0xff000000U) == 0x7f000000U;
+}
+
+static void handle_client(struct monitor_state *state, int client_fd, bool is_local)
 {
 	char path[256] = "/";
+	char route[256];
+	char *query;
+	size_t route_len;
+	struct control_status control;
 
 	if (read_request_path(client_fd, path, sizeof(path)) < 0) {
 		send_not_found(client_fd);
 		return;
 	}
 
-	if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)
+	query = strchr(path, '?');
+	route_len = query ? (size_t)(query - path) : strlen(path);
+	if (route_len >= sizeof(route))
+		route_len = sizeof(route) - 1;
+	memcpy(route, path, route_len);
+	route[route_len] = '\0';
+	if (query)
+		query++;
+
+	control = get_control_status(state);
+	if (strcmp(route, "/") == 0 || strcmp(route, "/index.html") == 0)
 		send_index(client_fd);
-	else if (strcmp(path, "/api/status") == 0)
-		send_status(state, client_fd);
-	else if (strcmp(path, "/snapshot.jpg") == 0)
-		send_snapshot(state, client_fd);
-	else if (strcmp(path, "/stream.mjpg") == 0)
-		send_mjpeg(state, client_fd);
-	else
+	else if (strcmp(route, "/api/status") == 0)
+		send_status(state, client_fd, is_local);
+	else if (strcmp(route, "/api/control") == 0) {
+		if (!is_local) {
+			send_forbidden(client_fd, "control is local only");
+			return;
+		}
+		if (apply_control_query(state, query) < 0) {
+			send_bad_request(client_fd, "invalid control query");
+			return;
+		}
+		send_status(state, client_fd, true);
+	} else if (strcmp(route, "/snapshot.jpg") == 0) {
+		if (!is_local && !control.camera_public_enabled)
+			send_forbidden(client_fd, "camera network access disabled");
+		else
+			send_snapshot(state, client_fd);
+	} else if (strcmp(route, "/frame.rgb565") == 0) {
+		if (!is_local)
+			send_forbidden(client_fd, "raw frame is local only");
+		else
+			send_raw_frame(state, client_fd);
+	} else if (strcmp(route, "/stream.mjpg") == 0) {
+		if (!is_local && !control.camera_public_enabled)
+			send_forbidden(client_fd, "camera network access disabled");
+		else
+			send_mjpeg(state, client_fd, is_local);
+	} else
 		send_not_found(client_fd);
 }
 
@@ -1008,7 +1671,7 @@ static void *client_thread(void *arg)
 {
 	struct client_context *ctx = arg;
 
-	handle_client(ctx->state, ctx->fd);
+	handle_client(ctx->state, ctx->fd, ctx->is_local);
 	close(ctx->fd);
 	free(ctx);
 	return NULL;
@@ -1062,6 +1725,8 @@ static void http_loop(struct monitor_state *state)
 		struct timeval tv;
 		int ret;
 		int client_fd;
+		struct sockaddr_in client_addr;
+		socklen_t client_len;
 
 		FD_ZERO(&fds);
 		FD_SET(listen_fd, &fds);
@@ -1077,7 +1742,9 @@ static void http_loop(struct monitor_state *state)
 		if (ret == 0)
 			continue;
 
-		client_fd = accept(listen_fd, NULL, NULL);
+		client_len = sizeof(client_addr);
+		memset(&client_addr, 0, sizeof(client_addr));
+		client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
 		if (client_fd < 0) {
 			if (errno == EINTR)
 				continue;
@@ -1095,11 +1762,12 @@ static void http_loop(struct monitor_state *state)
 			}
 			ctx->state = state;
 			ctx->fd = client_fd;
+			ctx->is_local = is_loopback_client(&client_addr);
 			ret = pthread_create(&tid, NULL, client_thread, ctx);
 			if (ret != 0) {
 				log_msg("WARN", "create client thread failed: %s", strerror(ret));
 				free(ctx);
-				handle_client(state, client_fd);
+				handle_client(state, client_fd, is_loopback_client(&client_addr));
 				close(client_fd);
 				continue;
 			}
@@ -1127,17 +1795,27 @@ int main(int argc, char **argv)
 	}
 	strcpy(g_state.sensor.state, "unknown");
 	g_state.start_time = time(NULL);
+	g_state.camera_enabled = g_state.cfg.camera_enabled;
+	g_state.sensor_enabled = g_state.cfg.sensor_enabled;
+	g_state.camera_public_enabled = g_state.cfg.camera_public_enabled;
+	g_state.sensor_public_enabled = g_state.cfg.sensor_public_enabled;
 
+	pthread_mutex_init(&g_state.control_lock, NULL);
 	pthread_mutex_init(&g_state.frame_lock, NULL);
 	pthread_mutex_init(&g_state.sensor_lock, NULL);
 	pthread_cond_init(&g_state.frame_cond, NULL);
 	signal(SIGINT, handle_signal);
 	signal(SIGTERM, handle_signal);
 
-	log_msg("INFO", "starting: video=%s sensor=%s port=%d capture=%dx%d fps=%d lcd=%s",
+	log_msg("INFO",
+		"starting: video=%s sensor=%s port=%d capture=%dx%d fps=%d lcd=%s camera=%s sensor_poll=%s camera_public=%s sensor_public=%s",
 		g_state.cfg.video_dev, g_state.cfg.sensor_dev, g_state.cfg.http_port,
 		g_state.cfg.width, g_state.cfg.height, g_state.cfg.fps,
-		g_state.cfg.lcd_enabled ? "on" : "off");
+		g_state.cfg.lcd_enabled ? "on" : "off",
+		g_state.camera_enabled ? "on" : "off",
+		g_state.sensor_enabled ? "on" : "off",
+		g_state.camera_public_enabled ? "on" : "off",
+		g_state.sensor_public_enabled ? "on" : "off");
 
 	ret = pthread_create(&cam_tid, NULL, camera_thread, &g_state);
 	if (ret != 0) {
@@ -1162,6 +1840,7 @@ int main(int argc, char **argv)
 	pthread_join(cam_tid, NULL);
 	pthread_join(sensor_tid, NULL);
 	free(g_state.latest_frame);
+	pthread_mutex_destroy(&g_state.control_lock);
 	pthread_mutex_destroy(&g_state.frame_lock);
 	pthread_mutex_destroy(&g_state.sensor_lock);
 	pthread_cond_destroy(&g_state.frame_cond);

@@ -6,5 +6,5 @@ config BR2_PACKAGE_IMX6_MONITOR
 	help
 	  Small C monitoring service for the i.MX6ULL BSP. It captures
 	  OV5640 frames through V4L2 MMAP, keeps an optional framebuffer
-	  preview, reads AP3216C sensor data, and exposes HTTP endpoints:
-	  /, /snapshot.jpg, /stream.mjpg and /api/status.
+	  preview, reads AP3216C data through IIO sysfs, and exposes
+	  HTTP status, snapshot, MJPEG stream and local control endpoints.
