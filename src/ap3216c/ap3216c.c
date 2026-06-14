@@ -1226,6 +1226,8 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
 
 	/* 5、注册iio_dev */
 	ret = iio_device_register(indio_dev);
+	dev_info(&dev->client->dev, "registed!\n");
+
 	if (ret < 0)
 	{
 		dev_err(&client->dev, "iio_device_register failed\n");
@@ -1255,12 +1257,14 @@ static int ap3216c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ap3216c_id[] = {
-	{"alientek,ap3216c", 0},
+	{"ap3216c", 0},
 	{}};
+MODULE_DEVICE_TABLE(i2c, ap3216c_id);
 
 static const struct of_device_id ap3216c_of_match[] = {
 	{.compatible = "alientek,ap3216c"},
 	{/* Sentinel */}};
+MODULE_DEVICE_TABLE(of, ap3216c_of_match);
 
 static struct i2c_driver ap3216c_driver = {
 	.probe = ap3216c_probe,

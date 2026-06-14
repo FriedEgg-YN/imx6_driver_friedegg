@@ -356,7 +356,7 @@ int gt9147_remove(struct i2c_client *client)
  *  传统驱动匹配表
  */ 
 const struct i2c_device_id gt9147_id_table[] = {
-	{ "goodix,gt9147", 0, },
+	{ "gt9147", 0, },
     { /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, gt9147_id_table);
