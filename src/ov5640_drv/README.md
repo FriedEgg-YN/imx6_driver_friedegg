@@ -43,6 +43,15 @@ ov5640_test
 
 如果 `modprobe` 顺序或依赖在当前 rootfs 中不稳定，可以临时使用 `insmod` 指定模块路径验证，再回到 Buildroot 包和模块依赖上修正。
 
+## 画面翻转(vflip/mirror)
+
+寄存器0x3820和0x3821能够分别控制vflip及mirror。这两者又分为Sensor、ISP vflip/mirror两种。经验证，**Sensor的vflip和mirror直接控制画面方向，Sensor与ISP 的vflip和mirror要保持一致，否则最终画面颜色异常**。
+
+对于Sensor与ISP翻转位不匹配导致画面异常问题，找到的原因为Bayer彩色滤波阵列(CFA)的起始排列被打乱。具体如下：
+
+- CMOS传感器的CFA通常为RGGB或BGGR
+- 修改Sensor vflip/mirror导致起始行可能改变，如从RGRGR...改为GBGBG...，与ISP假定的顺序不一致，从而导致ISP处理后颜色怪异
+
 ## 移植调试记录
 
 早期移植时反复出现 `reg write/read error`。排查过程如下：
