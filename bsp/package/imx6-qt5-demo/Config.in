@@ -3,15 +3,17 @@ config BR2_PACKAGE_IMX6_QT5_DEMO
 	depends on BR2_PACKAGE_QT5
 	select BR2_PACKAGE_QT5BASE_GUI
 	select BR2_PACKAGE_QT5BASE_WIDGETS
+	select BR2_PACKAGE_QT5BASE_NETWORK
 	select BR2_PACKAGE_QT5BASE_LINUXFB
 	select BR2_PACKAGE_QT5BASE_FONTCONFIG
 	select BR2_PACKAGE_QT5BASE_JPEG
 	select BR2_PACKAGE_QT5BASE_PNG
 	select BR2_PACKAGE_QT5BASE_TSLIB
 	select BR2_PACKAGE_DEJAVU
+	select BR2_PACKAGE_IMX6_MONITOR
 	help
-	  Minimal Qt5 Widgets test program for the i.MX6ULL linuxfb
-	  glibc rootfs.
+	  Qt5 Widgets touch HMI for controlling imx6-monitor on the
+	  i.MX6ULL linuxfb glibc rootfs.
 
 comment "imx6 Qt5 demo needs Qt5"
 	depends on !BR2_PACKAGE_QT5
