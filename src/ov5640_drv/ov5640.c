@@ -791,6 +791,19 @@ static s32 ov5640_read_reg(u16 reg, u8 *val)
 }
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
+/**
+ * ov5640_get_register - read one OV5640 register through V4L2 debug ioctl
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @reg: Debug register descriptor.  On entry, @reg->reg is the sensor
+ *       register address to read.  On success, @reg->size is set to 1 and
+ *       @reg->val contains the 8-bit register value.
+ *
+ * The OV5640 register map uses 16-bit register addresses and 8-bit register
+ * values, so addresses outside 0x0000..0xffff are rejected.
+ *
+ * Return: 0 on success, -EINVAL for an out-of-range address, or a negative
+ * error code from the I2C register read helper.
+ */
 static int ov5640_get_register(struct v4l2_subdev *sd,
 					struct v4l2_dbg_register *reg)
 {
@@ -804,12 +817,27 @@ static int ov5640_get_register(struct v4l2_subdev *sd,
 	reg->size = 1;
 
 	ret = ov5640_read_reg(reg->reg, &val);
-	if (!ret)
-		reg->val = (__u64)val;
+	if (ret < 0)
+		return ret;
 
-	return ret;
+	reg->val = (__u64)val;
+
+	return 0;
 }
 
+/**
+ * ov5640_set_register - write one OV5640 register through V4L2 debug ioctl
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @reg: Debug register descriptor.  @reg->reg is the sensor register address
+ *       to write and @reg->val is the new register value.
+ *
+ * The OV5640 register map uses 16-bit register addresses and 8-bit register
+ * values, so addresses outside 0x0000..0xffff and values outside 0x00..0xff
+ * are rejected before touching the bus.
+ *
+ * Return: 0 on success, -EINVAL for an out-of-range address or value, or a
+ * negative error code from the I2C register write helper.
+ */
 static int ov5640_set_register(struct v4l2_subdev *sd,
 					const struct v4l2_dbg_register *reg)
 {
@@ -1159,6 +1187,18 @@ err:
 	return retval;
 }
 
+/**
+ * ov5640_init_mode - initialize the sensor into the default VGA mode
+ *
+ * Soft-reset the OV5640, download the common sensor initialization table,
+ * then apply the default 30 fps VGA register table.  After the register
+ * programming succeeds, configure drive strength, anti-banding, AE target,
+ * and night mode state, then wait for several frames before exposing the
+ * initialized 640x480 state to the rest of the driver.
+ *
+ * Return: 0 on success, or a negative error code when programming the sensor
+ * fails.
+ */
 static int ov5640_init_mode(void)
 {
 	struct reg_value *pModeSetting = NULL;
@@ -1430,12 +1470,16 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 	return 0;
 }
 
-/*!
- * ov5640_g_parm - V4L2 sensor interface handler for VIDIOC_G_PARM ioctl
- * @s: pointer to standard V4L2 sub device structure
- * @a: pointer to standard V4L2 VIDIOC_G_PARM ioctl structure
+/**
+ * ov5640_g_parm - return the current capture stream parameters
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @a: V4L2 stream parameter container to fill.
  *
- * Returns the sensor's video CAPTURE parameters.
+ * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback copies the
+ * cached capture capability, frame interval, and capture mode from the sensor
+ * state into @a.
+ *
+ * Return: 0 on success, or -EINVAL if @a->type is not supported.
  */
 static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
@@ -1474,14 +1518,18 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 	return ret;
 }
 
-/*!
- * ov5460_s_parm - V4L2 sensor interface handler for VIDIOC_S_PARM ioctl
- * @s: pointer to standard V4L2 sub device structure
- * @a: pointer to standard V4L2 VIDIOC_S_PARM ioctl structure
+/**
+ * ov5640_s_parm - update the requested capture stream parameters
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @a: V4L2 stream parameter container supplied by the caller.
  *
- * Configures the sensor to use the input parameters, if possible.  If
- * not possible, reverts to the old parameters and returns the
- * appropriate error code.
+ * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback normalizes an
+ * empty frame interval to DEFAULT_FPS, clamps it to the supported range, then
+ * accepts only the discrete 15 fps and 30 fps modes used by this driver.  The
+ * selected frame interval and capture mode are cached in the sensor state.
+ *
+ * Return: 0 on success, or -EINVAL if the buffer type or frame rate is not
+ * supported.
  */
 static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
@@ -1559,6 +1607,17 @@ error:
 	return ret;
 }
 
+/**
+ * ov5640_try_fmt - validate a requested media bus frame format
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @mf: Media bus frame format to validate and adjust.
+ *
+ * The callback checks whether @mf->code is one of the sensor's supported media
+ * bus codes.  Unsupported codes are replaced by the first entry in
+ * ov5640_colour_fmts.  The field order is always forced to V4L2_FIELD_NONE.
+ *
+ * Return: 0.
+ */
 static int ov5640_try_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_mbus_framefmt *mf)
 {
@@ -1574,6 +1633,19 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/**
+ * ov5640_s_fmt - program the active media bus format
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @mf: Requested media bus frame format, updated with the active frame size.
+ *
+ * The callback validates the requested media bus code, falls back to the first
+ * supported code when necessary, forces progressive field order, then programs
+ * the current fixed 800x480 at 30 fps sensor mode.  The selected media bus
+ * format and colorspace are cached in the sensor state.
+ *
+ * Return: 0 on success, or a negative error code if sensor register
+ * programming fails.
+ */
 static int ov5640_s_fmt(struct v4l2_subdev *sd,
 			struct v4l2_mbus_framefmt *mf)
 {
@@ -1613,6 +1685,16 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/**
+ * ov5640_g_fmt - return the cached media bus format
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @mf: Media bus frame format container to fill.
+ *
+ * The callback reports the media bus code and colorspace cached in the sensor
+ * state and forces progressive field order.
+ *
+ * Return: 0.
+ */
 static int ov5640_g_fmt(struct v4l2_subdev *sd,
 			struct v4l2_mbus_framefmt *mf)
 {
@@ -1628,6 +1710,15 @@ static int ov5640_g_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/**
+ * ov5640_enum_fmt - enumerate supported media bus pixel codes
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @index: Zero-based format table index to enumerate.
+ * @code: Destination for the media bus code at @index.
+ *
+ * Return: 0 on success, or -EINVAL when @index is outside the supported
+ * format table.
+ */
 static int ov5640_enum_fmt(struct v4l2_subdev *sd, unsigned int index,
 			   u32 *code)
 {
@@ -1728,8 +1819,8 @@ static int ov5640_set_clk_rate(void)
 
 /*!
  * dev_init - V4L2 sensor init
- * @s: pointer to standard V4L2 device structure
- *
+ * 
+ * init device according to the mclk and fps(ov5640_data.streamcap.timeperframe) in ov5640_data
  */
 static int init_device(void)
 {
@@ -1803,13 +1894,15 @@ static int ov5640_probe(struct i2c_client *client,
 	u8 chip_id_high, chip_id_low;
 
 	/* ov5640 pinctrl */
-	pinctrl = devm_pinctrl_get_select_default(dev);
-	if (IS_ERR(pinctrl)) {
-		dev_err(dev, "setup pinctrl failed\n");
-		return PTR_ERR(pinctrl);
-	}
+	/* driver core will bind pinctrl before probe in really_probe()(linux/drivers/base/dd.c), so actually it's not necessary here. */
+	// pinctrl = devm_pinctrl_get_select_default(dev);
+	// if (IS_ERR(pinctrl)) {
+	// 	dev_err(dev, "setup pinctrl failed\n");
+	// 	return PTR_ERR(pinctrl);
+	// }
 
 	/* request power down pin */
+	/* of_get_named_gpio & devm_gpio_request_one send raw value to GPIO, doesn't use DTS active-low flag. */
 	pwn_gpio = of_get_named_gpio(dev->of_node, "pwn-gpios", 0);
 	if (!gpio_is_valid(pwn_gpio)) {
 		dev_err(dev, "no sensor pwdn pin available\n");
@@ -1832,6 +1925,7 @@ static int ov5640_probe(struct i2c_client *client,
 		return retval;
 
 	/* Set initial values for the sensor struct. */
+	/* 全局单实例 */
 	memset(&ov5640_data, 0, sizeof(ov5640_data));
 	ov5640_data.sensor_clk = devm_clk_get(dev, "csi_mclk");
 	if (IS_ERR(ov5640_data.sensor_clk)) {
@@ -1878,12 +1972,14 @@ static int ov5640_probe(struct i2c_client *client,
 	ov5640_data.streamcap.timeperframe.denominator = DEFAULT_FPS;
 	ov5640_data.streamcap.timeperframe.numerator = 1;
 
-	ov5640_regulator_enable(&client->dev);
+	/* 正点原子 ov5640 模块只需3.3v供电，应该模块内部给了不同电压，故无需此步骤 */
+	// ov5640_regulator_enable(&client->dev);
 
 	ov5640_reset();
 
 	ov5640_power_down(0);
 
+	/* read register to make sure the device is OV5640 */
 	retval = ov5640_read_reg(OV5640_CHIP_ID_HIGH_BYTE, &chip_id_high);
 	if (retval < 0 || chip_id_high != 0x56) {
 		clk_disable_unprepare(ov5640_data.sensor_clk);
@@ -1907,6 +2003,11 @@ static int ov5640_probe(struct i2c_client *client,
 
 	clk_disable(ov5640_data.sensor_clk);
 
+	/*
+	 * will do:
+	 * v4l2_set_subdevdata(sd, client);
+	 * i2c_set_clientdata(client, sd);  
+	 */
 	v4l2_i2c_subdev_init(&ov5640_data.subdev, client, &ov5640_subdev_ops);
 
 	retval = v4l2_async_register_subdev(&ov5640_data.subdev);

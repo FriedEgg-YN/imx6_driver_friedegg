@@ -88,9 +88,3 @@ CSI: Registered sensor subdevice: ov5640 1-003c
 ```
 
 当前结论：mdev autoload 可能曾经放大了模块加载顺序或电源/复位时序问题，但现阶段没有稳定复现。后续如果再次出现，应优先保留完整启动日志、模块加载顺序、`i2cdetect` 结果和 `dmesg` 时间线，再决定是修 mdev 规则、模块依赖还是驱动 probe/remove 时序。
-
-## 参考资料
-
-- [移植 ov5640 摄像头到 imx6ull 开发板（一）](https://blog.csdn.net/qq_55389904/article/details/132538449)
-- [移植 ov5640 摄像头到 imx6ull 开发板（二）](https://blog.csdn.net/qq_55389904/article/details/132568689)
-- [移植 ov5640 摄像头到 imx6ull 开发板（三）](https://blog.csdn.net/qq_55389904/article/details/132561962)
