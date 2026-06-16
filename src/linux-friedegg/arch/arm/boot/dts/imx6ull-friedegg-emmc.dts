@@ -13,7 +13,7 @@
 
 / {
 	model = "Freescale i.MX6 ULL 14x14 EVK Board";
-	board-version = "202605082300";
+	board-version = "20260617";
 	compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
 
 	chosen {
@@ -282,8 +282,8 @@
 					&pinctrl_csi_pwn_rst>;
 		clocks = <&clks IMX6UL_CLK_CSI>;
 		clock-names = "csi_mclk";
-		pwn-gpios = <&gpio1 4 1>;
-		rst-gpios = <&gpio1 2 0>;
+		pwn-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+		rst-gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
 		csi_id = <0>;
 		mclk = <24000000>;
 		mclk_source = <0>;
