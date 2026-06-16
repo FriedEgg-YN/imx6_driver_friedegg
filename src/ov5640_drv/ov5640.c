@@ -76,9 +76,13 @@
 #define OV5640_REG_BANDING_FILTER_MAN   0x3c00
 #define OV5640_REG_BANDING_FILTER_CTRL  0x3c01
 #define OV5640_REG_BANDING_FILTER_AUTO  0x3c0c
+#define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
 #define OV5640_REG_AVG_READOUT          0x56a1
+
+#define OV5640_STREAM_ON                0x00
+#define OV5640_STREAM_OFF               0x0f
 
 enum ov5640_mode {
 	ov5640_mode_MIN = 0,
@@ -667,6 +671,7 @@ static int ov5640_remove(struct i2c_client *client);
 
 static int ov5640_read_reg(u16 reg, u8 *val);
 static int ov5640_write_reg(u16 reg, u8 val);
+static int init_device(void);
 static int ov5640_read_reg16(u16 reg, u16 *val);
 static int ov5640_write_reg16(u16 reg, u16 val);
 static int ov5640_write_reg16_low_first(u16 reg, u16 val);
@@ -761,6 +766,77 @@ static inline void ov5640_reset(void)
 	gpio_set_value_cansleep(rst_gpio, 1);
 	msleep(5);
 	gpio_set_value_cansleep(pwn_gpio, 1);
+}
+
+static int ov5640_hw_set_stream(bool enable)
+{
+	return ov5640_write_reg(OV5640_REG_STREAM_CTRL,
+				enable ? OV5640_STREAM_ON : OV5640_STREAM_OFF);
+}
+
+static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
+{
+	int ret;
+
+	if (sensor->streaming == enable)
+		return 0;
+
+	if (enable && !sensor->powered)
+		return -EPIPE;
+
+	ret = ov5640_hw_set_stream(enable);
+	if (ret < 0)
+		return ret;
+
+	sensor->streaming = enable;
+	return 0;
+}
+
+static int ov5640_power_on(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (sensor->powered)
+		return 0;
+
+	ret = clk_prepare_enable(sensor->sensor_clk);
+	if (ret < 0)
+		return ret;
+
+	if (sensor->io_init)
+		sensor->io_init();
+
+	ov5640_power_down(0);
+	sensor->powered = true;
+	sensor->on = true;
+
+	return 0;
+}
+
+static void ov5640_power_off(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (!sensor->powered)
+		return;
+
+	if (sensor->streaming) {
+		ret = ov5640_set_stream(sensor, false);
+		if (ret < 0)
+			dev_warn(sensor->dev,
+				 "stream off before power down failed: %d\n", ret);
+	} else {
+		ret = ov5640_hw_set_stream(false);
+		if (ret < 0)
+			dev_dbg(sensor->dev,
+				"stream-off register write failed: %d\n", ret);
+	}
+
+	ov5640_power_down(1);
+	clk_disable_unprepare(sensor->sensor_clk);
+	sensor->streaming = false;
+	sensor->powered = false;
+	sensor->on = false;
 }
 
 static int ov5640_regulator_enable(struct device *dev)
@@ -1648,16 +1724,29 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ov5640 *sensor = to_ov5640(client);
+	int ret = 0;
 
-	if (on)
-		clk_enable(ov5640_data.sensor_clk);
-	else
-		clk_disable(ov5640_data.sensor_clk);
+	mutex_lock(&sensor->lock);
 
-	sensor->on = on;
-	sensor->powered = on;
+	if (on) {
+		if (!sensor->powered) {
+			ret = ov5640_power_on(sensor);
+			if (ret < 0)
+				goto out;
 
-	return 0;
+			ret = init_device();
+			if (ret < 0) {
+				ov5640_power_off(sensor);
+				goto out;
+			}
+		}
+	} else {
+		ov5640_power_off(sensor);
+	}
+
+out:
+	mutex_unlock(&sensor->lock);
+	return ret;
 }
 
 /**
@@ -1671,6 +1760,19 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
  *
  * Return: 0 on success, or -EINVAL if @a->type is not supported.
  */
+static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ov5640 *sensor = to_ov5640(client);
+	int ret;
+
+	mutex_lock(&sensor->lock);
+	ret = ov5640_set_stream(sensor, !!enable);
+	mutex_unlock(&sensor->lock);
+
+	return ret;
+}
+
 static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
@@ -1872,6 +1974,12 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 	if (retval < 0)
 		return retval;
 
+	if (!sensor->streaming) {
+		retval = ov5640_hw_set_stream(false);
+		if (retval < 0)
+			return retval;
+	}
+
 	mf->width =
 		ov5640_mode_info_data[ov5640_30_fps][ov5640_mode_800_480].width;
 	mf->height =
@@ -2053,13 +2161,21 @@ static int init_device(void)
 		return -EINVAL; /* Only support 15fps or 30fps now. */
 
 	ret = ov5640_init_mode();
+	if (ret < 0)
+		return ret;
 
-	return ret;
+	ret = ov5640_hw_set_stream(false);
+	if (ret < 0)
+		return ret;
+
+	ov5640_data.streaming = false;
+	return 0;
 }
 
 static struct v4l2_subdev_video_ops ov5640_subdev_video_ops = {
 	.g_parm = ov5640_g_parm,
 	.s_parm = ov5640_s_parm,
+	.s_stream = ov5640_s_stream,
 
 	.s_mbus_fmt	= ov5640_s_fmt,
 	.g_mbus_fmt	= ov5640_g_fmt,
@@ -2171,9 +2287,9 @@ static int ov5640_probe(struct i2c_client *client,
 	}
 
 	/* Set mclk rate before clk on */
-	ov5640_set_clk_rate();
-
-	clk_prepare_enable(ov5640_data.sensor_clk);
+	retval = ov5640_set_clk_rate();
+	if (retval < 0)
+		return retval;
 
 	ov5640_data.io_init = ov5640_reset;
 	ov5640_init_default_state(&ov5640_data);
@@ -2181,33 +2297,31 @@ static int ov5640_probe(struct i2c_client *client,
 	/* 正点原子 ov5640 模块只需3.3v供电，应该模块内部给了不同电压，故无需此步骤 */
 	// ov5640_regulator_enable(&client->dev);
 
-	ov5640_reset();
-
-	ov5640_power_down(0);
+	retval = ov5640_power_on(&ov5640_data);
+	if (retval < 0)
+		return retval;
 
 	/* read register to make sure the device is OV5640 */
 	retval = ov5640_read_reg(OV5640_CHIP_ID_HIGH_BYTE, &chip_id_high);
 	if (retval < 0 || chip_id_high != 0x56) {
-		clk_disable_unprepare(ov5640_data.sensor_clk);
 		pr_warning("camera ov5640 is not found\n");
-		return -ENODEV;
+		retval = -ENODEV;
+		goto power_off;
 	}
 	retval = ov5640_read_reg(OV5640_CHIP_ID_LOW_BYTE, &chip_id_low);
 	if (retval < 0 || chip_id_low != 0x40) {
-		clk_disable_unprepare(ov5640_data.sensor_clk);
 		pr_warning("camera ov5640 is not found\n");
-		return -ENODEV;
+		retval = -ENODEV;
+		goto power_off;
 	}
 
 	retval = init_device();
 	if (retval < 0) {
-		clk_disable_unprepare(ov5640_data.sensor_clk);
 		pr_warning("camera ov5640 init failed\n");
-		ov5640_power_down(1);
-		return retval;
+		goto power_off;
 	}
 
-	clk_disable(ov5640_data.sensor_clk);
+	ov5640_power_off(&ov5640_data);
 
 	/*
 	 * will do:
@@ -2223,6 +2337,10 @@ static int ov5640_probe(struct i2c_client *client,
 
 	pr_info("camera ov5640, is found\n");
 	return retval;
+
+power_off:
+	ov5640_power_off(&ov5640_data);
+	return retval;
 }
 
 /*!
@@ -2237,9 +2355,11 @@ static int ov5640_remove(struct i2c_client *client)
 
 	v4l2_async_unregister_subdev(sd);
 
-	clk_unprepare(ov5640_data.sensor_clk);
-
-	ov5640_power_down(1);
+	mutex_lock(&ov5640_data.lock);
+	ov5640_power_off(&ov5640_data);
+	if (!ov5640_data.powered)
+		ov5640_power_down(1);
+	mutex_unlock(&ov5640_data.lock);
 
 	if (analog_regulator)
 		regulator_disable(analog_regulator);

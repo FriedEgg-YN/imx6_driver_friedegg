@@ -386,6 +386,9 @@ struct mx6s_csi_mux {
 	u8 req_bit;
 };
 
+struct mx6s_csi_dev;
+static struct mx6s_fmt *format_by_fourcc(int fourcc);
+
 /**
  * struct mx6s_csi_dev - i.MX6S/6ULL CSI host 驱动私有数据
  * @dev: 绑定的 platform device 的 struct device。
@@ -469,6 +472,23 @@ struct mx6s_csi_dev {
 	struct mx6s_csi_mux csi_mux;
 };
 
+static void mx6s_init_default_format(struct mx6s_csi_dev *csi_dev)
+{
+	struct mx6s_fmt *fmt = format_by_fourcc(V4L2_PIX_FMT_RGB565);
+
+	csi_dev->fmt = fmt;
+	csi_dev->mbus_code = fmt->mbus_code;
+	csi_dev->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	csi_dev->bytesperline = fmt->bpp * 800;
+	csi_dev->pix.width = 800;
+	csi_dev->pix.height = 480;
+	csi_dev->pix.pixelformat = V4L2_PIX_FMT_RGB565;
+	csi_dev->pix.field = V4L2_FIELD_NONE;
+	csi_dev->pix.bytesperline = csi_dev->bytesperline;
+	csi_dev->pix.sizeimage = csi_dev->bytesperline * csi_dev->pix.height;
+	csi_dev->pix.colorspace = V4L2_COLORSPACE_SRGB;
+}
+
 /**
  * csi_read() - 读取 CSI MMIO 寄存器
  * @csi: CSI 私有数据，@regbase 必须已经映射。
@@ -520,7 +540,7 @@ static inline struct mx6s_csi_dev
  *
  * Return: 找到时返回 formats[] 中的条目，未找到时返回 NULL。
  */
-struct mx6s_fmt *format_by_fourcc(int fourcc)
+static struct mx6s_fmt *format_by_fourcc(int fourcc)
 {
 	int i;
 
@@ -1228,9 +1248,10 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct mx6s_csi_dev *csi_dev = vb2_get_drv_priv(vq);
 	struct vb2_buffer *vb;
-	struct mx6s_buffer *buf;
+	struct mx6s_buffer *buf, *tmp;
 	unsigned long phys;
 	unsigned long flags;
+	int ret;
 
 	if (count < 2)
 		return -ENOBUFS;
@@ -1290,7 +1311,37 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	spin_unlock_irqrestore(&csi_dev->slock, flags);
 
-	return mx6s_csi_enable(csi_dev);
+	ret = mx6s_csi_enable(csi_dev);
+	if (ret < 0) {
+		spin_lock_irqsave(&csi_dev->slock, flags);
+
+		list_del_init(&csi_dev->buf_discard[0].queue);
+		list_del_init(&csi_dev->buf_discard[1].queue);
+
+		list_for_each_entry_safe(buf, tmp,
+					&csi_dev->active_bufs, internal.queue) {
+			list_del_init(&buf->internal.queue);
+			if (buf->vb.state == VB2_BUF_STATE_ACTIVE)
+				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
+		}
+
+		list_for_each_entry_safe(buf, tmp,
+					&csi_dev->capture, internal.queue) {
+			list_del_init(&buf->internal.queue);
+			if (buf->vb.state == VB2_BUF_STATE_ACTIVE)
+				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
+		}
+
+		spin_unlock_irqrestore(&csi_dev->slock, flags);
+
+		dma_free_coherent(csi_dev->v4l2_dev.dev,
+				  PAGE_ALIGN(csi_dev->discard_size),
+				  csi_dev->discard_buffer,
+				  csi_dev->discard_buffer_dma);
+		csi_dev->discard_buffer = NULL;
+	}
+
+	return ret;
 }
 
 /**
@@ -1589,8 +1640,11 @@ static int mx6s_csi_open(struct file *file)
 	 * 之后 REQBUFS/USERPTR 路径可据此分配或映射适合 CSI DMA 的连续内存。
 	 */
 	csi_dev->alloc_ctx = vb2_dma_contig_init_ctx(csi_dev->dev);
-	if (IS_ERR(csi_dev->alloc_ctx))
+	if (IS_ERR(csi_dev->alloc_ctx)) {
+		ret = PTR_ERR(csi_dev->alloc_ctx);
+		csi_dev->alloc_ctx = NULL;
 		goto unlock;
+	}
 
 	/*
 	 * 配置 videobuf2 队列的必需字段。vb2_queue_init() 会检查 type、
@@ -1620,12 +1674,18 @@ static int mx6s_csi_open(struct file *file)
 	/*
 	 * 通知 sensor subdev 退出低功耗，随后初始化 CSI 控制器寄存器和内部状态。
 	 */
-	v4l2_subdev_call(sd, core, s_power, 1);
+	ret = v4l2_subdev_call(sd, core, s_power, 1);
+	if (ret < 0)
+		goto epower;
+
 	mx6s_csi_init(csi_dev);
 
 	mutex_unlock(&csi_dev->lock);
 
 	return ret;
+epower:
+	release_bus_freq(BUS_FREQ_HIGH);
+	pm_runtime_put_sync_suspend(csi_dev->dev);
 eallocctx:
 	vb2_dma_contig_cleanup_ctx(csi_dev->alloc_ctx);
 unlock:
@@ -2112,8 +2172,8 @@ static int mx6s_vidioc_querycap(struct file *file, void  *priv,
  * @priv: V4L2 core 传入的 file handle。
  * @i: 要启动的 buffer 类型，只支持 V4L2_BUF_TYPE_VIDEO_CAPTURE。
  *
- * vb2_streamon() 会调用 mx6s_start_streaming() 启动 CSI host；成功后再通知
- * sensor subdev 开始输出图像。
+ * 先通知 sensor subdev 开始输出图像，再让 vb2_streamon() 启动 CSI host。
+ * 这样 mx6s_csi_enable() 等待 SOF 时，sensor 已经在输出帧同步。
  *
  * Return: 成功返回 0；类型不匹配返回 -EINVAL；VB2 启动失败则透传。
  */
@@ -2129,11 +2189,17 @@ static int mx6s_vidioc_streamon(struct file *file, void *priv,
 	if (i != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
-	ret = vb2_streamon(&csi_dev->vb2_vidq, i);
-	if (!ret)
-		v4l2_subdev_call(sd, video, s_stream, 1);
+	ret = v4l2_subdev_call(sd, video, s_stream, 1);
+	if (ret < 0)
+		return ret;
 
-	return ret;
+	ret = vb2_streamon(&csi_dev->vb2_vidq, i);
+	if (ret < 0) {
+		v4l2_subdev_call(sd, video, s_stream, 0);
+		return ret;
+	}
+
+	return 0;
 }
 
 /**
@@ -2163,9 +2229,7 @@ static int mx6s_vidioc_streamoff(struct file *file, void *priv,
 	 */
 	vb2_streamoff(&csi_dev->vb2_vidq, i);
 
-	v4l2_subdev_call(sd, video, s_stream, 0);
-
-	return 0;
+	return v4l2_subdev_call(sd, video, s_stream, 0);
 }
 
 /**
@@ -2679,6 +2743,8 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 	vdev->queue = &csi_dev->vb2_vidq;
 
 	csi_dev->vdev = vdev;
+
+	mx6s_init_default_format(csi_dev);
 
 	/* 让 file operations 可以通过 video_drvdata(file) 取回 csi_dev。 */
 	video_set_drvdata(csi_dev->vdev, csi_dev);
