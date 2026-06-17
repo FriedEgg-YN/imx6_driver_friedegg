@@ -2005,29 +2005,30 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
  * @sd: V4L2 sub-device that represents the OV5640 sensor.
  * @a: V4L2 stream parameter container supplied by the caller.
  *
- * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback normalizes an
- * empty frame interval to DEFAULT_FPS, clamps it to the supported range, then
- * accepts only the discrete 15 fps and 30 fps modes used by this driver.  The
- * selected frame interval and capture mode are cached in the sensor state.
+ * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback normalizes the
+ * requested frame interval to one of the discrete 15 fps and 30 fps modes,
+ * checks that the current sensor mode supports it, and applies the matching
+ * register table immediately when the device is powered and not streaming.
  *
- * Return: 0 on success, or -EINVAL if the buffer type or frame rate is not
- * supported.
+ * Return: 0 on success, -EBUSY if streaming is active, or -EINVAL if the
+ * buffer type, frame rate, or current mode/fps combination is not supported.
  */
 static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ov5640 *sensor = to_ov5640(client);
-	struct v4l2_fract *timeperframe = &a->parm.capture.timeperframe;
-	u32 tgt_fps;	/* target frames per secound */
+	struct v4l2_captureparm *cparm = &a->parm.capture;
+	struct v4l2_fract *timeperframe = &cparm->timeperframe;
+	const struct ov5640_mode_info *mode_info;
+	const struct ov5640_datafmt *fmt;
+	u32 tgt_fps;
 	enum ov5640_frame_rate frame_rate;
 	int ret = 0;
 
 	switch (a->type) {
-	/* This is the only case currently handled. */
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
-		/* Check that the new frame rate is allowed. */
-		if ((timeperframe->numerator == 0) ||
-		    (timeperframe->denominator == 0)) {
+		if (timeperframe->numerator == 0 ||
+		    timeperframe->denominator == 0) {
 			timeperframe->denominator = DEFAULT_FPS;
 			timeperframe->numerator = 1;
 		}
@@ -2043,41 +2044,68 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 			timeperframe->numerator = 1;
 		}
 
-		/* Actual frame rate we use */
 		tgt_fps = timeperframe->denominator /
 			  timeperframe->numerator;
 
-		if (tgt_fps == 15)
+		if (tgt_fps == ov5640_framerates[ov5640_15_fps])
 			frame_rate = ov5640_15_fps;
-		else if (tgt_fps == 30)
+		else if (tgt_fps == ov5640_framerates[ov5640_30_fps])
 			frame_rate = ov5640_30_fps;
 		else {
-			pr_err(" The camera frame rate is not supported!\n");
-			ret = -EINVAL;
-			goto error;
+			pr_err("The camera frame rate is not supported!\n");
+			return -EINVAL;
 		}
 
-	/*ret = ov5640_change_mode(frame_rate,
-				a->parm.capture.capturemode);
-	if (ret < 0)
-		goto error;*/
+		timeperframe->numerator = 1;
+		timeperframe->denominator = ov5640_framerates[frame_rate];
+
+		mutex_lock(&sensor->lock);
+
+		mode_info = ov5640_get_mode_info(frame_rate, sensor->current_mode);
+		if (!ov5640_mode_info_valid(mode_info)) {
+			ret = -EINVAL;
+			goto unlock;
+		}
+
+		if (sensor->streaming && frame_rate != sensor->current_fr) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+
+		if (sensor->powered && frame_rate != sensor->current_fr) {
+			ret = ov5640_change_mode(frame_rate, sensor->current_mode);
+			if (ret < 0)
+				goto unlock;
+
+			fmt = sensor->fmt ? sensor->fmt : &ov5640_colour_fmts[0];
+			ret = ov5640_apply_format(fmt);
+			if (ret < 0)
+				goto unlock;
+
+			ret = ov5640_hw_set_stream(false);
+			if (ret < 0)
+				goto unlock;
+		}
 
 		sensor->streamcap.timeperframe = *timeperframe;
-		sensor->streamcap.capturemode = a->parm.capture.capturemode;
+		sensor->streamcap.capturemode = cparm->capturemode;
 		sensor->current_fr = frame_rate;
+		cparm->capability = sensor->streamcap.capability;
+		cparm->timeperframe = sensor->streamcap.timeperframe;
+		cparm->capturemode = sensor->streamcap.capturemode;
 
+unlock:
+		mutex_unlock(&sensor->lock);
 		break;
 
-	/* These are all the possible cases. */
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
 	case V4L2_BUF_TYPE_VIDEO_OVERLAY:
 	case V4L2_BUF_TYPE_VBI_CAPTURE:
 	case V4L2_BUF_TYPE_VBI_OUTPUT:
 	case V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
 	case V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
-		pr_debug("   type is not " \
-			"V4L2_BUF_TYPE_VIDEO_CAPTURE but %d\n",
-			a->type);
+		pr_debug("   type is not "
+			"V4L2_BUF_TYPE_VIDEO_CAPTURE but %d\n", a->type);
 		ret = -EINVAL;
 		break;
 
@@ -2087,7 +2115,6 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 		break;
 	}
 
-error:
 	return ret;
 }
 
