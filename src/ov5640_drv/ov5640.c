@@ -28,6 +28,7 @@
 #include <linux/mutex.h>
 #include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/v4l2-mediabus.h>
@@ -91,6 +92,7 @@
 
 #define OV5640_STREAM_ON                0x00
 #define OV5640_STREAM_OFF               0x0f
+#define OV5640_AUTOSUSPEND_DELAY_MS     1000
 
 enum ov5640_mode {
 	ov5640_mode_MIN = 0,
@@ -176,6 +178,7 @@ struct ov5640 {
 	enum ov5640_mode current_mode;
 	bool powered;
 	bool streaming;
+	bool power_ref;
 	bool on;
 	struct mutex lock;
 	struct v4l2_ctrl_handler ctrls;
@@ -833,6 +836,8 @@ static const struct regmap_config ov5640_regmap_config = {
 static int ov5640_probe(struct i2c_client *adapter,
 				const struct i2c_device_id *device_id);
 static int ov5640_remove(struct i2c_client *client);
+static int ov5640_runtime_suspend(struct device *dev);
+static int ov5640_runtime_resume(struct device *dev);
 
 static int ov5640_read_reg(u16 reg, u8 *val);
 static int ov5640_write_reg(u16 reg, u8 val);
@@ -841,6 +846,10 @@ static int ov5640_read_reg16(u16 reg, u16 *val);
 static int ov5640_write_reg16(u16 reg, u16 val);
 static int ov5640_write_reg16_low_first(u16 reg, u16 val);
 static int ov5640_mod_reg(u16 reg, u8 mask, u8 val);
+
+static const struct dev_pm_ops ov5640_pm_ops = {
+	SET_RUNTIME_PM_OPS(ov5640_runtime_suspend, ov5640_runtime_resume, NULL)
+};
 
 static const struct i2c_device_id ov5640_id[] = {
 	{"ov5640", 0},
@@ -853,6 +862,7 @@ static struct i2c_driver ov5640_i2c_driver = {
 	.driver = {
 		  .owner = THIS_MODULE,
 		  .name  = "ov5640",
+		  .pm = &ov5640_pm_ops,
 		  },
 	.probe  = ov5640_probe,
 	.remove = ov5640_remove,
@@ -1195,6 +1205,63 @@ static void ov5640_power_off(struct ov5640 *sensor)
 	sensor->streaming = false;
 	sensor->powered = false;
 	sensor->on = false;
+}
+
+static int ov5640_runtime_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ov5640 *sensor = to_ov5640(client);
+	int ret;
+
+	mutex_lock(&sensor->lock);
+
+	ret = ov5640_power_on(sensor);
+	if (ret < 0)
+		goto out;
+
+	ret = init_device();
+	if (ret < 0)
+		ov5640_power_off(sensor);
+
+ out:
+	mutex_unlock(&sensor->lock);
+	return ret;
+}
+
+static int ov5640_runtime_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ov5640 *sensor = to_ov5640(client);
+
+	mutex_lock(&sensor->lock);
+	if (sensor->streaming) {
+		mutex_unlock(&sensor->lock);
+		return -EBUSY;
+	}
+
+	ov5640_power_off(sensor);
+	mutex_unlock(&sensor->lock);
+
+	return 0;
+}
+
+static int ov5640_runtime_get(struct ov5640 *sensor)
+{
+	int ret;
+
+	ret = pm_runtime_get_sync(sensor->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(sensor->dev);
+		return ret;
+	}
+
+	return 0;
+}
+
+static void ov5640_runtime_put_autosuspend(struct ov5640 *sensor)
+{
+	pm_runtime_mark_last_busy(sensor->dev);
+	pm_runtime_put_autosuspend(sensor->dev);
 }
 
 static int ov5640_regulator_enable(struct device *dev)
@@ -2211,29 +2278,42 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ov5640 *sensor = to_ov5640(client);
-	int ret = 0;
-
-	mutex_lock(&sensor->lock);
+	int ret;
 
 	if (on) {
-		if (!sensor->powered) {
-			ret = ov5640_power_on(sensor);
-			if (ret < 0)
-				goto out;
-
-			ret = init_device();
-			if (ret < 0) {
-				ov5640_power_off(sensor);
-				goto out;
-			}
+		mutex_lock(&sensor->lock);
+		if (sensor->power_ref) {
+			mutex_unlock(&sensor->lock);
+			return 0;
 		}
-	} else {
-		ov5640_power_off(sensor);
+		mutex_unlock(&sensor->lock);
+
+		ret = ov5640_runtime_get(sensor);
+		if (ret < 0)
+			return ret;
+
+		mutex_lock(&sensor->lock);
+		if (sensor->power_ref) {
+			mutex_unlock(&sensor->lock);
+			ov5640_runtime_put_autosuspend(sensor);
+			return 0;
+		}
+		sensor->power_ref = true;
+		mutex_unlock(&sensor->lock);
+
+		return 0;
 	}
 
-out:
+	mutex_lock(&sensor->lock);
+	if (!sensor->power_ref) {
+		mutex_unlock(&sensor->lock);
+		return 0;
+	}
+	sensor->power_ref = false;
 	mutex_unlock(&sensor->lock);
-	return ret;
+
+	ov5640_runtime_put_autosuspend(sensor);
+	return 0;
 }
 
 /**
@@ -2251,11 +2331,48 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ov5640 *sensor = to_ov5640(client);
+	bool started_streaming;
+	bool was_streaming;
 	int ret;
 
+	if (enable) {
+		mutex_lock(&sensor->lock);
+		if (sensor->streaming) {
+			mutex_unlock(&sensor->lock);
+			return 0;
+		}
+		mutex_unlock(&sensor->lock);
+
+		ret = ov5640_runtime_get(sensor);
+		if (ret < 0)
+			return ret;
+
+		mutex_lock(&sensor->lock);
+		if (sensor->streaming) {
+			started_streaming = false;
+			ret = 0;
+		} else {
+			ret = ov5640_set_stream(sensor, true);
+			started_streaming = ret == 0;
+		}
+		mutex_unlock(&sensor->lock);
+
+		if (ret < 0 || !started_streaming)
+			ov5640_runtime_put_autosuspend(sensor);
+
+		return ret;
+	}
+
 	mutex_lock(&sensor->lock);
-	ret = ov5640_set_stream(sensor, !!enable);
+	was_streaming = sensor->streaming;
+	if (was_streaming)
+		ret = ov5640_set_stream(sensor, false);
+	else
+		ret = 0;
 	mutex_unlock(&sensor->lock);
+
+	if (was_streaming && ret == 0)
+		ov5640_runtime_put_autosuspend(sensor);
 
 	return ret;
 }
@@ -2882,31 +2999,38 @@ static int ov5640_probe(struct i2c_client *client,
 		goto power_off;
 	}
 
-	ov5640_power_off(&ov5640_data);
-
 	/*
 	 * will do:
 	 * v4l2_set_subdevdata(sd, client);
-	 * i2c_set_clientdata(client, sd);  
+	 * i2c_set_clientdata(client, sd);
 	 */
 	v4l2_i2c_subdev_init(&ov5640_data.subdev, client, &ov5640_subdev_ops);
 
 	retval = ov5640_init_controls(&ov5640_data);
 	if (retval < 0) {
 		dev_err(&client->dev, "control init failed: %d\n", retval);
-		return retval;
+		goto power_off;
 	}
 
 	retval = v4l2_async_register_subdev(&ov5640_data.subdev);
 	if (retval < 0) {
 		dev_err(&client->dev,
 					"%s--Async register failed, ret=%d\n", __func__, retval);
-		v4l2_ctrl_handler_free(&ov5640_data.ctrls);
+		goto free_ctrls;
 	}
 
-	pr_info("camera ov5640, is found\n");
-	return retval;
+	pm_runtime_set_active(dev);
+	pm_runtime_set_autosuspend_delay(dev, OV5640_AUTOSUSPEND_DELAY_MS);
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_enable(dev);
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_autosuspend(dev);
 
+	pr_info("camera ov5640, is found\n");
+	return 0;
+
+free_ctrls:
+	v4l2_ctrl_handler_free(&ov5640_data.ctrls);
 power_off:
 	ov5640_power_off(&ov5640_data);
 	return retval;
@@ -2922,14 +3046,18 @@ static int ov5640_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
+	pm_runtime_disable(&client->dev);
+
 	v4l2_async_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&ov5640_data.ctrls);
 
 	mutex_lock(&ov5640_data.lock);
+	ov5640_data.power_ref = false;
 	ov5640_power_off(&ov5640_data);
 	if (!ov5640_data.powered)
 		ov5640_power_down(&ov5640_data, true);
 	mutex_unlock(&ov5640_data.lock);
+	pm_runtime_set_suspended(&client->dev);
 
 	if (analog_regulator)
 		regulator_disable(analog_regulator);
