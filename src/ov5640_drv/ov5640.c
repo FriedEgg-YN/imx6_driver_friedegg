@@ -31,6 +31,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/slab.h>
 #include <linux/v4l2-mediabus.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
@@ -185,6 +186,15 @@ struct ov5640 {
 	struct v4l2_ctrl *hflip;
 	struct v4l2_ctrl *vflip;
 	struct v4l2_ctrl *power_line_frequency;
+	struct regulator *io_regulator;
+	struct regulator *core_regulator;
+	struct regulator *analog_regulator;
+	int prev_sysclk;
+	int prev_hts;
+	int ae_target;
+	int ae_high;
+	int ae_low;
+	int night_mode;
 
 	/* Legacy placeholders kept until matching image-processing controls exist. */
 	int brightness;
@@ -203,15 +213,6 @@ struct ov5640 {
 
 	void (*io_init)(struct ov5640 *sensor);
 };
-
-/*!
- * Maintains the information on the current state of the sesor.
- */
-static struct ov5640 ov5640_data;
-static int prev_sysclk;
-static int AE_Target = 52, night_mode;
-static int prev_HTS;
-static int AE_high, AE_low;
 
 static const struct reg_value ov5640_global_init_setting[] = {
 	{0x3008, 0x42, 0, 0},
@@ -822,10 +823,6 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 	},
 };
 
-static struct regulator *io_regulator;
-static struct regulator *core_regulator;
-static struct regulator *analog_regulator;
-
 static const struct regmap_config ov5640_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
@@ -839,13 +836,13 @@ static int ov5640_remove(struct i2c_client *client);
 static int ov5640_runtime_suspend(struct device *dev);
 static int ov5640_runtime_resume(struct device *dev);
 
-static int ov5640_read_reg(u16 reg, u8 *val);
-static int ov5640_write_reg(u16 reg, u8 val);
-static int init_device(void);
-static int ov5640_read_reg16(u16 reg, u16 *val);
-static int ov5640_write_reg16(u16 reg, u16 val);
-static int ov5640_write_reg16_low_first(u16 reg, u16 val);
-static int ov5640_mod_reg(u16 reg, u8 mask, u8 val);
+static int ov5640_read_reg(struct ov5640 *sensor, u16 reg, u8 *val);
+static int ov5640_write_reg(struct ov5640 *sensor, u16 reg, u8 val);
+static int init_device(struct ov5640 *sensor);
+static int ov5640_read_reg16(struct ov5640 *sensor, u16 reg, u16 *val);
+static int ov5640_write_reg16(struct ov5640 *sensor, u16 reg, u16 val);
+static int ov5640_write_reg16_low_first(struct ov5640 *sensor, u16 reg, u16 val);
+static int ov5640_mod_reg(struct ov5640 *sensor, u16 reg, u8 mask, u8 val);
 
 static const struct dev_pm_ops ov5640_pm_ops = {
 	SET_RUNTIME_PM_OPS(ov5640_runtime_suspend, ov5640_runtime_resume, NULL)
@@ -1057,7 +1054,7 @@ static u32 ov5640_pixelformat_from_code(u32 code)
 	}
 }
 
-static int ov5640_apply_format(const struct ov5640_datafmt *fmt)
+static int ov5640_apply_format(struct ov5640 *sensor, const struct ov5640_datafmt *fmt)
 {
 	int ret;
 
@@ -1066,12 +1063,12 @@ static int ov5640_apply_format(const struct ov5640_datafmt *fmt)
 
 	switch (fmt->code) {
 	case MEDIA_BUS_FMT_RGB565_2X8_LE:
-		ret = ov5640_write_reg(OV5640_REG_FORMAT_MUX_CONTROL,
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
 					OV5640_FORMAT_MUX_RGB);
 		if (ret < 0)
 			return ret;
 
-		return ov5640_write_reg(OV5640_REG_FORMAT_CONTROL00,
+		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
 					OV5640_FORMAT_CTRL_RGB565);
 	default:
 		return -EINVAL;
@@ -1090,7 +1087,14 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->current_mode = ov5640_mode_800_480;
 	sensor->powered = false;
 	sensor->streaming = false;
+	sensor->power_ref = false;
 	sensor->on = false;
+	sensor->prev_sysclk = 0;
+	sensor->prev_hts = 0;
+	sensor->ae_target = 52;
+	sensor->ae_high = 0;
+	sensor->ae_low = 0;
+	sensor->night_mode = 0;
 
 	sensor->pix.pixelformat = V4L2_PIX_FMT_RGB565;
 	sensor->pix.width = mode_info->width;
@@ -1136,9 +1140,9 @@ static inline void ov5640_reset(struct ov5640 *sensor)
 	ov5640_set_power_down(sensor, true);
 }
 
-static int ov5640_hw_set_stream(bool enable)
+static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
 {
-	return ov5640_write_reg(OV5640_REG_STREAM_CTRL,
+	return ov5640_write_reg(sensor, OV5640_REG_STREAM_CTRL,
 				enable ? OV5640_STREAM_ON : OV5640_STREAM_OFF);
 }
 
@@ -1152,7 +1156,7 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 	if (enable && !sensor->powered)
 		return -EPIPE;
 
-	ret = ov5640_hw_set_stream(enable);
+	ret = ov5640_hw_set_stream(sensor, enable);
 	if (ret < 0)
 		return ret;
 
@@ -1194,7 +1198,7 @@ static void ov5640_power_off(struct ov5640 *sensor)
 			dev_warn(sensor->dev,
 				 "stream off before power down failed: %d\n", ret);
 	} else {
-		ret = ov5640_hw_set_stream(false);
+		ret = ov5640_hw_set_stream(sensor, false);
 		if (ret < 0)
 			dev_dbg(sensor->dev,
 				"stream-off register write failed: %d\n", ret);
@@ -1219,7 +1223,7 @@ static int ov5640_runtime_resume(struct device *dev)
 	if (ret < 0)
 		goto out;
 
-	ret = init_device();
+	ret = init_device(sensor);
 	if (ret < 0)
 		ov5640_power_off(sensor);
 
@@ -1264,16 +1268,17 @@ static void ov5640_runtime_put_autosuspend(struct ov5640 *sensor)
 	pm_runtime_put_autosuspend(sensor->dev);
 }
 
-static int ov5640_regulator_enable(struct device *dev)
+static int ov5640_regulator_enable(struct ov5640 *sensor)
 {
+	struct device *dev = sensor->dev;
 	int ret = 0;
 
-	io_regulator = devm_regulator_get(dev, "DOVDD");
-	if (!IS_ERR(io_regulator)) {
-		regulator_set_voltage(io_regulator,
+	sensor->io_regulator = devm_regulator_get(dev, "DOVDD");
+	if (!IS_ERR(sensor->io_regulator)) {
+		regulator_set_voltage(sensor->io_regulator,
 				      OV5640_VOLTAGE_DIGITAL_IO,
 				      OV5640_VOLTAGE_DIGITAL_IO);
-		ret = regulator_enable(io_regulator);
+		ret = regulator_enable(sensor->io_regulator);
 		if (ret) {
 			dev_err(dev, "set io voltage failed\n");
 			return ret;
@@ -1281,16 +1286,16 @@ static int ov5640_regulator_enable(struct device *dev)
 			dev_dbg(dev, "set io voltage ok\n");
 		}
 	} else {
-		io_regulator = NULL;
+		sensor->io_regulator = NULL;
 		dev_warn(dev, "cannot get io voltage\n");
 	}
 
-	core_regulator = devm_regulator_get(dev, "DVDD");
-	if (!IS_ERR(core_regulator)) {
-		regulator_set_voltage(core_regulator,
+	sensor->core_regulator = devm_regulator_get(dev, "DVDD");
+	if (!IS_ERR(sensor->core_regulator)) {
+		regulator_set_voltage(sensor->core_regulator,
 				      OV5640_VOLTAGE_DIGITAL_CORE,
 				      OV5640_VOLTAGE_DIGITAL_CORE);
-		ret = regulator_enable(core_regulator);
+		ret = regulator_enable(sensor->core_regulator);
 		if (ret) {
 			dev_err(dev, "set core voltage failed\n");
 			return ret;
@@ -1298,16 +1303,16 @@ static int ov5640_regulator_enable(struct device *dev)
 			dev_dbg(dev, "set core voltage ok\n");
 		}
 	} else {
-		core_regulator = NULL;
+		sensor->core_regulator = NULL;
 		dev_warn(dev, "cannot get core voltage\n");
 	}
 
-	analog_regulator = devm_regulator_get(dev, "AVDD");
-	if (!IS_ERR(analog_regulator)) {
-		regulator_set_voltage(analog_regulator,
+	sensor->analog_regulator = devm_regulator_get(dev, "AVDD");
+	if (!IS_ERR(sensor->analog_regulator)) {
+		regulator_set_voltage(sensor->analog_regulator,
 				      OV5640_VOLTAGE_ANALOG,
 				      OV5640_VOLTAGE_ANALOG);
-		ret = regulator_enable(analog_regulator);
+		ret = regulator_enable(sensor->analog_regulator);
 		if (ret) {
 			dev_err(dev, "set analog voltage failed\n");
 			return ret;
@@ -1315,27 +1320,27 @@ static int ov5640_regulator_enable(struct device *dev)
 			dev_dbg(dev, "set analog voltage ok\n");
 		}
 	} else {
-		analog_regulator = NULL;
+		sensor->analog_regulator = NULL;
 		dev_warn(dev, "cannot get analog voltage\n");
 	}
 
 	return ret;
 }
 
-static int ov5640_write_reg(u16 reg, u8 val)
+static int ov5640_write_reg(struct ov5640 *sensor, u16 reg, u8 val)
 {
 	int ret;
 
-	ret = regmap_write(ov5640_data.regmap, reg, val);
+	ret = regmap_write(sensor->regmap, reg, val);
 	if (ret < 0)
-		dev_err(&ov5640_data.i2c_client->dev,
+		dev_err(&sensor->i2c_client->dev,
 			"write reg 0x%04x=0x%02x failed: %d\n",
 			reg, val, ret);
 
 	return ret;
 }
 
-static int ov5640_read_reg(u16 reg, u8 *val)
+static int ov5640_read_reg(struct ov5640 *sensor, u16 reg, u8 *val)
 {
 	unsigned int regval;
 	int ret;
@@ -1343,9 +1348,9 @@ static int ov5640_read_reg(u16 reg, u8 *val)
 	if (!val)
 		return -EINVAL;
 
-	ret = regmap_read(ov5640_data.regmap, reg, &regval);
+	ret = regmap_read(sensor->regmap, reg, &regval);
 	if (ret < 0) {
-		dev_err(&ov5640_data.i2c_client->dev,
+		dev_err(&sensor->i2c_client->dev,
 			"read reg 0x%04x failed: %d\n", reg, ret);
 		return ret;
 	}
@@ -1354,7 +1359,7 @@ static int ov5640_read_reg(u16 reg, u8 *val)
 	return 0;
 }
 
-static int ov5640_read_reg16(u16 reg, u16 *val)
+static int ov5640_read_reg16(struct ov5640 *sensor, u16 reg, u16 *val)
 {
 	u8 high, low;
 	int ret;
@@ -1362,11 +1367,11 @@ static int ov5640_read_reg16(u16 reg, u16 *val)
 	if (!val)
 		return -EINVAL;
 
-	ret = ov5640_read_reg(reg, &high);
+	ret = ov5640_read_reg(sensor, reg, &high);
 	if (ret < 0)
 		return ret;
 
-	ret = ov5640_read_reg(reg + 1, &low);
+	ret = ov5640_read_reg(sensor, reg + 1, &low);
 	if (ret < 0)
 		return ret;
 
@@ -1374,35 +1379,35 @@ static int ov5640_read_reg16(u16 reg, u16 *val)
 	return 0;
 }
 
-static int ov5640_write_reg16(u16 reg, u16 val)
+static int ov5640_write_reg16(struct ov5640 *sensor, u16 reg, u16 val)
 {
 	int ret;
 
-	ret = ov5640_write_reg(reg, val >> 8);
+	ret = ov5640_write_reg(sensor, reg, val >> 8);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_write_reg(reg + 1, val & 0xff);
+	return ov5640_write_reg(sensor, reg + 1, val & 0xff);
 }
 
-static int ov5640_write_reg16_low_first(u16 reg, u16 val)
+static int ov5640_write_reg16_low_first(struct ov5640 *sensor, u16 reg, u16 val)
 {
 	int ret;
 
-	ret = ov5640_write_reg(reg + 1, val & 0xff);
+	ret = ov5640_write_reg(sensor, reg + 1, val & 0xff);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_write_reg(reg, val >> 8);
+	return ov5640_write_reg(sensor, reg, val >> 8);
 }
 
-static int ov5640_mod_reg(u16 reg, u8 mask, u8 val)
+static int ov5640_mod_reg(struct ov5640 *sensor, u16 reg, u8 mask, u8 val)
 {
 	int ret;
 
-	ret = regmap_update_bits(ov5640_data.regmap, reg, mask, val);
+	ret = regmap_update_bits(sensor->regmap, reg, mask, val);
 	if (ret < 0)
-		dev_err(&ov5640_data.i2c_client->dev,
+		dev_err(&sensor->i2c_client->dev,
 			"update reg 0x%04x mask 0x%02x val 0x%02x failed: %d\n",
 			reg, mask, val, ret);
 
@@ -1415,12 +1420,12 @@ static int ov5640_set_flip(struct ov5640 *sensor)
 	u8 hflip = sensor->hflip->val ? OV5640_TIMING_FLIP_MASK : 0;
 	u8 vflip = sensor->vflip->val ? OV5640_TIMING_FLIP_MASK : 0;
 
-	ret = ov5640_mod_reg(OV5640_REG_TIMING_TC_REG21,
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
 				     OV5640_TIMING_FLIP_MASK, hflip);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_mod_reg(OV5640_REG_TIMING_TC_REG20,
+	return ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG20,
 			       OV5640_TIMING_FLIP_MASK, vflip);
 }
 
@@ -1430,26 +1435,26 @@ static int ov5640_set_power_line_frequency(struct ov5640 *sensor)
 
 	switch (sensor->power_line_frequency->val) {
 	case V4L2_CID_POWER_LINE_FREQUENCY_50HZ:
-		ret = ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+		ret = ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_CTRL,
 				     OV5640_BANDING_MANUAL_ENABLE,
 				     OV5640_BANDING_MANUAL_ENABLE);
 		if (ret < 0)
 			return ret;
 
-		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_MAN,
+		return ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_MAN,
 				       OV5640_BANDING_MANUAL_50HZ,
 				       OV5640_BANDING_MANUAL_50HZ);
 	case V4L2_CID_POWER_LINE_FREQUENCY_60HZ:
-		ret = ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+		ret = ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_CTRL,
 				     OV5640_BANDING_MANUAL_ENABLE,
 				     OV5640_BANDING_MANUAL_ENABLE);
 		if (ret < 0)
 			return ret;
 
-		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_MAN,
+		return ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_MAN,
 				       OV5640_BANDING_MANUAL_50HZ, 0);
 	case V4L2_CID_POWER_LINE_FREQUENCY_AUTO:
-		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+		return ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_CTRL,
 			       OV5640_BANDING_MANUAL_ENABLE, 0);
 	default:
 		return -EINVAL;
@@ -1551,6 +1556,7 @@ static int ov5640_get_register(struct v4l2_subdev *sd,
 					struct v4l2_dbg_register *reg)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ov5640 *sensor = to_ov5640(client);
 	int ret;
 	u8 val;
 
@@ -1559,7 +1565,7 @@ static int ov5640_get_register(struct v4l2_subdev *sd,
 
 	reg->size = 1;
 
-	ret = ov5640_read_reg(reg->reg, &val);
+	ret = ov5640_read_reg(sensor, reg->reg, &val);
 	if (ret < 0)
 		return ret;
 
@@ -1585,25 +1591,26 @@ static int ov5640_set_register(struct v4l2_subdev *sd,
 					const struct v4l2_dbg_register *reg)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ov5640 *sensor = to_ov5640(client);
 
 	if (reg->reg & ~0xffff || reg->val & ~0xff)
 		return -EINVAL;
 
-	return ov5640_write_reg(reg->reg, reg->val);
+	return ov5640_write_reg(sensor, reg->reg, reg->val);
 }
 #endif
 
-static int ov5640_soft_reset(void)
+static int ov5640_soft_reset(struct ov5640 *sensor)
 {
 	int ret;
 
 	/* sysclk from pad */
-	ret = ov5640_write_reg(0x3103, 0x11);
+	ret = ov5640_write_reg(sensor, 0x3103, 0x11);
 	if (ret < 0)
 		return ret;
 
 	/* software reset */
-	ret = ov5640_write_reg(0x3008, 0x82);
+	ret = ov5640_write_reg(sensor, 0x3008, 0x82);
 	if (ret < 0)
 		return ret;
 
@@ -1619,21 +1626,21 @@ static int ov5640_soft_reset(void)
 	10     - 3x
 	11     - 4x
  */
-static int ov5640_driver_capability(int strength)
+static int ov5640_driver_capability(struct ov5640 *sensor, int strength)
 {
 	if (strength > 4 || strength < 1) {
 		pr_err("The valid driver capability of ov5640 is 1x~4x\n");
 		return -EINVAL;
 	}
 
-	return ov5640_mod_reg(OV5640_REG_PAD_OUTPUT00, 0xc0,
+	return ov5640_mod_reg(sensor, OV5640_REG_PAD_OUTPUT00, 0xc0,
 				((strength - 1) << 6));
 }
 
 /* calculate sysclk */
-static int ov5640_get_sysclk(void)
+static int ov5640_get_sysclk(struct ov5640 *sensor)
 {
-	int xvclk = ov5640_data.mclk / 10000;
+	int xvclk = sensor->mclk / 10000;
 	int sysclk;
 	int temp2;
 	int Multiplier, PreDiv, VCO, SysDiv, Pll_rdiv, Bit_div2x, sclk_rdiv;
@@ -1641,7 +1648,7 @@ static int ov5640_get_sysclk(void)
 	u8 regval = 0;
 	int ret;
 
-	ret = ov5640_read_reg(OV5640_REG_SYSCLK_PLL_CTRL0, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_CTRL0, &regval);
 	if (ret < 0)
 		return ret;
 	temp2 = regval & 0x0f;
@@ -1652,19 +1659,19 @@ static int ov5640_get_sysclk(void)
 		return -EINVAL;
 	}
 
-	ret = ov5640_read_reg(OV5640_REG_SYSCLK_PLL_CTRL1, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_CTRL1, &regval);
 	if (ret < 0)
 		return ret;
 	SysDiv = regval >> 4;
 	if (SysDiv == 0)
 		SysDiv = 16;
 
-	ret = ov5640_read_reg(OV5640_REG_SYSCLK_PLL_MULT, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_MULT, &regval);
 	if (ret < 0)
 		return ret;
 	Multiplier = regval;
 
-	ret = ov5640_read_reg(OV5640_REG_SYSCLK_PLL_PREDIV, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_PREDIV, &regval);
 	if (ret < 0)
 		return ret;
 	PreDiv = regval & 0x0f;
@@ -1672,7 +1679,7 @@ static int ov5640_get_sysclk(void)
 		return -EINVAL;
 	Pll_rdiv = ((regval >> 4) & 0x01) + 1;
 
-	ret = ov5640_read_reg(OV5640_REG_SYS_ROOT_DIVIDER, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_SYS_ROOT_DIVIDER, &regval);
 	if (ret < 0)
 		return ret;
 	temp2 = regval & 0x03;
@@ -1685,12 +1692,12 @@ static int ov5640_get_sysclk(void)
 }
 
 /* read HTS from register settings */
-static int ov5640_get_HTS(void)
+static int ov5640_get_HTS(struct ov5640 *sensor)
 {
 	u16 HTS;
 	int ret;
 
-	ret = ov5640_read_reg16(OV5640_REG_TIMING_HTS_H, &HTS);
+	ret = ov5640_read_reg16(sensor, OV5640_REG_TIMING_HTS_H, &HTS);
 	if (ret < 0)
 		return ret;
 
@@ -1698,12 +1705,12 @@ static int ov5640_get_HTS(void)
 }
 
 /* read VTS from register settings */
-static int ov5640_get_VTS(void)
+static int ov5640_get_VTS(struct ov5640 *sensor)
 {
 	u16 VTS;
 	int ret;
 
-	ret = ov5640_read_reg16(OV5640_REG_TIMING_VTS_H, &VTS);
+	ret = ov5640_read_reg16(sensor, OV5640_REG_TIMING_VTS_H, &VTS);
 	if (ret < 0)
 		return ret;
 
@@ -1711,30 +1718,30 @@ static int ov5640_get_VTS(void)
 }
 
 /* write VTS to registers */
-static int ov5640_set_VTS(int VTS)
+static int ov5640_set_VTS(struct ov5640 *sensor, int VTS)
 {
-	return ov5640_write_reg16_low_first(OV5640_REG_TIMING_VTS_H,
+	return ov5640_write_reg16_low_first(sensor, OV5640_REG_TIMING_VTS_H,
 					  VTS & 0xffff);
 }
 
 /* read shutter, in number of line period */
-static int ov5640_get_shutter(void)
+static int ov5640_get_shutter(struct ov5640 *sensor)
 {
 	int shutter;
 	u8 regval;
 	int ret;
 
-	ret = ov5640_read_reg(OV5640_REG_AEC_PK_EXPOSURE_H, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_H, &regval);
 	if (ret < 0)
 		return ret;
 	shutter = regval & 0x0f;
 
-	ret = ov5640_read_reg(OV5640_REG_AEC_PK_EXPOSURE_M, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_M, &regval);
 	if (ret < 0)
 		return ret;
 	shutter = (shutter << 8) + regval;
 
-	ret = ov5640_read_reg(OV5640_REG_AEC_PK_EXPOSURE_L, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_L, &regval);
 	if (ret < 0)
 		return ret;
 	shutter = (shutter << 4) + (regval >> 4);
@@ -1743,33 +1750,33 @@ static int ov5640_get_shutter(void)
 }
 
 /* write shutter, in number of line period */
-static int ov5640_set_shutter(int shutter)
+static int ov5640_set_shutter(struct ov5640 *sensor, int shutter)
 {
 	int ret;
 
 	shutter &= 0xffff;
 
-	ret = ov5640_write_reg(OV5640_REG_AEC_PK_EXPOSURE_L,
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_L,
 				 (shutter & 0x0f) << 4);
 	if (ret < 0)
 		return ret;
 
-	ret = ov5640_write_reg(OV5640_REG_AEC_PK_EXPOSURE_M,
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_M,
 				 (shutter >> 4) & 0xff);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_write_reg(OV5640_REG_AEC_PK_EXPOSURE_H,
+	return ov5640_write_reg(sensor, OV5640_REG_AEC_PK_EXPOSURE_H,
 				      (shutter >> 12) & 0x0f);
 }
 
 /* read gain, 16 = 1x */
-static int ov5640_get_gain16(void)
+static int ov5640_get_gain16(struct ov5640 *sensor)
 {
 	u16 gain16;
 	int ret;
 
-	ret = ov5640_read_reg16(OV5640_REG_AEC_PK_REAL_GAIN_H, &gain16);
+	ret = ov5640_read_reg16(sensor, OV5640_REG_AEC_PK_REAL_GAIN_H, &gain16);
 	if (ret < 0)
 		return ret;
 
@@ -1777,32 +1784,32 @@ static int ov5640_get_gain16(void)
 }
 
 /* write gain, 16 = 1x */
-static int ov5640_set_gain16(int gain16)
+static int ov5640_set_gain16(struct ov5640 *sensor, int gain16)
 {
-	return ov5640_write_reg16_low_first(OV5640_REG_AEC_PK_REAL_GAIN_H,
+	return ov5640_write_reg16_low_first(sensor, OV5640_REG_AEC_PK_REAL_GAIN_H,
 					  gain16 & 0x03ff);
 }
 
 /* get banding filter value */
-static int ov5640_get_light_freq(void)
+static int ov5640_get_light_freq(struct ov5640 *sensor)
 {
 	int light_frequency;
 	u8 regval;
 	int ret;
 
-	ret = ov5640_read_reg(OV5640_REG_BANDING_FILTER_CTRL, &regval);
+	ret = ov5640_read_reg(sensor, OV5640_REG_BANDING_FILTER_CTRL, &regval);
 	if (ret < 0)
 		return ret;
 
 	if (regval & 0x80) {
 		/* manual */
-		ret = ov5640_read_reg(OV5640_REG_BANDING_FILTER_MAN, &regval);
+		ret = ov5640_read_reg(sensor, OV5640_REG_BANDING_FILTER_MAN, &regval);
 		if (ret < 0)
 			return ret;
 		light_frequency = (regval & 0x04) ? 50 : 60;
 	} else {
 		/* auto */
-		ret = ov5640_read_reg(OV5640_REG_BANDING_FILTER_AUTO, &regval);
+		ret = ov5640_read_reg(sensor, OV5640_REG_BANDING_FILTER_AUTO, &regval);
 		if (ret < 0)
 			return ret;
 		light_frequency = (regval & 0x01) ? 50 : 60;
@@ -1811,108 +1818,109 @@ static int ov5640_get_light_freq(void)
 	return light_frequency;
 }
 
-static int ov5640_set_bandingfilter(void)
+static int ov5640_set_bandingfilter(struct ov5640 *sensor)
 {
 	int prev_VTS;
 	int band_step60, max_band60, band_step50, max_band50;
 	int ret;
 
 	/* read preview PCLK */
-	prev_sysclk = ov5640_get_sysclk();
-	if (prev_sysclk < 0)
-		return prev_sysclk;
+	sensor->prev_sysclk = ov5640_get_sysclk(sensor);
+	if (sensor->prev_sysclk < 0)
+		return sensor->prev_sysclk;
 
 	/* read preview HTS */
-	prev_HTS = ov5640_get_HTS();
-	if (prev_HTS < 0)
-		return prev_HTS;
+	sensor->prev_hts = ov5640_get_HTS(sensor);
+	if (sensor->prev_hts < 0)
+		return sensor->prev_hts;
 
 	/* read preview VTS */
-	prev_VTS = ov5640_get_VTS();
+	prev_VTS = ov5640_get_VTS(sensor);
 	if (prev_VTS < 0)
 		return prev_VTS;
 
-	if (prev_HTS == 0 || prev_VTS <= 4)
+	if (sensor->prev_hts == 0 || prev_VTS <= 4)
 		return -EINVAL;
 
 	/* calculate banding filter */
 	/* 60Hz */
-	band_step60 = prev_sysclk * 100 / prev_HTS * 100 / 120;
+	band_step60 = sensor->prev_sysclk * 100 / sensor->prev_hts * 100 / 120;
 	if (band_step60 <= 0)
 		return -EINVAL;
 
-	ret = ov5640_write_reg16(OV5640_REG_BANDING_60_STEP_H, band_step60);
+	ret = ov5640_write_reg16(sensor, OV5640_REG_BANDING_60_STEP_H, band_step60);
 	if (ret < 0)
 		return ret;
 
 	max_band60 = (int)((prev_VTS - 4) / band_step60);
-	ret = ov5640_write_reg(OV5640_REG_BANDING_60_MAX, max_band60);
+	ret = ov5640_write_reg(sensor, OV5640_REG_BANDING_60_MAX, max_band60);
 	if (ret < 0)
 		return ret;
 
 	/* 50Hz */
-	band_step50 = prev_sysclk * 100 / prev_HTS;
+	band_step50 = sensor->prev_sysclk * 100 / sensor->prev_hts;
 	if (band_step50 <= 0)
 		return -EINVAL;
 
-	ret = ov5640_write_reg16(OV5640_REG_BANDING_50_STEP_H, band_step50);
+	ret = ov5640_write_reg16(sensor, OV5640_REG_BANDING_50_STEP_H, band_step50);
 	if (ret < 0)
 		return ret;
 
 	max_band50 = (int)((prev_VTS - 4) / band_step50);
-	return ov5640_write_reg(OV5640_REG_BANDING_50_MAX, max_band50);
+	return ov5640_write_reg(sensor, OV5640_REG_BANDING_50_MAX, max_band50);
 }
 
 /* stable in high */
-static int ov5640_set_AE_target(int target)
+static int ov5640_set_AE_target(struct ov5640 *sensor, int target)
 {
 	int fast_high, fast_low;
 	int ret;
 
-	AE_low = target * 23 / 25; /* 0.92 */
-	AE_high = target * 27 / 25; /* 1.08 */
-	fast_high = AE_high << 1;
+	sensor->ae_low = target * 23 / 25; /* 0.92 */
+	sensor->ae_high = target * 27 / 25; /* 1.08 */
+	fast_high = sensor->ae_high << 1;
 
 	if (fast_high > 255)
 		fast_high = 255;
-	fast_low = AE_low >> 1;
+	fast_low = sensor->ae_low >> 1;
 
-	ret = ov5640_write_reg(OV5640_REG_AEC_STABLE_HIGH, AE_high);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_HIGH, sensor->ae_high);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(OV5640_REG_AEC_STABLE_LOW, AE_low);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_LOW, sensor->ae_low);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(OV5640_REG_AEC_CTRL1B, AE_high);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1B, sensor->ae_high);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(OV5640_REG_AEC_CTRL1E, AE_low);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1E, sensor->ae_low);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(OV5640_REG_AEC_FAST_HIGH, fast_high);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_FAST_HIGH, fast_high);
 	if (ret < 0)
 		return ret;
-	return ov5640_write_reg(OV5640_REG_AEC_FAST_LOW, fast_low);
+	return ov5640_write_reg(sensor, OV5640_REG_AEC_FAST_LOW, fast_low);
 }
 
 /* enable = 0 to turn off night mode
    enable = 1 to turn on night mode */
-static int ov5640_set_night_mode(int enable)
+static int ov5640_set_night_mode(struct ov5640 *sensor, int enable)
 {
-	return ov5640_mod_reg(OV5640_REG_AEC_CTRL00, 0x04,
+	return ov5640_mod_reg(sensor, OV5640_REG_AEC_CTRL00, 0x04,
 				 enable ? 0x04 : 0x00);
 }
 
 /* enable = 0 to turn off AEC/AGC
    enable = 1 to turn on AEC/AGC */
-static int ov5640_turn_on_AE_AG(int enable)
+static int ov5640_turn_on_AE_AG(struct ov5640 *sensor, int enable)
 {
-	return ov5640_mod_reg(OV5640_REG_AEC_PK_MANUAL, 0x03,
+	return ov5640_mod_reg(sensor, OV5640_REG_AEC_PK_MANUAL, 0x03,
 				 enable ? 0x00 : 0x03);
 }
 
 /* download ov5640 settings to sensor through i2c */
-static int ov5640_download_firmware(const struct reg_value *pModeSetting,
+static int ov5640_download_firmware(struct ov5640 *sensor,
+					    const struct reg_value *pModeSetting,
 					    s32 ArySize)
 {
 	u32 Delay_ms;
@@ -1928,9 +1936,9 @@ static int ov5640_download_firmware(const struct reg_value *pModeSetting,
 		Mask = pModeSetting->u8Mask;
 
 		if (Mask)
-			retval = ov5640_mod_reg(RegAddr, Mask, Val);
+			retval = ov5640_mod_reg(sensor, RegAddr, Mask, Val);
 		else
-			retval = ov5640_write_reg(RegAddr, Val);
+			retval = ov5640_write_reg(sensor, RegAddr, Val);
 		if (retval < 0)
 			return retval;
 
@@ -1953,40 +1961,40 @@ static int ov5640_download_firmware(const struct reg_value *pModeSetting,
  * Return: 0 on success, or a negative error code when programming the sensor
  * fails.
  */
-static int ov5640_init_mode(void)
+static int ov5640_init_mode(struct ov5640 *sensor)
 {
 	const struct reg_value *pModeSetting = NULL;
 	int ArySize = 0, retval = 0;
 
-	retval = ov5640_soft_reset();
+	retval = ov5640_soft_reset(sensor);
 	if (retval < 0)
 		goto err;
 
 	pModeSetting = ov5640_global_init_setting;
 	ArySize = ARRAY_SIZE(ov5640_global_init_setting);
-	retval = ov5640_download_firmware(pModeSetting, ArySize);
+	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
 	if (retval < 0)
 		goto err;
 
 	pModeSetting = ov5640_init_setting_30fps_VGA;
 	ArySize = ARRAY_SIZE(ov5640_init_setting_30fps_VGA);
-	retval = ov5640_download_firmware(pModeSetting, ArySize);
+	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
 	if (retval < 0)
 		goto err;
 
 	/* change driver capability to 1x.
 	 * 2x may cause image instability on some boards.
 	 */
-	retval = ov5640_driver_capability(1);
+	retval = ov5640_driver_capability(sensor, 1);
 	if (retval < 0)
 		goto err;
-	retval = ov5640_set_bandingfilter();
+	retval = ov5640_set_bandingfilter(sensor);
 	if (retval < 0)
 		goto err;
-	retval = ov5640_set_AE_target(AE_Target);
+	retval = ov5640_set_AE_target(sensor, sensor->ae_target);
 	if (retval < 0)
 		goto err;
-	retval = ov5640_set_night_mode(night_mode);
+	retval = ov5640_set_night_mode(sensor, sensor->night_mode);
 	if (retval < 0)
 		goto err;
 
@@ -1994,18 +2002,19 @@ static int ov5640_init_mode(void)
 	msleep(300);
 
 	/* turn off night mode */
-	night_mode = 0;
-	ov5640_data.current_fr = ov5640_30_fps;
-	ov5640_data.current_mode = ov5640_mode_VGA_640_480;
-	ov5640_data.pix.width = 640;
-	ov5640_data.pix.height = 480;
+	sensor->night_mode = 0;
+	sensor->current_fr = ov5640_30_fps;
+	sensor->current_mode = ov5640_mode_VGA_640_480;
+	sensor->pix.width = 640;
+	sensor->pix.height = 480;
 err:
 	return retval;
 }
 
 /* change to or back to subsampling mode set the mode directly
  * image size below 1280 * 960 is subsampling mode */
-static int ov5640_change_mode_direct(enum ov5640_frame_rate frame_rate,
+static int ov5640_change_mode_direct(struct ov5640 *sensor,
+			    enum ov5640_frame_rate frame_rate,
 			    enum ov5640_mode mode)
 {
 	const struct ov5640_mode_info *mode_info;
@@ -2029,27 +2038,27 @@ static int ov5640_change_mode_direct(enum ov5640_frame_rate frame_rate,
 	ArySize = fps_info->num_regs;
 
 	/* set ov5640 to subsampling mode */
-	retval = ov5640_download_firmware(pModeSetting, ArySize);
+	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
 	if (retval < 0)
 		goto err;
 
 	/* turn on AE AG for subsampling mode, in case the firmware didn't */
-	retval = ov5640_turn_on_AE_AG(1);
+	retval = ov5640_turn_on_AE_AG(sensor, 1);
 	if (retval < 0)
 		goto err;
 
 	/* calculate banding filter */
-	retval = ov5640_set_bandingfilter();
+	retval = ov5640_set_bandingfilter(sensor);
 	if (retval < 0)
 		goto err;
 
 	/* set AE target */
-	retval = ov5640_set_AE_target(AE_Target);
+	retval = ov5640_set_AE_target(sensor, sensor->ae_target);
 	if (retval < 0)
 		goto err;
 
 	/* update night mode setting */
-	retval = ov5640_set_night_mode(night_mode);
+	retval = ov5640_set_night_mode(sensor, sensor->night_mode);
 	if (retval < 0)
 		goto err;
 
@@ -2075,7 +2084,8 @@ err:
 
 /* change to scaling mode go through exposure calucation
  * image size above 1280 * 960 is scaling mode */
-static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
+static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
+			    enum ov5640_frame_rate frame_rate,
 			    enum ov5640_mode mode)
 {
 	const struct ov5640_mode_info *mode_info;
@@ -2104,57 +2114,57 @@ static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
 	ArySize = fps_info->num_regs;
 
 	/* read preview shutter */
-	prev_shutter = ov5640_get_shutter();
+	prev_shutter = ov5640_get_shutter(sensor);
 	if (prev_shutter < 0)
 		return prev_shutter;
 
 	/* read preview gain */
-	prev_gain16 = ov5640_get_gain16();
+	prev_gain16 = ov5640_get_gain16(sensor);
 	if (prev_gain16 < 0)
 		return prev_gain16;
 
 	/* get average */
-	retval = ov5640_read_reg(OV5640_REG_AVG_READOUT, &temp);
+	retval = ov5640_read_reg(sensor, OV5640_REG_AVG_READOUT, &temp);
 	if (retval < 0)
 		return retval;
 	average = temp;
 
 	/* turn off night mode for capture */
-	retval = ov5640_set_night_mode(0);
+	retval = ov5640_set_night_mode(sensor, 0);
 	if (retval < 0)
 		return retval;
 
 	/* turn off overlay */
-	retval = ov5640_write_reg(OV5640_REG_FREX_CTRL, 0x06);
+	retval = ov5640_write_reg(sensor, OV5640_REG_FREX_CTRL, 0x06);
 	if (retval < 0)
 		return retval;
 
 	/* Write capture setting */
-	retval = ov5640_download_firmware(pModeSetting, ArySize);
+	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
 	if (retval < 0)
 		goto err;
 
 	/* turn off AE AG when capture image. */
-	retval = ov5640_turn_on_AE_AG(0);
+	retval = ov5640_turn_on_AE_AG(sensor, 0);
 	if (retval < 0)
 		goto err;
 
 	/* read capture VTS */
-	cap_VTS = ov5640_get_VTS();
+	cap_VTS = ov5640_get_VTS(sensor);
 	if (cap_VTS < 0)
 		return cap_VTS;
-	cap_HTS = ov5640_get_HTS();
+	cap_HTS = ov5640_get_HTS(sensor);
 	if (cap_HTS < 0)
 		return cap_HTS;
-	cap_sysclk = ov5640_get_sysclk();
+	cap_sysclk = ov5640_get_sysclk(sensor);
 	if (cap_sysclk < 0)
 		return cap_sysclk;
 
-	if (prev_sysclk <= 0 || prev_HTS <= 0 || cap_HTS <= 0 || cap_VTS <= 4)
+	if (sensor->prev_sysclk <= 0 || sensor->prev_hts <= 0 || cap_HTS <= 0 || cap_VTS <= 4)
 		return -EINVAL;
 
 	/* calculate capture banding filter */
-	light_freq = ov5640_get_light_freq();
+	light_freq = ov5640_get_light_freq(sensor);
 	if (light_freq < 0)
 		return light_freq;
 	if (light_freq == 60) {
@@ -2168,15 +2178,15 @@ static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
 		return -EINVAL;
 	cap_maxband = (int)((cap_VTS - 4) / cap_bandfilt);
 	/* calculate capture shutter/gain16 */
-	if (average > AE_low && average < AE_high) {
+	if (average > sensor->ae_low && average < sensor->ae_high) {
 		/* in stable range */
 		cap_gain16_shutter =
-			prev_gain16 * prev_shutter * cap_sysclk/prev_sysclk *
-			prev_HTS/cap_HTS * AE_Target / average;
+			prev_gain16 * prev_shutter * cap_sysclk/sensor->prev_sysclk *
+			sensor->prev_hts/cap_HTS * sensor->ae_target / average;
 	} else {
 		cap_gain16_shutter =
-			prev_gain16 * prev_shutter * cap_sysclk/prev_sysclk *
-			prev_HTS/cap_HTS;
+			prev_gain16 * prev_shutter * cap_sysclk/sensor->prev_sysclk *
+			sensor->prev_hts/cap_HTS;
 	}
 
 	/* gain to shutter */
@@ -2203,19 +2213,19 @@ static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
 	}
 
 	/* write capture gain */
-	retval = ov5640_set_gain16(cap_gain16);
+	retval = ov5640_set_gain16(sensor, cap_gain16);
 	if (retval < 0)
 		goto err;
 
 	/* write capture shutter */
 	if (cap_shutter > (cap_VTS - 4)) {
 		cap_VTS = cap_shutter + 4;
-		retval = ov5640_set_VTS(cap_VTS);
+		retval = ov5640_set_VTS(sensor, cap_VTS);
 		if (retval < 0)
 			goto err;
 	}
 
-	retval = ov5640_set_shutter(cap_shutter);
+	retval = ov5640_set_shutter(sensor, cap_shutter);
 	if (retval < 0)
 		goto err;
 
@@ -2229,7 +2239,8 @@ err:
 	return retval;
 }
 
-static int ov5640_change_mode(enum ov5640_frame_rate frame_rate,
+static int ov5640_change_mode(struct ov5640 *sensor,
+			    enum ov5640_frame_rate frame_rate,
 			    enum ov5640_mode mode)
 {
 	const struct ov5640_mode_info *mode_info;
@@ -2247,20 +2258,20 @@ static int ov5640_change_mode(enum ov5640_frame_rate frame_rate,
 
 	switch (mode_info->downsize) {
 	case OV5640_DOWNSIZE_SCALING:
-		retval = ov5640_change_mode_exposure_calc(frame_rate, mode);
+		retval = ov5640_change_mode_exposure_calc(sensor, frame_rate, mode);
 		break;
 	case OV5640_DOWNSIZE_SUBSAMPLING:
-		retval = ov5640_change_mode_direct(frame_rate, mode);
+		retval = ov5640_change_mode_direct(sensor, frame_rate, mode);
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	if (retval == 0) {
-		ov5640_data.current_fr = frame_rate;
-		ov5640_data.current_mode = mode;
-		ov5640_data.pix.width = mode_info->width;
-		ov5640_data.pix.height = mode_info->height;
+		sensor->current_fr = frame_rate;
+		sensor->current_mode = mode;
+		sensor->pix.width = mode_info->width;
+		sensor->pix.height = mode_info->height;
 	}
 
 	return retval;
@@ -2487,12 +2498,12 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 		}
 
 		if (sensor->powered && frame_rate != sensor->current_fr) {
-			ret = ov5640_change_mode(frame_rate, sensor->current_mode);
+			ret = ov5640_change_mode(sensor, frame_rate, sensor->current_mode);
 			if (ret < 0)
 				goto unlock;
 
 			fmt = sensor->fmt ? sensor->fmt : &ov5640_colour_fmts[0];
-			ret = ov5640_apply_format(fmt);
+			ret = ov5640_apply_format(sensor, fmt);
 			if (ret < 0)
 				goto unlock;
 
@@ -2500,7 +2511,7 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 			if (ret < 0)
 				goto unlock;
 
-			ret = ov5640_hw_set_stream(false);
+			ret = ov5640_hw_set_stream(sensor, false);
 			if (ret < 0)
 				goto unlock;
 		}
@@ -2580,7 +2591,7 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
  * This callback applies the same adjustment as ov5640_try_fmt(), then programs
  * the selected mode and the verified RGB565 output registers when the sensor is
  * powered.  If called while powered off, it only updates the cached request;
- * init_device() will apply that cache on the next power-on.
+ * init_device(sensor) will apply that cache on the next power-on.
  *
  * Return: 0 on success, or a negative error code.
  */
@@ -2610,11 +2621,11 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 	}
 
 	if (sensor->powered) {
-		retval = ov5640_change_mode(sensor->current_fr, mode_info->mode);
+		retval = ov5640_change_mode(sensor, sensor->current_fr, mode_info->mode);
 		if (retval < 0)
 			goto out;
 
-		retval = ov5640_apply_format(fmt);
+		retval = ov5640_apply_format(sensor, fmt);
 		if (retval < 0)
 			goto out;
 
@@ -2622,7 +2633,7 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 		if (retval < 0)
 			goto out;
 
-		retval = ov5640_hw_set_stream(false);
+		retval = ov5640_hw_set_stream(sensor, false);
 		if (retval < 0)
 			goto out;
 	}
@@ -2764,46 +2775,46 @@ static int ov5640_enum_frameintervals(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int ov5640_set_clk_rate(void)
+static int ov5640_set_clk_rate(struct ov5640 *sensor)
 {
 	u32 tgt_xclk;	/* target xclk */
 	int ret;
 
 	/* mclk */
-	tgt_xclk = ov5640_data.mclk;
+	tgt_xclk = sensor->mclk;
 	tgt_xclk = min(tgt_xclk, (u32)OV5640_XCLK_MAX);
 	tgt_xclk = max(tgt_xclk, (u32)OV5640_XCLK_MIN);
-	ov5640_data.mclk = tgt_xclk;
+	sensor->mclk = tgt_xclk;
 
 	pr_debug("   Setting mclk to %d MHz\n", tgt_xclk / 1000000);
-	ret = clk_set_rate(ov5640_data.sensor_clk, ov5640_data.mclk);
+	ret = clk_set_rate(sensor->sensor_clk, sensor->mclk);
 	if (ret < 0)
-		pr_debug("set rate filed, rate=%d\n", ov5640_data.mclk);
+		pr_debug("set rate filed, rate=%d\n", sensor->mclk);
 	return ret;
 }
 
 /*!
  * dev_init - V4L2 sensor init
  * 
- * init device according to the mclk and fps(ov5640_data.streamcap.timeperframe) in ov5640_data
+ * init device according to the mclk and fps(sensor->streamcap.timeperframe) in sensor
  */
-static int init_device(void)
+static int init_device(struct ov5640 *sensor)
 {
 	u32 tgt_xclk;	/* target xclk */
 	u32 tgt_fps;	/* target frames per secound */
 	enum ov5640_frame_rate frame_rate;
-	enum ov5640_mode target_mode = ov5640_data.current_mode;
+	enum ov5640_mode target_mode = sensor->current_mode;
 	const struct ov5640_mode_info *mode_info;
 	int ret;
 
-	ov5640_data.on = true;
+	sensor->on = true;
 
 	/* mclk */
-	tgt_xclk = ov5640_data.mclk;
+	tgt_xclk = sensor->mclk;
 
 	/* Default camera frame rate is set in probe */
-	tgt_fps = ov5640_data.streamcap.timeperframe.denominator /
-		  ov5640_data.streamcap.timeperframe.numerator;
+	tgt_fps = sensor->streamcap.timeperframe.denominator /
+		  sensor->streamcap.timeperframe.numerator;
 
 	if (tgt_fps == 15)
 		frame_rate = ov5640_15_fps;
@@ -2815,37 +2826,37 @@ static int init_device(void)
 	mode_info = ov5640_get_mode_info(target_mode);
 	if (!ov5640_get_mode_fps_info(mode_info, frame_rate)) {
 		mode_info = ov5640_find_nearest_mode(frame_rate,
-						ov5640_data.pix.width,
-						ov5640_data.pix.height);
+						sensor->pix.width,
+						sensor->pix.height);
 		if (!mode_info)
 			return -EINVAL;
 		target_mode = mode_info->mode;
 	}
 
-	ret = ov5640_init_mode();
+	ret = ov5640_init_mode(sensor);
 	if (ret < 0)
 		return ret;
 
-	if (ov5640_data.current_fr != frame_rate ||
-	    ov5640_data.current_mode != target_mode) {
-		ret = ov5640_change_mode(frame_rate, target_mode);
+	if (sensor->current_fr != frame_rate ||
+	    sensor->current_mode != target_mode) {
+		ret = ov5640_change_mode(sensor, frame_rate, target_mode);
 		if (ret < 0)
 			return ret;
 	}
 
-	ret = ov5640_apply_format(ov5640_data.fmt);
+	ret = ov5640_apply_format(sensor, sensor->fmt);
 	if (ret < 0)
 		return ret;
 
-	ret = ov5640_apply_controls(&ov5640_data);
+	ret = ov5640_apply_controls(sensor);
 	if (ret < 0)
 		return ret;
 
-	ret = ov5640_hw_set_stream(false);
+	ret = ov5640_hw_set_stream(sensor, false);
 	if (ret < 0)
 		return ret;
 
-	ov5640_data.streaming = false;
+	sensor->streaming = false;
 	return 0;
 }
 
@@ -2888,8 +2899,8 @@ static struct v4l2_subdev_ops ov5640_subdev_ops = {
 static int ov5640_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
-	struct pinctrl *pinctrl;
 	struct device *dev = &client->dev;
+	struct ov5640 *sensor;
 	int retval;
 	u8 chip_id_high, chip_id_low;
 
@@ -2901,99 +2912,100 @@ static int ov5640_probe(struct i2c_client *client,
 	// 	return PTR_ERR(pinctrl);
 	// }
 
-	/* Set initial values for the sensor struct. */
-	/* 全局单实例 */
-	memset(&ov5640_data, 0, sizeof(ov5640_data));
-	ov5640_data.dev = dev;
-	ov5640_data.i2c_client = client;
+	sensor = devm_kzalloc(dev, sizeof(*sensor), GFP_KERNEL);
+	if (!sensor)
+		return -ENOMEM;
 
-	ov5640_data.pwdn_gpio = devm_gpiod_get_optional(dev, "pwn",
+	sensor->dev = dev;
+	sensor->i2c_client = client;
+
+	sensor->pwdn_gpio = devm_gpiod_get_optional(dev, "pwn",
 							 GPIOD_OUT_HIGH);
-	if (IS_ERR(ov5640_data.pwdn_gpio)) {
-		retval = PTR_ERR(ov5640_data.pwdn_gpio);
+	if (IS_ERR(sensor->pwdn_gpio)) {
+		retval = PTR_ERR(sensor->pwdn_gpio);
 		dev_err(dev, "failed to get sensor pwdn GPIO: %d\n", retval);
 		return retval;
 	}
-	if (!ov5640_data.pwdn_gpio) {
+	if (!sensor->pwdn_gpio) {
 		dev_err(dev, "no sensor pwdn pin available\n");
 		return -ENODEV;
 	}
 
-	ov5640_data.reset_gpio = devm_gpiod_get_optional(dev, "rst",
+	sensor->reset_gpio = devm_gpiod_get_optional(dev, "rst",
 							  GPIOD_OUT_LOW);
-	if (IS_ERR(ov5640_data.reset_gpio)) {
-		retval = PTR_ERR(ov5640_data.reset_gpio);
+	if (IS_ERR(sensor->reset_gpio)) {
+		retval = PTR_ERR(sensor->reset_gpio);
 		dev_err(dev, "failed to get sensor reset GPIO: %d\n", retval);
 		return retval;
 	}
-	if (!ov5640_data.reset_gpio) {
+	if (!sensor->reset_gpio) {
 		dev_err(dev, "no sensor reset pin available\n");
 		return -ENODEV;
 	}
-	ov5640_data.regmap = devm_regmap_init_i2c(client, &ov5640_regmap_config);
-	if (IS_ERR(ov5640_data.regmap)) {
-		retval = PTR_ERR(ov5640_data.regmap);
+	sensor->regmap = devm_regmap_init_i2c(client, &ov5640_regmap_config);
+	if (IS_ERR(sensor->regmap)) {
+		retval = PTR_ERR(sensor->regmap);
 		dev_err(dev, "regmap init failed: %d\n", retval);
 		return retval;
 	}
 
-	ov5640_data.sensor_clk = devm_clk_get(dev, "csi_mclk");
-	if (IS_ERR(ov5640_data.sensor_clk)) {
+	sensor->sensor_clk = devm_clk_get(dev, "csi_mclk");
+	if (IS_ERR(sensor->sensor_clk)) {
 		dev_err(dev, "get mclk failed\n");
-		return PTR_ERR(ov5640_data.sensor_clk);
+		return PTR_ERR(sensor->sensor_clk);
 	}
 
 	retval = of_property_read_u32(dev->of_node, "mclk",
-					&ov5640_data.mclk);
+					&sensor->mclk);
 	if (retval) {
 		dev_err(dev, "mclk frequency is invalid\n");
 		return retval;
 	}
 
 	retval = of_property_read_u32(dev->of_node, "mclk_source",
-					(u32 *) &(ov5640_data.mclk_source));
+					(u32 *) &(sensor->mclk_source));
 	if (retval) {
 		dev_err(dev, "mclk_source invalid\n");
 		return retval;
 	}
 
 	retval = of_property_read_u32(dev->of_node, "csi_id",
-					&(ov5640_data.csi));
+					&(sensor->csi));
 	if (retval) {
 		dev_err(dev, "csi_id invalid\n");
 		return retval;
 	}
 
 	/* Set mclk rate before clk on */
-	retval = ov5640_set_clk_rate();
+	retval = ov5640_set_clk_rate(sensor);
 	if (retval < 0)
 		return retval;
 
-	ov5640_data.io_init = ov5640_reset;
-	ov5640_init_default_state(&ov5640_data);
+	sensor->io_init = ov5640_reset;
+	ov5640_init_default_state(sensor);
 
 	/* 正点原子 ov5640 模块只需3.3v供电，应该模块内部给了不同电压，故无需此步骤 */
 	// ov5640_regulator_enable(&client->dev);
 
-	retval = ov5640_power_on(&ov5640_data);
+	retval = ov5640_power_on(sensor);
 	if (retval < 0)
 		return retval;
 
 	/* read register to make sure the device is OV5640 */
-	retval = ov5640_read_reg(OV5640_CHIP_ID_HIGH_BYTE, &chip_id_high);
+	retval = ov5640_read_reg(sensor, OV5640_CHIP_ID_HIGH_BYTE, &chip_id_high);
 	if (retval < 0 || chip_id_high != 0x56) {
 		pr_warning("camera ov5640 is not found\n");
 		retval = -ENODEV;
 		goto power_off;
 	}
-	retval = ov5640_read_reg(OV5640_CHIP_ID_LOW_BYTE, &chip_id_low);
+	retval = ov5640_read_reg(sensor, OV5640_CHIP_ID_LOW_BYTE, &chip_id_low);
 	if (retval < 0 || chip_id_low != 0x40) {
 		pr_warning("camera ov5640 is not found\n");
 		retval = -ENODEV;
 		goto power_off;
 	}
 
-	retval = init_device();
+	retval = init_device(sensor);
 	if (retval < 0) {
 		pr_warning("camera ov5640 init failed\n");
 		goto power_off;
@@ -3004,15 +3016,15 @@ static int ov5640_probe(struct i2c_client *client,
 	 * v4l2_set_subdevdata(sd, client);
 	 * i2c_set_clientdata(client, sd);
 	 */
-	v4l2_i2c_subdev_init(&ov5640_data.subdev, client, &ov5640_subdev_ops);
+	v4l2_i2c_subdev_init(&sensor->subdev, client, &ov5640_subdev_ops);
 
-	retval = ov5640_init_controls(&ov5640_data);
+	retval = ov5640_init_controls(sensor);
 	if (retval < 0) {
 		dev_err(&client->dev, "control init failed: %d\n", retval);
 		goto power_off;
 	}
 
-	retval = v4l2_async_register_subdev(&ov5640_data.subdev);
+	retval = v4l2_async_register_subdev(&sensor->subdev);
 	if (retval < 0) {
 		dev_err(&client->dev,
 					"%s--Async register failed, ret=%d\n", __func__, retval);
@@ -3030,9 +3042,9 @@ static int ov5640_probe(struct i2c_client *client,
 	return 0;
 
 free_ctrls:
-	v4l2_ctrl_handler_free(&ov5640_data.ctrls);
+	v4l2_ctrl_handler_free(&sensor->ctrls);
 power_off:
-	ov5640_power_off(&ov5640_data);
+	ov5640_power_off(sensor);
 	return retval;
 }
 
@@ -3045,28 +3057,29 @@ power_off:
 static int ov5640_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct ov5640 *sensor = to_ov5640(client);
 
 	pm_runtime_disable(&client->dev);
 
 	v4l2_async_unregister_subdev(sd);
-	v4l2_ctrl_handler_free(&ov5640_data.ctrls);
+	v4l2_ctrl_handler_free(&sensor->ctrls);
 
-	mutex_lock(&ov5640_data.lock);
-	ov5640_data.power_ref = false;
-	ov5640_power_off(&ov5640_data);
-	if (!ov5640_data.powered)
-		ov5640_power_down(&ov5640_data, true);
-	mutex_unlock(&ov5640_data.lock);
+	mutex_lock(&sensor->lock);
+	sensor->power_ref = false;
+	ov5640_power_off(sensor);
+	if (!sensor->powered)
+		ov5640_power_down(sensor, true);
+	mutex_unlock(&sensor->lock);
 	pm_runtime_set_suspended(&client->dev);
 
-	if (analog_regulator)
-		regulator_disable(analog_regulator);
+	if (sensor->analog_regulator)
+		regulator_disable(sensor->analog_regulator);
 
-	if (core_regulator)
-		regulator_disable(core_regulator);
+	if (sensor->core_regulator)
+		regulator_disable(sensor->core_regulator);
 
-	if (io_regulator)
-		regulator_disable(io_regulator);
+	if (sensor->io_regulator)
+		regulator_disable(sensor->io_regulator);
 
 	return 0;
 }
