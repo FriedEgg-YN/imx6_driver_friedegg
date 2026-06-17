@@ -397,7 +397,7 @@ static struct mx6s_fmt *format_by_fourcc(int fourcc);
  * @v4l2_dev: V4L2 顶层设备对象，承载 video node 和 subdev。
  * @vb2_vidq: videobuf2 capture 队列，管理用户 buffer 生命周期。
  * @alloc_ctx: vb2-dma-contig 分配上下文，保存 DMA 设备信息。
- * @ctrl_handler: V4L2 控件处理器，本驱动当前未填充控件。
+ * @ctrl_handler: 聚合 sensor subdev controls，供 /dev/videoX 枚举和设置。
  * @lock: 进程上下文互斥锁，保护 open/close/ioctl 队列配置路径。
  * @slock: IRQ 和进程上下文共享的自旋锁，保护 buffer 链表和硬件槽位。
  * @clk_disp_axi: CSI/显示子系统访问 AXI 总线所需时钟。
@@ -2493,17 +2493,33 @@ static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 {
 	struct mx6s_csi_dev *csi_dev = notifier_to_mx6s_dev(notifier);
 
+	if (subdev == NULL)
+		return -EINVAL;
+
 	/* Find platform data for this sensor subdev */
 	if (csi_dev->asd.match.of.node == subdev->dev->of_node)
 		csi_dev->sd = subdev;
-
-	if (subdev == NULL)
-		return -EINVAL;
 
 	v4l2_info(&csi_dev->v4l2_dev, "Registered sensor subdevice: %s\n",
 		  subdev->name);
 
 	return 0;
+}
+
+static void subdev_notifier_unbind(struct v4l2_async_notifier *notifier,
+			       struct v4l2_subdev *subdev,
+			       struct v4l2_async_subdev *asd)
+{
+	struct mx6s_csi_dev *csi_dev = notifier_to_mx6s_dev(notifier);
+
+	if (csi_dev->sd == subdev)
+		csi_dev->sd = NULL;
+
+	v4l2_ctrl_handler_free(&csi_dev->ctrl_handler);
+	v4l2_ctrl_handler_init(&csi_dev->ctrl_handler, 4);
+	csi_dev->v4l2_dev.ctrl_handler = &csi_dev->ctrl_handler;
+	if (csi_dev->vdev)
+		csi_dev->vdev->ctrl_handler = &csi_dev->ctrl_handler;
 }
 
 /**
@@ -2633,6 +2649,7 @@ static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 	csi_dev->subdev_notifier.subdevs = csi_dev->async_subdevs;
 	csi_dev->subdev_notifier.num_subdevs = 1;
 	csi_dev->subdev_notifier.bound = subdev_notifier_bound;
+	csi_dev->subdev_notifier.unbind = subdev_notifier_unbind;
 
 	/*
 	 * v4l2_async_notifier_register() 把等待列表交给 V4L2 async core。
@@ -2748,6 +2765,11 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	ret = v4l2_ctrl_handler_init(&csi_dev->ctrl_handler, 4);
+	if (ret < 0)
+		goto err_ctrl;
+	csi_dev->v4l2_dev.ctrl_handler = &csi_dev->ctrl_handler;
+
 	/* initialize locks */
 	mutex_init(&csi_dev->lock);
 	spin_lock_init(&csi_dev->slock);
@@ -2817,6 +2839,8 @@ static int mx6s_csi_probe(struct platform_device *pdev)
 err_irq:
 	video_unregister_device(csi_dev->vdev);
 err_vdev:
+	v4l2_ctrl_handler_free(&csi_dev->ctrl_handler);
+err_ctrl:
 	v4l2_device_unregister(&csi_dev->v4l2_dev);
 	return ret;
 }
@@ -2840,6 +2864,7 @@ static int mx6s_csi_remove(struct platform_device *pdev)
 	v4l2_async_notifier_unregister(&csi_dev->subdev_notifier);
 
 	video_unregister_device(csi_dev->vdev);
+	v4l2_ctrl_handler_free(&csi_dev->ctrl_handler);
 	v4l2_device_unregister(&csi_dev->v4l2_dev);
 
 	pm_runtime_disable(csi_dev->dev);

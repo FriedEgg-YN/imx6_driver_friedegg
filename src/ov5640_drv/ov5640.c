@@ -76,12 +76,18 @@
 #define OV5640_REG_BANDING_FILTER_MAN   0x3c00
 #define OV5640_REG_BANDING_FILTER_CTRL  0x3c01
 #define OV5640_REG_BANDING_FILTER_AUTO  0x3c0c
+#define OV5640_REG_TIMING_TC_REG20      0x3820
+#define OV5640_REG_TIMING_TC_REG21      0x3821
 #define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
 #define OV5640_FORMAT_MUX_RGB           0x01
 #define OV5640_FORMAT_CTRL_RGB565       0x6f
 #define OV5640_REG_AVG_READOUT          0x56a1
+
+#define OV5640_TIMING_FLIP_MASK         0x06
+#define OV5640_BANDING_MANUAL_ENABLE    0x80
+#define OV5640_BANDING_MANUAL_50HZ      0x04
 
 #define OV5640_STREAM_ON                0x00
 #define OV5640_STREAM_OFF               0x0f
@@ -172,8 +178,12 @@ struct ov5640 {
 	bool streaming;
 	bool on;
 	struct mutex lock;
+	struct v4l2_ctrl_handler ctrls;
+	struct v4l2_ctrl *hflip;
+	struct v4l2_ctrl *vflip;
+	struct v4l2_ctrl *power_line_frequency;
 
-	/* Legacy placeholders; real V4L2 controls are not wired yet. */
+	/* Legacy placeholders kept until matching image-processing controls exist. */
 	int brightness;
 	int hue;
 	int contrast;
@@ -1332,6 +1342,130 @@ static int ov5640_mod_reg(u16 reg, u8 mask, u8 val)
 	return ret;
 }
 
+static int ov5640_set_flip(struct ov5640 *sensor)
+{
+	int ret;
+	u8 hflip = sensor->hflip->val ? OV5640_TIMING_FLIP_MASK : 0;
+	u8 vflip = sensor->vflip->val ? OV5640_TIMING_FLIP_MASK : 0;
+
+	ret = ov5640_mod_reg(OV5640_REG_TIMING_TC_REG21,
+				     OV5640_TIMING_FLIP_MASK, hflip);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_mod_reg(OV5640_REG_TIMING_TC_REG20,
+			       OV5640_TIMING_FLIP_MASK, vflip);
+}
+
+static int ov5640_set_power_line_frequency(struct ov5640 *sensor)
+{
+	int ret;
+
+	switch (sensor->power_line_frequency->val) {
+	case V4L2_CID_POWER_LINE_FREQUENCY_50HZ:
+		ret = ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+				     OV5640_BANDING_MANUAL_ENABLE,
+				     OV5640_BANDING_MANUAL_ENABLE);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_MAN,
+				       OV5640_BANDING_MANUAL_50HZ,
+				       OV5640_BANDING_MANUAL_50HZ);
+	case V4L2_CID_POWER_LINE_FREQUENCY_60HZ:
+		ret = ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+				     OV5640_BANDING_MANUAL_ENABLE,
+				     OV5640_BANDING_MANUAL_ENABLE);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_MAN,
+				       OV5640_BANDING_MANUAL_50HZ, 0);
+	case V4L2_CID_POWER_LINE_FREQUENCY_AUTO:
+		return ov5640_mod_reg(OV5640_REG_BANDING_FILTER_CTRL,
+			       OV5640_BANDING_MANUAL_ENABLE, 0);
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ov5640_apply_controls(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (!sensor->hflip || !sensor->vflip ||
+	    !sensor->power_line_frequency)
+		return 0;
+
+	ret = ov5640_set_flip(sensor);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_set_power_line_frequency(sensor);
+}
+
+static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct ov5640 *sensor =
+		container_of(ctrl->handler, struct ov5640, ctrls);
+	int ret = 0;
+
+	mutex_lock(&sensor->lock);
+	if (!sensor->powered)
+		goto out;
+
+	switch (ctrl->id) {
+	case V4L2_CID_HFLIP:
+	case V4L2_CID_VFLIP:
+		ret = ov5640_set_flip(sensor);
+		break;
+	case V4L2_CID_POWER_LINE_FREQUENCY:
+		ret = ov5640_set_power_line_frequency(sensor);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+ out:
+	mutex_unlock(&sensor->lock);
+	return ret;
+}
+
+static const struct v4l2_ctrl_ops ov5640_ctrl_ops = {
+	.s_ctrl = ov5640_s_ctrl,
+};
+
+static int ov5640_init_controls(struct ov5640 *sensor)
+{
+	struct v4l2_ctrl_handler *hdl = &sensor->ctrls;
+	int ret;
+
+	ret = v4l2_ctrl_handler_init(hdl, 3);
+	if (ret < 0)
+		return ret;
+
+	sensor->hflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+					      V4L2_CID_HFLIP, 0, 1, 1, 1);
+	sensor->vflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+					      V4L2_CID_VFLIP, 0, 1, 1, 1);
+	sensor->power_line_frequency =
+		v4l2_ctrl_new_std_menu(hdl, &ov5640_ctrl_ops,
+				       V4L2_CID_POWER_LINE_FREQUENCY,
+				       V4L2_CID_POWER_LINE_FREQUENCY_AUTO,
+				       1 << V4L2_CID_POWER_LINE_FREQUENCY_DISABLED,
+				       V4L2_CID_POWER_LINE_FREQUENCY_AUTO);
+
+	if (hdl->error) {
+		ret = hdl->error;
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	sensor->subdev.ctrl_handler = hdl;
+	return 0;
+}
+
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 /**
  * ov5640_get_register - read one OV5640 register through V4L2 debug ioctl
@@ -2245,6 +2379,10 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 			if (ret < 0)
 				goto unlock;
 
+			ret = ov5640_apply_controls(sensor);
+			if (ret < 0)
+				goto unlock;
+
 			ret = ov5640_hw_set_stream(false);
 			if (ret < 0)
 				goto unlock;
@@ -2360,6 +2498,10 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 			goto out;
 
 		retval = ov5640_apply_format(fmt);
+		if (retval < 0)
+			goto out;
+
+		retval = ov5640_apply_controls(sensor);
 		if (retval < 0)
 			goto out;
 
@@ -2578,6 +2720,10 @@ static int init_device(void)
 	if (ret < 0)
 		return ret;
 
+	ret = ov5640_apply_controls(&ov5640_data);
+	if (ret < 0)
+		return ret;
+
 	ret = ov5640_hw_set_stream(false);
 	if (ret < 0)
 		return ret;
@@ -2745,10 +2891,18 @@ static int ov5640_probe(struct i2c_client *client,
 	 */
 	v4l2_i2c_subdev_init(&ov5640_data.subdev, client, &ov5640_subdev_ops);
 
+	retval = ov5640_init_controls(&ov5640_data);
+	if (retval < 0) {
+		dev_err(&client->dev, "control init failed: %d\n", retval);
+		return retval;
+	}
+
 	retval = v4l2_async_register_subdev(&ov5640_data.subdev);
-	if (retval < 0)
+	if (retval < 0) {
 		dev_err(&client->dev,
 					"%s--Async register failed, ret=%d\n", __func__, retval);
+		v4l2_ctrl_handler_free(&ov5640_data.ctrls);
+	}
 
 	pr_info("camera ov5640, is found\n");
 	return retval;
@@ -2769,6 +2923,7 @@ static int ov5640_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_async_unregister_subdev(sd);
+	v4l2_ctrl_handler_free(&ov5640_data.ctrls);
 
 	mutex_lock(&ov5640_data.lock);
 	ov5640_power_off(&ov5640_data);
