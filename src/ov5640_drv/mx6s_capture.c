@@ -908,7 +908,7 @@ static void csi_set_imagpara(struct mx6s_csi_dev *csi,
 /**
  * mx6s_videobuf_setup() - 配置 VB2 buffer 数量、平面大小和分配上下文
  * @vq: VB2 capture 队列，open() 中的 q->drv_priv 指向 CSI 私有数据。
- * @fmt: VIDIOC_CREATE_BUFS 传入的目标格式；本驱动暂不支持该路径。
+ * @fmt: VIDIOC_CREATE_BUFS 传入的目标格式；为 NULL 时表示 REQBUFS 路径。
  * @count: 输入为用户请求的 buffer 数，输出为驱动允许的 buffer 数。
  * @num_planes: 输出为 plane 数。本驱动所有格式都是单 plane。
  * @sizes: 输出每个 plane 的最小字节数。
@@ -917,7 +917,7 @@ static void csi_set_imagpara(struct mx6s_csi_dev *csi,
  * vb2_get_drv_priv() 返回 q->drv_priv，也就是 mx6s_csi_open() 填进去的
  * csi_dev。VB2 core 在 VIDIOC_REQBUFS 时调用该回调来决定分配多少内存。
  *
- * Return: 成功返回 0；不支持 CREATE_BUFS 时返回 -ENOTTY。
+ * Return: 成功返回 0；CREATE_BUFS 请求与当前格式不匹配时返回 -EINVAL。
  */
 static int mx6s_videobuf_setup(struct vb2_queue *vq,
 			const struct v4l2_format *fmt,
@@ -928,9 +928,20 @@ static int mx6s_videobuf_setup(struct vb2_queue *vq,
 
 	dev_dbg(csi_dev->dev, "count=%d, size=%d\n", *count, sizes[0]);
 
-	/* TODO: support for VIDIOC_CREATE_BUFS not ready */
-	if (fmt != NULL)
-		return -ENOTTY;
+	if (fmt) {
+		const struct v4l2_pix_format *pix = &fmt->fmt.pix;
+
+		if (fmt->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+			return -EINVAL;
+		if (pix->pixelformat && pix->pixelformat != csi_dev->pix.pixelformat)
+			return -EINVAL;
+		if (pix->width && pix->width != csi_dev->pix.width)
+			return -EINVAL;
+		if (pix->height && pix->height != csi_dev->pix.height)
+			return -EINVAL;
+		if (pix->sizeimage && pix->sizeimage < csi_dev->pix.sizeimage)
+			return -EINVAL;
+	}
 
 	/*
 	 * alloc_ctxs[0] 告诉 vb2_dma_contig_memops：第 0 个 plane 使用
@@ -2446,6 +2457,7 @@ static const struct v4l2_ioctl_ops mx6s_csi_ioctl_ops = {
 	.vidioc_s_crop        = mx6s_vidioc_s_crop,
 	.vidioc_g_crop        = mx6s_vidioc_g_crop,
 	.vidioc_reqbufs       = mx6s_vidioc_reqbufs,
+	.vidioc_create_bufs   = vb2_ioctl_create_bufs,
 	.vidioc_querybuf      = mx6s_vidioc_querybuf,
 	.vidioc_qbuf          = mx6s_vidioc_qbuf,
 	.vidioc_dqbuf         = mx6s_vidioc_dqbuf,

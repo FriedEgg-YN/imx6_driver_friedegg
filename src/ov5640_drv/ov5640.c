@@ -123,12 +123,37 @@ struct reg_value {
 	u32 u32Delay_ms;
 };
 
+enum ov5640_downsize_mode {
+	OV5640_DOWNSIZE_SUBSAMPLING,
+	OV5640_DOWNSIZE_SCALING,
+};
+
+struct ov5640_rect {
+	u32 left;
+	u32 top;
+	u32 width;
+	u32 height;
+};
+
+struct ov5640_mode_fps_info {
+	enum ov5640_frame_rate frame_rate;
+	const struct reg_value *regs;
+	u32 num_regs;
+};
+
 struct ov5640_mode_info {
 	enum ov5640_mode mode;
 	u32 width;
 	u32 height;
-	const struct reg_value *init_data_ptr;
-	u32 init_data_size;
+	enum ov5640_downsize_mode downsize;
+	struct ov5640_rect analog_crop;
+	struct ov5640_rect crop;
+	u32 htot;
+	u32 vts_def;
+	u32 pixel_rate;
+	enum ov5640_frame_rate default_fps;
+	const struct ov5640_mode_fps_info *fps;
+	u32 num_fps;
 };
 
 struct ov5640 {
@@ -596,64 +621,191 @@ static const struct reg_value ov5640_setting_30fps_800_480[] = {
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct ov5640_mode_info ov5640_mode_info_data[2][ov5640_mode_MAX + 1] = {
-	{
-		{ov5640_mode_VGA_640_480,      640,  480,
-		ov5640_setting_15fps_VGA_640_480,
-		ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
-		{ov5640_mode_QVGA_320_240,     320,  240,
-		ov5640_setting_15fps_QVGA_320_240,
-		ARRAY_SIZE(ov5640_setting_15fps_QVGA_320_240)},
-		{ov5640_mode_NTSC_720_480,     720,  480,
-		ov5640_setting_15fps_NTSC_720_480,
-		ARRAY_SIZE(ov5640_setting_15fps_NTSC_720_480)},
-		{ov5640_mode_PAL_720_576,      720,  576,
-		ov5640_setting_15fps_PAL_720_576,
-		ARRAY_SIZE(ov5640_setting_15fps_PAL_720_576)},
-		{ov5640_mode_720P_1280_720,   1280,  720,
-		ov5640_setting_15fps_720P_1280_720,
-		ARRAY_SIZE(ov5640_setting_15fps_720P_1280_720)},
-		{ov5640_mode_1080P_1920_1080, 1920, 1080,
-		ov5640_setting_15fps_1080P_1920_1080,
-		ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
-		{ov5640_mode_QSXGA_2592_1944, 2592, 1944,
-		ov5640_setting_15fps_QSXGA_2592_1944,
-		ARRAY_SIZE(ov5640_setting_15fps_QSXGA_2592_1944)},
-		{ov5640_mode_QCIF_176_144,     176,  144,
-		ov5640_setting_15fps_QCIF_176_144,
-		ARRAY_SIZE(ov5640_setting_15fps_QCIF_176_144)},
-		{ov5640_mode_XGA_1024_768,    1024,  768,
-		ov5640_setting_15fps_XGA_1024_768,
-		ARRAY_SIZE(ov5640_setting_15fps_XGA_1024_768)},
-	},
-	{
-		{ov5640_mode_VGA_640_480,      640,  480,
-		ov5640_setting_30fps_VGA_640_480,
-		ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
-		{ov5640_mode_QVGA_320_240,     320,  240,
-		ov5640_setting_30fps_QVGA_320_240,
-		ARRAY_SIZE(ov5640_setting_30fps_QVGA_320_240)},
-		{ov5640_mode_NTSC_720_480,     720,  480,
-		ov5640_setting_30fps_NTSC_720_480,
-		ARRAY_SIZE(ov5640_setting_30fps_NTSC_720_480)},
-		{ov5640_mode_PAL_720_576,      720,  576,
-		ov5640_setting_30fps_PAL_720_576,
-		ARRAY_SIZE(ov5640_setting_30fps_PAL_720_576)},
-		{ov5640_mode_720P_1280_720,   1280,  720,
-		ov5640_setting_30fps_720P_1280_720,
-		ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
-		{ov5640_mode_1080P_1920_1080, 0, 0, NULL, 0},
-		{ov5640_mode_QSXGA_2592_1944, 0, 0, NULL, 0},
-		{ov5640_mode_QCIF_176_144,     176,  144,
-		ov5640_setting_30fps_QCIF_176_144,
-		ARRAY_SIZE(ov5640_setting_30fps_QCIF_176_144)},
-		{ov5640_mode_XGA_1024_768,    1024,  768,
-		ov5640_setting_30fps_XGA_1024_768,
-		ARRAY_SIZE(ov5640_setting_30fps_XGA_1024_768)},
+static const struct ov5640_mode_fps_info ov5640_vga_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_VGA_640_480,
+	ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
+	{ov5640_30_fps, ov5640_setting_30fps_VGA_640_480,
+	ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
+};
 
-		{ov5640_mode_800_480,          800,  480,
-		ov5640_setting_30fps_800_480,
-		ARRAY_SIZE(ov5640_setting_30fps_800_480)},
+static const struct ov5640_mode_fps_info ov5640_qvga_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_QVGA_320_240,
+	ARRAY_SIZE(ov5640_setting_15fps_QVGA_320_240)},
+	{ov5640_30_fps, ov5640_setting_30fps_QVGA_320_240,
+	ARRAY_SIZE(ov5640_setting_30fps_QVGA_320_240)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_ntsc_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_NTSC_720_480,
+	ARRAY_SIZE(ov5640_setting_15fps_NTSC_720_480)},
+	{ov5640_30_fps, ov5640_setting_30fps_NTSC_720_480,
+	ARRAY_SIZE(ov5640_setting_30fps_NTSC_720_480)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_pal_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_PAL_720_576,
+	ARRAY_SIZE(ov5640_setting_15fps_PAL_720_576)},
+	{ov5640_30_fps, ov5640_setting_30fps_PAL_720_576,
+	ARRAY_SIZE(ov5640_setting_30fps_PAL_720_576)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_720p_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_720P_1280_720,
+	ARRAY_SIZE(ov5640_setting_15fps_720P_1280_720)},
+	{ov5640_30_fps, ov5640_setting_30fps_720P_1280_720,
+	ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_1080p_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_1080P_1920_1080,
+	ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_qsxga_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_QSXGA_2592_1944,
+	ARRAY_SIZE(ov5640_setting_15fps_QSXGA_2592_1944)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_qcif_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_QCIF_176_144,
+	ARRAY_SIZE(ov5640_setting_15fps_QCIF_176_144)},
+	{ov5640_30_fps, ov5640_setting_30fps_QCIF_176_144,
+	ARRAY_SIZE(ov5640_setting_30fps_QCIF_176_144)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_xga_fps[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_XGA_1024_768,
+	ARRAY_SIZE(ov5640_setting_15fps_XGA_1024_768)},
+	{ov5640_30_fps, ov5640_setting_30fps_XGA_1024_768,
+	ARRAY_SIZE(ov5640_setting_30fps_XGA_1024_768)},
+};
+
+static const struct ov5640_mode_fps_info ov5640_800x480_fps[] = {
+	{ov5640_30_fps, ov5640_setting_30fps_800_480,
+	ARRAY_SIZE(ov5640_setting_30fps_800_480)},
+};
+
+static const struct ov5640_mode_info ov5640_modes[] = {
+	{
+		.mode = ov5640_mode_VGA_640_480,
+		.width = 640,
+		.height = 480,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 640, 480},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_vga_fps,
+		.num_fps = ARRAY_SIZE(ov5640_vga_fps),
+	}, {
+		.mode = ov5640_mode_QVGA_320_240,
+		.width = 320,
+		.height = 240,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 320, 240},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_qvga_fps,
+		.num_fps = ARRAY_SIZE(ov5640_qvga_fps),
+	}, {
+		.mode = ov5640_mode_NTSC_720_480,
+		.width = 720,
+		.height = 480,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1745},
+		.crop = {0, 0, 720, 480},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_ntsc_fps,
+		.num_fps = ARRAY_SIZE(ov5640_ntsc_fps),
+	}, {
+		.mode = ov5640_mode_PAL_720_576,
+		.width = 720,
+		.height = 576,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {96, 4, 2335, 1944},
+		.crop = {0, 0, 720, 576},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_pal_fps,
+		.num_fps = ARRAY_SIZE(ov5640_pal_fps),
+	}, {
+		.mode = ov5640_mode_720P_1280_720,
+		.width = 1280,
+		.height = 720,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 250, 2624, 1456},
+		.crop = {0, 0, 1280, 720},
+		.htot = 0x0764,
+		.vts_def = 0x02e4,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_720p_fps,
+		.num_fps = ARRAY_SIZE(ov5640_720p_fps),
+	}, {
+		.mode = ov5640_mode_1080P_1920_1080,
+		.width = 1920,
+		.height = 1080,
+		.downsize = OV5640_DOWNSIZE_SCALING,
+		.analog_crop = {0, 238, 2624, 1238},
+		.crop = {0, 0, 1920, 1080},
+		.htot = 0x0b1c,
+		.vts_def = 0x07b0,
+		.default_fps = ov5640_15_fps,
+		.fps = ov5640_1080p_fps,
+		.num_fps = ARRAY_SIZE(ov5640_1080p_fps),
+	}, {
+		.mode = ov5640_mode_QSXGA_2592_1944,
+		.width = 2592,
+		.height = 1944,
+		.downsize = OV5640_DOWNSIZE_SCALING,
+		.analog_crop = {0, 0, 2624, 1952},
+		.crop = {0, 0, 2592, 1944},
+		.htot = 0x0b1c,
+		.vts_def = 0x07b0,
+		.default_fps = ov5640_15_fps,
+		.fps = ov5640_qsxga_fps,
+		.num_fps = ARRAY_SIZE(ov5640_qsxga_fps),
+	}, {
+		.mode = ov5640_mode_QCIF_176_144,
+		.width = 176,
+		.height = 144,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 176, 144},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_qcif_fps,
+		.num_fps = ARRAY_SIZE(ov5640_qcif_fps),
+	}, {
+		.mode = ov5640_mode_XGA_1024_768,
+		.width = 1024,
+		.height = 768,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 1024, 768},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_xga_fps,
+		.num_fps = ARRAY_SIZE(ov5640_xga_fps),
+	}, {
+		.mode = ov5640_mode_800_480,
+		.width = 800,
+		.height = 480,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 800, 480},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.fps = ov5640_800x480_fps,
+		.num_fps = ARRAY_SIZE(ov5640_800x480_fps),
 	},
 };
 
@@ -722,32 +874,43 @@ static const struct ov5640_datafmt
 static bool ov5640_mode_info_valid(const struct ov5640_mode_info *mode_info)
 {
 	return mode_info && mode_info->width && mode_info->height &&
-	       mode_info->init_data_ptr && mode_info->init_data_size;
+	       mode_info->fps && mode_info->num_fps;
+}
+
+static const struct ov5640_mode_info *
+ov5640_get_mode_info(enum ov5640_mode mode)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		if (ov5640_modes[i].mode == mode)
+			return &ov5640_modes[i];
+	}
+
+	return NULL;
 }
 
 static bool ov5640_mode_valid(enum ov5640_mode mode)
 {
-	int i;
-
-	if (mode < ov5640_mode_MIN || mode > ov5640_mode_MAX)
-		return false;
-
-	for (i = ov5640_15_fps; i <= ov5640_30_fps; i++) {
-		if (ov5640_mode_info_valid(&ov5640_mode_info_data[i][mode]))
-			return true;
-	}
-
-	return false;
+	return ov5640_mode_info_valid(ov5640_get_mode_info(mode));
 }
 
-static const struct ov5640_mode_info *
-ov5640_get_mode_info(enum ov5640_frame_rate frame_rate, enum ov5640_mode mode)
+static const struct ov5640_mode_fps_info *
+ov5640_get_mode_fps_info(const struct ov5640_mode_info *mode_info,
+				 enum ov5640_frame_rate frame_rate)
 {
-	if (frame_rate < ov5640_15_fps || frame_rate > ov5640_30_fps ||
-	    mode < ov5640_mode_MIN || mode > ov5640_mode_MAX)
+	int i;
+
+	if (!ov5640_mode_info_valid(mode_info))
 		return NULL;
 
-	return &ov5640_mode_info_data[frame_rate][mode];
+	for (i = 0; i < mode_info->num_fps; i++) {
+		if (mode_info->fps[i].frame_rate == frame_rate &&
+		    mode_info->fps[i].regs && mode_info->fps[i].num_regs)
+			return &mode_info->fps[i];
+	}
+
+	return NULL;
 }
 
 static u32 ov5640_abs_diff(u32 a, u32 b)
@@ -765,12 +928,11 @@ ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 	if (frame_rate < ov5640_15_fps || frame_rate > ov5640_30_fps)
 		frame_rate = ov5640_30_fps;
 
-	for (i = ov5640_mode_MIN; i <= ov5640_mode_MAX; i++) {
-		const struct ov5640_mode_info *mode_info =
-			ov5640_get_mode_info(frame_rate, i);
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
 		u32 distance;
 
-		if (!ov5640_mode_info_valid(mode_info))
+		if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
 			continue;
 
 		distance = ov5640_abs_diff(mode_info->width, width) +
@@ -789,11 +951,10 @@ ov5640_find_mode_by_size(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 {
 	int i;
 
-	for (i = ov5640_mode_MIN; i <= ov5640_mode_MAX; i++) {
-		const struct ov5640_mode_info *mode_info =
-			ov5640_get_mode_info(frame_rate, i);
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
 
-		if (!ov5640_mode_info_valid(mode_info))
+		if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
 			continue;
 
 		if (mode_info->width == width && mode_info->height == height)
@@ -810,13 +971,9 @@ ov5640_find_mode(u32 width, u32 height, bool nearest)
 	u32 best_distance = ~0U;
 	int i;
 
-	for (i = ov5640_mode_MIN; i <= ov5640_mode_MAX; i++) {
-		const struct ov5640_mode_info *mode_info =
-			ov5640_get_mode_info(ov5640_30_fps, i);
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
 		u32 distance;
-
-		if (!ov5640_mode_info_valid(mode_info))
-			mode_info = ov5640_get_mode_info(ov5640_15_fps, i);
 
 		if (!ov5640_mode_info_valid(mode_info))
 			continue;
@@ -841,7 +998,8 @@ ov5640_find_mode(u32 width, u32 height, bool nearest)
 static bool ov5640_mode_supports_fps(enum ov5640_mode mode,
 				     enum ov5640_frame_rate frame_rate)
 {
-	return ov5640_mode_info_valid(ov5640_get_mode_info(frame_rate, mode));
+	return ov5640_get_mode_fps_info(ov5640_get_mode_info(mode),
+				       frame_rate) != NULL;
 }
 
 static int ov5640_enum_frame_rate_for_mode(enum ov5640_mode mode,
@@ -903,7 +1061,7 @@ static int ov5640_apply_format(const struct ov5640_datafmt *fmt)
 static void ov5640_init_default_state(struct ov5640 *sensor)
 {
 	const struct ov5640_mode_info *mode_info =
-		&ov5640_mode_info_data[ov5640_30_fps][ov5640_mode_800_480];
+		ov5640_get_mode_info(ov5640_mode_800_480);
 
 	mutex_init(&sensor->lock);
 
@@ -1650,6 +1808,7 @@ static int ov5640_change_mode_direct(enum ov5640_frame_rate frame_rate,
 			    enum ov5640_mode mode)
 {
 	const struct ov5640_mode_info *mode_info;
+	const struct ov5640_mode_fps_info *fps_info;
 	const struct reg_value *pModeSetting = NULL;
 	s32 ArySize = 0;
 	int retval = 0;
@@ -1660,13 +1819,13 @@ static int ov5640_change_mode_direct(enum ov5640_frame_rate frame_rate,
 		return -EINVAL;
 	}
 
-	mode_info = &ov5640_mode_info_data[frame_rate][mode];
-	pModeSetting = mode_info->init_data_ptr;
-	ArySize = mode_info->init_data_size;
-
-	if (mode_info->width == 0 || mode_info->height == 0 ||
-	    pModeSetting == NULL || ArySize == 0)
+	mode_info = ov5640_get_mode_info(mode);
+	fps_info = ov5640_get_mode_fps_info(mode_info, frame_rate);
+	if (!fps_info)
 		return -EINVAL;
+
+	pModeSetting = fps_info->regs;
+	ArySize = fps_info->num_regs;
 
 	/* set ov5640 to subsampling mode */
 	retval = ov5640_download_firmware(pModeSetting, ArySize);
@@ -1719,6 +1878,7 @@ static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
 			    enum ov5640_mode mode)
 {
 	const struct ov5640_mode_info *mode_info;
+	const struct ov5640_mode_fps_info *fps_info;
 	int prev_shutter, prev_gain16, average;
 	int cap_shutter, cap_gain16;
 	int cap_sysclk, cap_HTS, cap_VTS;
@@ -1734,13 +1894,13 @@ static int ov5640_change_mode_exposure_calc(enum ov5640_frame_rate frame_rate,
 	    mode > ov5640_mode_MAX || mode < ov5640_mode_MIN)
 		return -EINVAL;
 
-	mode_info = &ov5640_mode_info_data[frame_rate][mode];
-	pModeSetting = mode_info->init_data_ptr;
-	ArySize = mode_info->init_data_size;
-
-	if (mode_info->width == 0 || mode_info->height == 0 ||
-		pModeSetting == NULL || ArySize == 0)
+	mode_info = ov5640_get_mode_info(mode);
+	fps_info = ov5640_get_mode_fps_info(mode_info, frame_rate);
+	if (!fps_info)
 		return -EINVAL;
+
+	pModeSetting = fps_info->regs;
+	ArySize = fps_info->num_regs;
 
 	/* read preview shutter */
 	prev_shutter = ov5640_get_shutter();
@@ -1880,19 +2040,22 @@ static int ov5640_change_mode(enum ov5640_frame_rate frame_rate,
 		return -EINVAL;
 	}
 
-	if (mode == ov5640_mode_1080P_1920_1080 ||
-			mode == ov5640_mode_QSXGA_2592_1944) {
-		/* change to scaling mode go through exposure calucation
-		 * image size above 1280 * 960 is scaling mode */
+	mode_info = ov5640_get_mode_info(mode);
+	if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
+		return -EINVAL;
+
+	switch (mode_info->downsize) {
+	case OV5640_DOWNSIZE_SCALING:
 		retval = ov5640_change_mode_exposure_calc(frame_rate, mode);
-	} else {
-		/* change back to subsampling modem download firmware directly
-		 * image size below 1280 * 960 is subsampling mode */
+		break;
+	case OV5640_DOWNSIZE_SUBSAMPLING:
 		retval = ov5640_change_mode_direct(frame_rate, mode);
+		break;
+	default:
+		return -EINVAL;
 	}
 
 	if (retval == 0) {
-		mode_info = &ov5640_mode_info_data[frame_rate][mode];
 		ov5640_data.current_fr = frame_rate;
 		ov5640_data.current_mode = mode;
 		ov5640_data.pix.width = mode_info->width;
@@ -2061,8 +2224,8 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 
 		mutex_lock(&sensor->lock);
 
-		mode_info = ov5640_get_mode_info(frame_rate, sensor->current_mode);
-		if (!ov5640_mode_info_valid(mode_info)) {
+		mode_info = ov5640_get_mode_info(sensor->current_mode);
+		if (!ov5640_get_mode_fps_info(mode_info, frame_rate)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
@@ -2284,18 +2447,14 @@ static int ov5640_enum_framesizes(struct v4l2_subdev *sd,
 	if (!ov5640_find_datafmt(fse->code))
 		return -EINVAL;
 
-	for (i = ov5640_mode_MIN; i <= ov5640_mode_MAX; i++) {
-		const struct ov5640_mode_info *mode_info;
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
 
-		if (!ov5640_mode_valid(i))
+		if (!ov5640_mode_info_valid(mode_info))
 			continue;
 
 		if (count++ != fse->index)
 			continue;
-
-		mode_info = ov5640_get_mode_info(ov5640_30_fps, i);
-		if (!ov5640_mode_info_valid(mode_info))
-			mode_info = ov5640_get_mode_info(ov5640_15_fps, i);
 
 		fse->min_width = mode_info->width;
 		fse->max_width = mode_info->width;
@@ -2394,8 +2553,8 @@ static int init_device(void)
 	else
 		return -EINVAL; /* Only support 15fps or 30fps now. */
 
-	mode_info = ov5640_get_mode_info(frame_rate, target_mode);
-	if (!ov5640_mode_info_valid(mode_info)) {
+	mode_info = ov5640_get_mode_info(target_mode);
+	if (!ov5640_get_mode_fps_info(mode_info, frame_rate)) {
 		mode_info = ov5640_find_nearest_mode(frame_rate,
 						ov5640_data.pix.width,
 						ov5640_data.pix.height);
