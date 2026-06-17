@@ -2036,15 +2036,63 @@ static int mx6s_vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	return 0;
 }
 
+static int mx6s_negotiate_format(struct mx6s_csi_dev *csi_dev,
+				      struct v4l2_pix_format *pix, bool apply,
+				      struct mx6s_fmt **selected_fmt)
+{
+	struct v4l2_subdev *sd = csi_dev->sd;
+	struct v4l2_mbus_framefmt mbus_fmt;
+	struct mx6s_fmt *fmt;
+	int ret;
+
+	fmt = format_by_fourcc(pix->pixelformat);
+	if (!fmt) {
+		dev_err(csi_dev->dev, "Fourcc format (0x%08x) invalid.",
+			pix->pixelformat);
+		return -EINVAL;
+	}
+
+	if (pix->width == 0 || pix->height == 0) {
+		dev_err(csi_dev->dev, "width %d, height %d is too small.\n",
+			pix->width, pix->height);
+		return -EINVAL;
+	}
+
+	v4l2_fill_mbus_format(&mbus_fmt, pix, fmt->mbus_code);
+	if (apply)
+		ret = v4l2_subdev_call(sd, video, s_mbus_fmt, &mbus_fmt);
+	else
+		ret = v4l2_subdev_call(sd, video, try_mbus_fmt, &mbus_fmt);
+	if (ret < 0)
+		return ret;
+
+	fmt = format_by_mbus(mbus_fmt.code);
+	if (!fmt)
+		return -EINVAL;
+
+	v4l2_fill_pix_format(pix, &mbus_fmt);
+	pix->pixelformat = fmt->pixelformat;
+	if (pix->field != V4L2_FIELD_INTERLACED)
+		pix->field = V4L2_FIELD_NONE;
+
+	pix->bytesperline = fmt->bpp * pix->width;
+	pix->sizeimage = pix->bytesperline * pix->height;
+
+	if (selected_fmt)
+		*selected_fmt = fmt;
+
+	return 0;
+}
+
 /**
  * mx6s_vidioc_try_fmt_vid_cap() - 实现 VIDIOC_TRY_FMT
  * @file: 打开的 /dev/videoX 文件实例。
  * @priv: V4L2 core 传入的 file handle。
  * @f: 输入用户期望格式，输出 sensor/host 协商后的格式。
  *
- * v4l2_fill_mbus_format() 把 V4L2 pix format 转成 subdev mbus format；
- * sensor 的 s_mbus_fmt 可能调整宽高/field；v4l2_fill_pix_format() 再把
- * 调整后的 mbus format 转回用户可见 pix format。
+ * TRY_FMT 只调用 sensor 的 try_mbus_fmt，不写 sensor 寄存器；如果 sensor
+ * 把 media-bus code 调整为当前已验证的 RGB565，host 侧也同步更新用户可见
+ * pixelformat、bytesperline 和 sizeimage。
  *
  * Return: 成功返回 0；格式或尺寸非法返回 -EINVAL；sensor 返回错误则透传。
  */
@@ -2052,36 +2100,8 @@ static int mx6s_vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 				      struct v4l2_format *f)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
-	struct v4l2_subdev *sd = csi_dev->sd;
-	struct v4l2_pix_format *pix = &f->fmt.pix;
-	struct v4l2_mbus_framefmt mbus_fmt;
-	struct mx6s_fmt *fmt;
-	int ret;
 
-	fmt = format_by_fourcc(f->fmt.pix.pixelformat);
-	if (!fmt) {
-		dev_err(csi_dev->dev, "Fourcc format (0x%08x) invalid.",
-			f->fmt.pix.pixelformat);
-		return -EINVAL;
-	}
-
-	if (f->fmt.pix.width == 0 || f->fmt.pix.height == 0) {
-		dev_err(csi_dev->dev, "width %d, height %d is too small.\n",
-			f->fmt.pix.width, f->fmt.pix.height);
-		return -EINVAL;
-	}
-
-	v4l2_fill_mbus_format(&mbus_fmt, pix, fmt->mbus_code);
-	ret = v4l2_subdev_call(sd, video, s_mbus_fmt, &mbus_fmt);
-	v4l2_fill_pix_format(pix, &mbus_fmt);
-
-	if (pix->field != V4L2_FIELD_INTERLACED)
-		pix->field = V4L2_FIELD_NONE;
-
-	pix->sizeimage = fmt->bpp * pix->height * pix->width;
-	pix->bytesperline = fmt->bpp * pix->width;
-
-	return ret;
+	return mx6s_negotiate_format(csi_dev, &f->fmt.pix, false, NULL);
 }
 
 /**
@@ -2090,8 +2110,8 @@ static int mx6s_vidioc_try_fmt_vid_cap(struct file *file, void *priv,
  * @priv: V4L2 core 传入的 file handle。
  * @f: 用户请求的采集格式。
  *
- * S_FMT 先复用 TRY_FMT 完成 sensor 协商，再把结果缓存到 csi_dev->pix/fmt，
- * 最后调用 mx6s_configure_csi() 写入 CSI 图像参数寄存器。
+ * S_FMT 调用 sensor 的 s_mbus_fmt 真正应用寄存器，再把协商结果缓存到
+ * csi_dev->pix/fmt，最后调用 mx6s_configure_csi() 写入 CSI 图像参数寄存器。
  *
  * Return: 成功返回 0；协商失败返回负 errno。
  */
@@ -2099,26 +2119,22 @@ static int mx6s_vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 				    struct v4l2_format *f)
 {
 	struct mx6s_csi_dev *csi_dev = video_drvdata(file);
+	struct mx6s_fmt *fmt;
 	int ret;
 
-	ret = mx6s_vidioc_try_fmt_vid_cap(file, csi_dev, f);
+	ret = mx6s_negotiate_format(csi_dev, &f->fmt.pix, true, &fmt);
 	if (ret < 0)
 		return ret;
 
-	csi_dev->fmt           = format_by_fourcc(f->fmt.pix.pixelformat);
-	csi_dev->mbus_code     = csi_dev->fmt->mbus_code;
-	csi_dev->pix.width     = f->fmt.pix.width;
-	csi_dev->pix.height    = f->fmt.pix.height;
-	csi_dev->pix.sizeimage = f->fmt.pix.sizeimage;
-	csi_dev->pix.field     = f->fmt.pix.field;
-	csi_dev->type          = f->type;
+	csi_dev->fmt = fmt;
+	csi_dev->mbus_code = fmt->mbus_code;
+	csi_dev->pix = f->fmt.pix;
+	csi_dev->bytesperline = f->fmt.pix.bytesperline;
+	csi_dev->type = f->type;
 	dev_dbg(csi_dev->dev, "set to pixelformat '%4.6s'\n",
-			(char *)&csi_dev->fmt->name);
+		(char *)&csi_dev->fmt->name);
 
-	/* Config csi */
-	mx6s_configure_csi(csi_dev);
-
-	return 0;
+	return mx6s_configure_csi(csi_dev);
 }
 
 /**
@@ -2357,7 +2373,7 @@ static int mx6s_vidioc_enum_framesizes(struct file *file, void *priv,
 	int ret;
 
 	fmt = format_by_fourcc(fsize->pixel_format);
-	if (fmt->pixelformat != fsize->pixel_format)
+	if (!fmt || fmt->pixelformat != fsize->pixel_format)
 		return -EINVAL;
 	fse.code = fmt->mbus_code;
 
@@ -2407,7 +2423,7 @@ static int mx6s_vidioc_enum_frameintervals(struct file *file, void *priv,
 	int ret;
 
 	fmt = format_by_fourcc(interval->pixel_format);
-	if (fmt->pixelformat != interval->pixel_format)
+	if (!fmt || fmt->pixelformat != interval->pixel_format)
 		return -EINVAL;
 	fie.code = fmt->mbus_code;
 
