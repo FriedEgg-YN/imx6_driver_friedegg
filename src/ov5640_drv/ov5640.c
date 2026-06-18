@@ -126,10 +126,10 @@ struct ov5640_datafmt {
 };
 
 struct reg_value {
-	u16 u16RegAddr;
-	u8 u8Val;
-	u8 u8Mask;
-	u32 u32Delay_ms;
+	u16 reg;
+	u8 val;
+	u8 mask;
+	u32 delay_ms;
 };
 
 enum ov5640_downsize_mode {
@@ -179,8 +179,7 @@ struct ov5640 {
 	enum ov5640_mode current_mode;
 	bool powered;
 	bool streaming;
-	bool power_ref;
-	bool on;
+	unsigned int power_users;
 	struct mutex lock;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *hflip;
@@ -870,9 +869,14 @@ static const struct ov5640_datafmt ov5640_colour_fmts[] = {
 	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
 };
 
+static struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov5640, subdev);
+}
+
 static struct ov5640 *to_ov5640(const struct i2c_client *client)
 {
-	return container_of(i2c_get_clientdata(client), struct ov5640, subdev);
+	return sd_to_ov5640(i2c_get_clientdata(client));
 }
 
 /* Find a data format by a pixel code in an array */
@@ -1087,8 +1091,7 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->current_mode = ov5640_mode_800_480;
 	sensor->powered = false;
 	sensor->streaming = false;
-	sensor->power_ref = false;
-	sensor->on = false;
+	sensor->power_users = 0;
 	sensor->prev_sysclk = 0;
 	sensor->prev_hts = 0;
 	sensor->ae_target = 52;
@@ -1180,7 +1183,6 @@ static int ov5640_power_on(struct ov5640 *sensor)
 
 	ov5640_power_down(sensor, false);
 	sensor->powered = true;
-	sensor->on = true;
 
 	return 0;
 }
@@ -1208,7 +1210,6 @@ static void ov5640_power_off(struct ov5640 *sensor)
 	clk_disable_unprepare(sensor->sensor_clk);
 	sensor->streaming = false;
 	sensor->powered = false;
-	sensor->on = false;
 }
 
 static int ov5640_runtime_resume(struct device *dev)
@@ -1555,8 +1556,7 @@ static int ov5640_init_controls(struct ov5640 *sensor)
 static int ov5640_get_register(struct v4l2_subdev *sd,
 					struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	int ret;
 	u8 val;
 
@@ -1590,8 +1590,7 @@ static int ov5640_get_register(struct v4l2_subdev *sd,
 static int ov5640_set_register(struct v4l2_subdev *sd,
 					const struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 
 	if (reg->reg & ~0xffff || reg->val & ~0xff)
 		return -EINVAL;
@@ -1918,32 +1917,32 @@ static int ov5640_turn_on_AE_AG(struct ov5640 *sensor, int enable)
 				 enable ? 0x00 : 0x03);
 }
 
-/* download ov5640 settings to sensor through i2c */
-static int ov5640_download_firmware(struct ov5640 *sensor,
-					    const struct reg_value *pModeSetting,
-					    s32 ArySize)
+/* Write one OV5640 register table through I2C. */
+static int ov5640_write_reg_table(struct ov5640 *sensor,
+					    const struct reg_value *regs,
+					    s32 num_regs)
 {
-	u32 Delay_ms;
-	u16 RegAddr;
-	u8 Mask;
-	u8 Val;
+	u32 delay_ms;
+	u16 reg;
+	u8 mask;
+	u8 val;
 	int i, retval = 0;
 
-	for (i = 0; i < ArySize; ++i, ++pModeSetting) {
-		Delay_ms = pModeSetting->u32Delay_ms;
-		RegAddr = pModeSetting->u16RegAddr;
-		Val = pModeSetting->u8Val;
-		Mask = pModeSetting->u8Mask;
+	for (i = 0; i < num_regs; ++i, ++regs) {
+		delay_ms = regs->delay_ms;
+		reg = regs->reg;
+		val = regs->val;
+		mask = regs->mask;
 
-		if (Mask)
-			retval = ov5640_mod_reg(sensor, RegAddr, Mask, Val);
+		if (mask)
+			retval = ov5640_mod_reg(sensor, reg, mask, val);
 		else
-			retval = ov5640_write_reg(sensor, RegAddr, Val);
+			retval = ov5640_write_reg(sensor, reg, val);
 		if (retval < 0)
 			return retval;
 
-		if (Delay_ms)
-			msleep(Delay_ms);
+		if (delay_ms)
+			msleep(delay_ms);
 	}
 
 	return retval;
@@ -1952,7 +1951,7 @@ static int ov5640_download_firmware(struct ov5640 *sensor,
 /**
  * ov5640_init_mode - initialize the sensor into the default VGA mode
  *
- * Soft-reset the OV5640, download the common sensor initialization table,
+ * Soft-reset the OV5640, write the common sensor initialization table,
  * then apply the default 30 fps VGA register table.  After the register
  * programming succeeds, configure drive strength, anti-banding, AE target,
  * and night mode state, then wait for several frames before exposing the
@@ -1963,22 +1962,22 @@ static int ov5640_download_firmware(struct ov5640 *sensor,
  */
 static int ov5640_init_mode(struct ov5640 *sensor)
 {
-	const struct reg_value *pModeSetting = NULL;
-	int ArySize = 0, retval = 0;
+	const struct reg_value *regs = NULL;
+	int num_regs = 0, retval = 0;
 
 	retval = ov5640_soft_reset(sensor);
 	if (retval < 0)
 		goto err;
 
-	pModeSetting = ov5640_global_init_setting;
-	ArySize = ARRAY_SIZE(ov5640_global_init_setting);
-	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
+	regs = ov5640_global_init_setting;
+	num_regs = ARRAY_SIZE(ov5640_global_init_setting);
+	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
 
-	pModeSetting = ov5640_init_setting_30fps_VGA;
-	ArySize = ARRAY_SIZE(ov5640_init_setting_30fps_VGA);
-	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
+	regs = ov5640_init_setting_30fps_VGA;
+	num_regs = ARRAY_SIZE(ov5640_init_setting_30fps_VGA);
+	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
 
@@ -2019,8 +2018,8 @@ static int ov5640_change_mode_direct(struct ov5640 *sensor,
 {
 	const struct ov5640_mode_info *mode_info;
 	const struct ov5640_mode_fps_info *fps_info;
-	const struct reg_value *pModeSetting = NULL;
-	s32 ArySize = 0;
+	const struct reg_value *regs = NULL;
+	s32 num_regs = 0;
 	int retval = 0;
 
 	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
@@ -2034,15 +2033,15 @@ static int ov5640_change_mode_direct(struct ov5640 *sensor,
 	if (!fps_info)
 		return -EINVAL;
 
-	pModeSetting = fps_info->regs;
-	ArySize = fps_info->num_regs;
+	regs = fps_info->regs;
+	num_regs = fps_info->num_regs;
 
 	/* set ov5640 to subsampling mode */
-	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
+	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
 
-	/* turn on AE AG for subsampling mode, in case the firmware didn't */
+	/* turn on AE AG for subsampling mode, in case the mode table did not */
 	retval = ov5640_turn_on_AE_AG(sensor, 1);
 	if (retval < 0)
 		goto err;
@@ -2096,8 +2095,8 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	int light_freq, cap_bandfilt, cap_maxband;
 	long cap_gain16_shutter;
 	u8 temp;
-	const struct reg_value *pModeSetting = NULL;
-	s32 ArySize = 0;
+	const struct reg_value *regs = NULL;
+	s32 num_regs = 0;
 	int retval = 0;
 
 	/* check if the input mode and frame rate is valid */
@@ -2110,8 +2109,8 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	if (!fps_info)
 		return -EINVAL;
 
-	pModeSetting = fps_info->regs;
-	ArySize = fps_info->num_regs;
+	regs = fps_info->regs;
+	num_regs = fps_info->num_regs;
 
 	/* read preview shutter */
 	prev_shutter = ov5640_get_shutter(sensor);
@@ -2140,7 +2139,7 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 		return retval;
 
 	/* Write capture setting */
-	retval = ov5640_download_firmware(sensor, pModeSetting, ArySize);
+	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
 
@@ -2277,50 +2276,39 @@ static int ov5640_change_mode(struct ov5640 *sensor,
 	return retval;
 }
 
-/*!
- * ov5640_s_power - V4L2 sensor interface handler for VIDIOC_S_POWER ioctl
- * @s: pointer to standard V4L2 device structure
- * @on: indicates power mode (on or off)
+/**
+ * ov5640_s_power - keep or release the host open power reference
+ * @sd: V4L2 sub-device that represents the OV5640 sensor.
+ * @on: Non-zero gets one runtime PM reference; zero releases one.
  *
- * Turns the power on or off, depending on the value of on and returns the
- * appropriate error code.
+ * The i.MX6 CSI host still uses .s_power from open()/close(). Keep that
+ * legacy contract, but express it as a counted runtime PM user instead of a
+ * direct hardware power toggle.
+ *
+ * Return: 0 on success, or a negative runtime PM error code.
  */
 static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	int ret;
 
 	if (on) {
-		mutex_lock(&sensor->lock);
-		if (sensor->power_ref) {
-			mutex_unlock(&sensor->lock);
-			return 0;
-		}
-		mutex_unlock(&sensor->lock);
-
 		ret = ov5640_runtime_get(sensor);
 		if (ret < 0)
 			return ret;
 
 		mutex_lock(&sensor->lock);
-		if (sensor->power_ref) {
-			mutex_unlock(&sensor->lock);
-			ov5640_runtime_put_autosuspend(sensor);
-			return 0;
-		}
-		sensor->power_ref = true;
+		sensor->power_users++;
 		mutex_unlock(&sensor->lock);
-
 		return 0;
 	}
 
 	mutex_lock(&sensor->lock);
-	if (!sensor->power_ref) {
+	if (!sensor->power_users) {
 		mutex_unlock(&sensor->lock);
 		return 0;
 	}
-	sensor->power_ref = false;
+	sensor->power_users--;
 	mutex_unlock(&sensor->lock);
 
 	ov5640_runtime_put_autosuspend(sensor);
@@ -2328,20 +2316,19 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 }
 
 /**
- * ov5640_g_parm - return the current capture stream parameters
+ * ov5640_s_stream - start or stop sensor pixel output
  * @sd: V4L2 sub-device that represents the OV5640 sensor.
- * @a: V4L2 stream parameter container to fill.
+ * @enable: Non-zero starts DVP output; zero stops it.
  *
- * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback copies the
- * cached capture capability, frame interval, and capture mode from the sensor
- * state into @a.
+ * Stream-on keeps a runtime PM reference while OV5640 is actively producing
+ * frames. Stream-off writes the sensor stream control register and releases
+ * that reference when a stream was actually active.
  *
- * Return: 0 on success, or -EINVAL if @a->type is not supported.
+ * Return: 0 on success, or a negative error code.
  */
 static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	bool started_streaming;
 	bool was_streaming;
 	int ret;
@@ -2390,8 +2377,7 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 
 static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	struct v4l2_captureparm *cparm = &a->parm.capture;
 	int ret = 0;
 
@@ -2440,8 +2426,7 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
  */
 static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	struct v4l2_captureparm *cparm = &a->parm.capture;
 	struct v4l2_fract *timeperframe = &cparm->timeperframe;
 	const struct ov5640_mode_info *mode_info;
@@ -2561,8 +2546,7 @@ unlock:
 static int ov5640_try_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_mbus_framefmt *mf)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	const struct ov5640_datafmt *fmt = ov5640_find_datafmt(mf->code);
 	const struct ov5640_mode_info *mode_info;
 
@@ -2598,8 +2582,7 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
 static int ov5640_s_fmt(struct v4l2_subdev *sd,
 			struct v4l2_mbus_framefmt *mf)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 	const struct ov5640_datafmt *fmt;
 	const struct ov5640_mode_info *mode_info;
 	int retval;
@@ -2665,8 +2648,7 @@ out:
 static int ov5640_g_fmt(struct v4l2_subdev *sd,
 			struct v4l2_mbus_framefmt *mf)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = sd_to_ov5640(sd);
 
 	const struct ov5640_datafmt *fmt = sensor->fmt ? sensor->fmt :
 					   &ov5640_colour_fmts[0];
@@ -2807,7 +2789,6 @@ static int init_device(struct ov5640 *sensor)
 	const struct ov5640_mode_info *mode_info;
 	int ret;
 
-	sensor->on = true;
 
 	/* mclk */
 	tgt_xclk = sensor->mclk;
@@ -2902,6 +2883,7 @@ static int ov5640_probe(struct i2c_client *client,
 	struct device *dev = &client->dev;
 	struct ov5640 *sensor;
 	int retval;
+	u32 mclk_source;
 	u8 chip_id_high, chip_id_low;
 
 	/* ov5640 pinctrl */
@@ -2919,28 +2901,18 @@ static int ov5640_probe(struct i2c_client *client,
 	sensor->dev = dev;
 	sensor->i2c_client = client;
 
-	sensor->pwdn_gpio = devm_gpiod_get_optional(dev, "pwn",
-							 GPIOD_OUT_HIGH);
+	sensor->pwdn_gpio = devm_gpiod_get(dev, "pwn", GPIOD_OUT_HIGH);
 	if (IS_ERR(sensor->pwdn_gpio)) {
 		retval = PTR_ERR(sensor->pwdn_gpio);
 		dev_err(dev, "failed to get sensor pwdn GPIO: %d\n", retval);
 		return retval;
 	}
-	if (!sensor->pwdn_gpio) {
-		dev_err(dev, "no sensor pwdn pin available\n");
-		return -ENODEV;
-	}
 
-	sensor->reset_gpio = devm_gpiod_get_optional(dev, "rst",
-							  GPIOD_OUT_LOW);
+	sensor->reset_gpio = devm_gpiod_get(dev, "rst", GPIOD_OUT_LOW);
 	if (IS_ERR(sensor->reset_gpio)) {
 		retval = PTR_ERR(sensor->reset_gpio);
 		dev_err(dev, "failed to get sensor reset GPIO: %d\n", retval);
 		return retval;
-	}
-	if (!sensor->reset_gpio) {
-		dev_err(dev, "no sensor reset pin available\n");
-		return -ENODEV;
 	}
 	sensor->regmap = devm_regmap_init_i2c(client, &ov5640_regmap_config);
 	if (IS_ERR(sensor->regmap)) {
@@ -2963,11 +2935,16 @@ static int ov5640_probe(struct i2c_client *client,
 	}
 
 	retval = of_property_read_u32(dev->of_node, "mclk_source",
-					(u32 *) &(sensor->mclk_source));
+					&mclk_source);
 	if (retval) {
 		dev_err(dev, "mclk_source invalid\n");
 		return retval;
 	}
+	if (mclk_source > 0xff) {
+		dev_err(dev, "mclk_source out of range: %u\n", mclk_source);
+		return -EINVAL;
+	}
+	sensor->mclk_source = mclk_source;
 
 	retval = of_property_read_u32(dev->of_node, "csi_id",
 					&(sensor->csi));
@@ -3065,7 +3042,7 @@ static int ov5640_remove(struct i2c_client *client)
 	v4l2_ctrl_handler_free(&sensor->ctrls);
 
 	mutex_lock(&sensor->lock);
-	sensor->power_ref = false;
+	sensor->power_users = 0;
 	ov5640_power_off(sensor);
 	if (!sensor->powered)
 		ov5640_power_down(sensor, true);
