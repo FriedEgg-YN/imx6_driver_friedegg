@@ -907,7 +907,7 @@ static void csi_set_imagpara(struct mx6s_csi_dev *csi,
 /* Videobuf2 queue operations. */
 /**
  * mx6s_videobuf_setup() - 配置 VB2 buffer 数量、平面大小和分配上下文
- * @vq: VB2 capture 队列，open() 中的 q->drv_priv 指向 CSI 私有数据。
+ * @vq: VB2 capture 队列，open() 中设定的 q->drv_priv 指向 CSI 私有数据。
  * @fmt: VIDIOC_CREATE_BUFS 传入的目标格式；为 NULL 时表示 REQBUFS 路径。
  * @count: 输入为用户请求的 buffer 数，输出为驱动允许的 buffer 数。
  * @num_planes: 输出为 plane 数。本驱动所有格式都是单 plane。
@@ -955,6 +955,7 @@ static int mx6s_videobuf_setup(struct vb2_queue *vq,
 	pr_debug("size=%d\n", sizes[0]);
 	if (0 == *count)
 		*count = 32;
+	/* VB2 core 中声明 num_planes=0 局部变量后传递到此函数，保证第一次根据MEM裁剪count，后续不再根据此逻辑改动*/
 	if (!*num_planes &&
 	    sizes[0] * *count > MAX_VIDEO_MEM * 1024 * 1024)
 		*count = (MAX_VIDEO_MEM * 1024 * 1024) / sizes[0];
@@ -991,7 +992,6 @@ static int mx6s_videobuf_prepare(struct vb2_buffer *vb)
 		       0xaa, vb2_get_plane_payload(vb, 0));
 #endif
 
-	/* vb2_set_plane_payload() 设置 DQBUF 时用户可见的 bytesused。 */
 	vb2_set_plane_payload(vb, 0, csi_dev->pix.sizeimage);
 	if (vb2_plane_vaddr(vb, 0) &&
 	    vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0)) {
@@ -1611,9 +1611,6 @@ static irqreturn_t mx6s_csi_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/*
- * File operations for the device
- */
 /**
  * mx6s_csi_open - 打开 V4L2 视频采集节点
  * @file: 本次 open("/dev/videoX") 对应的文件实例。
@@ -2601,46 +2598,58 @@ static int mx6s_csi_mux_sel(struct mx6s_csi_dev *csi_dev)
  */
 static int mx6sx_register_subdevs(struct mx6s_csi_dev *csi_dev)
 {
-	/* parent 指向 CSI 设备树节点。 */
-	struct device_node *parent = csi_dev->dev->of_node;
-	struct device_node *node, *port, *rem;
+	/* csi_node 指向 CSI 设备树节点。 */
+	struct device_node *csi_node = csi_dev->dev->of_node;
+	struct device_node *csi_port;
+	struct device_node *csi_endpoint;
+	struct device_node *sensor_node;
+	bool found_sensor = false;
 	int ret;
 
+	if (!csi_node)
+		return -ENODEV;
+
 	/* for_each_available_child_of_node() 只遍历 status 可用的子节点。 */
-	for_each_available_child_of_node(parent, node) {
+	for_each_available_child_of_node(csi_node, csi_port) {
 		/* of_node_cmp() 在节点名相等时返回 0。 */
-		if (of_node_cmp(node->name, "port"))
+		if (of_node_cmp(csi_port->name, "port"))
 			continue;
 
 		/* The csi node can have only port subnode. */
-		/* 获取 port 节点下的 endpoint 子节点。 */
-		port = of_get_next_child(node, NULL);
-		if (!port)
+		csi_endpoint = of_get_next_child(csi_port, NULL);
+		if (!csi_endpoint)
 			continue;
 		/*
-		 * 沿 remote-endpoint 找到 sensor 节点。返回的节点已经增加引用计数，
+		 * 沿 remote-endpoint 找到 sensor 设备节点。返回的节点已经增加引用计数，
 		 * 使用完后必须通过 of_node_put() 释放。
 		 */
-		rem = of_graph_get_remote_port_parent(port);
-		of_node_put(port);
-		if (rem == NULL) {
+		sensor_node = of_graph_get_remote_port_parent(csi_endpoint);
+		if (sensor_node == NULL) {
 			v4l2_info(&csi_dev->v4l2_dev,
 						"Remote device at %s not found\n",
-						port->full_name);
-			return -1;
+						csi_endpoint->full_name);
+			of_node_put(csi_endpoint);
+			of_node_put(csi_port);
+			return -ENODEV;
 		}
+		of_node_put(csi_endpoint);
 
 		/*
 		 * 等待远端 sensor subdev。V4L2_ASYNC_MATCH_OF 表示 async core
 		 * 会比较 dev->of_node 和 match.of.node。
 		 */
 		csi_dev->asd.match_type = V4L2_ASYNC_MATCH_OF;
-		csi_dev->asd.match.of.node = rem;
+		csi_dev->asd.match.of.node = sensor_node;
 		csi_dev->async_subdevs[0] = &csi_dev->asd;
 
-		of_node_put(rem);
+		of_node_put(sensor_node);
+		of_node_put(csi_port);
+		found_sensor = true;
 		break;
 	}
+
+	if (!found_sensor)
+		return -ENODEV;
 
 	/*
 	 * 注册一个期望绑定的 subdev。当 OV5640 subdev probe 完成，且 OF node
@@ -2871,48 +2880,28 @@ static int mx6s_csi_remove(struct platform_device *pdev)
 	return 0;
 }
 
-/**
- * mx6s_csi_runtime_suspend() - runtime PM suspend 回调
- * @dev: CSI 设备。
- *
- * 当前外置学习驱动只记录调试信息，实际时钟关闭在 close 路径完成。
- *
- * Return: 成功返回 0。
- */
 static int mx6s_csi_runtime_suspend(struct device *dev)
 {
 	dev_dbg(dev, "csi v4l2 busfreq high release.\n");
 	return 0;
 }
 
-/**
- * mx6s_csi_runtime_resume() - runtime PM resume 回调
- * @dev: CSI 设备。
- *
- * 当前外置学习驱动只记录调试信息，实际时钟打开在 open 路径完成。
- *
- * Return: 成功返回 0。
- */
 static int mx6s_csi_runtime_resume(struct device *dev)
 {
 	dev_dbg(dev, "csi v4l2 busfreq high request.\n");
 	return 0;
 }
 
-/* SET_RUNTIME_PM_OPS() 把 runtime suspend/resume 回调填入 dev_pm_ops。 */
 static const struct dev_pm_ops mx6s_csi_pm_ops = {
 	SET_RUNTIME_PM_OPS(mx6s_csi_runtime_suspend, mx6s_csi_runtime_resume, NULL)
 };
 
-/* of_device_id 表用于 platform bus 按 compatible 匹配设备树节点。 */
 static const struct of_device_id mx6s_csi_dt_ids[] = {
 	{ .compatible = "fsl,imx6s-csi", },
 	{ /* sentinel */ }
 };
-/* MODULE_DEVICE_TABLE() 导出 OF modalias，便于模块自动加载。 */
 MODULE_DEVICE_TABLE(of, mx6s_csi_dt_ids);
 
-/* platform_driver 把 probe/remove 与 OF match table 交给 platform bus。 */
 static struct platform_driver mx6s_csi_driver = {
 	.driver		= {
 		.name	= MX6S_CAM_DRV_NAME,
@@ -2923,7 +2912,6 @@ static struct platform_driver mx6s_csi_driver = {
 	.remove	= mx6s_csi_remove,
 };
 
-/* module_platform_driver() 生成模块 init/exit，注册/注销 platform_driver。 */
 module_platform_driver(mx6s_csi_driver);
 
 MODULE_DESCRIPTION("i.MX6Sx SoC Camera Host driver");

@@ -95,19 +95,19 @@
 #define OV5640_STREAM_OFF               0x0f
 #define OV5640_AUTOSUSPEND_DELAY_MS     1000
 
-enum ov5640_mode {
-	ov5640_mode_MIN = 0,
-	ov5640_mode_VGA_640_480 = 0,
-	ov5640_mode_QVGA_320_240 = 1,
-	ov5640_mode_NTSC_720_480 = 2,
-	ov5640_mode_PAL_720_576 = 3,
-	ov5640_mode_720P_1280_720 = 4,
-	ov5640_mode_1080P_1920_1080 = 5,
-	ov5640_mode_QSXGA_2592_1944 = 6,
-	ov5640_mode_QCIF_176_144 = 7,
-	ov5640_mode_XGA_1024_768 = 8,
-	ov5640_mode_800_480 = 9,
-	ov5640_mode_MAX = 9
+enum ov5640_frame_size {
+	ov5640_frame_size_MIN = 0,
+	ov5640_frame_size_VGA_640_480 = 0,
+	ov5640_frame_size_QVGA_320_240 = 1,
+	ov5640_frame_size_NTSC_720_480 = 2,
+	ov5640_frame_size_PAL_720_576 = 3,
+	ov5640_frame_size_720P_1280_720 = 4,
+	ov5640_frame_size_1080P_1920_1080 = 5,
+	ov5640_frame_size_QSXGA_2592_1944 = 6,
+	ov5640_frame_size_QCIF_176_144 = 7,
+	ov5640_frame_size_XGA_1024_768 = 8,
+	ov5640_frame_size_800_480 = 9,
+	ov5640_frame_size_MAX = 9
 };
 
 enum ov5640_frame_rate {
@@ -121,8 +121,8 @@ static int ov5640_framerates[] = {
 };
 
 struct ov5640_datafmt {
-	u32	code;
-	enum v4l2_colorspace		colorspace;
+	u32 code; /* MEDIA_BUS_FMT_*，描述 subdev 到 host 的总线像素编码 */
+	enum v4l2_colorspace colorspace; /* V4L2_COLORSPACE_*，描述像素值的色彩空间 */
 };
 
 struct reg_value {
@@ -144,14 +144,14 @@ struct ov5640_rect {
 	u32 height;
 };
 
-struct ov5640_mode_fps_info {
+struct ov5640_mode_reg_table {
 	enum ov5640_frame_rate frame_rate;
 	const struct reg_value *regs;
 	u32 num_regs;
 };
 
 struct ov5640_mode_info {
-	enum ov5640_mode mode;
+	enum ov5640_frame_size frame_size;
 	u32 width;
 	u32 height;
 	enum ov5640_downsize_mode downsize;
@@ -161,56 +161,58 @@ struct ov5640_mode_info {
 	u32 vts_def;
 	u32 pixel_rate;
 	enum ov5640_frame_rate default_fps;
-	const struct ov5640_mode_fps_info *fps;
-	u32 num_fps;
+	const struct ov5640_mode_reg_table *reg_tables;
+	u32 num_reg_tables;
+};
+
+struct ov5640_state {
+	struct v4l2_pix_format pix; /* 当前对 host 暴露的像素格式缓存 */
+	const struct ov5640_datafmt *fmt; /* 当前 media-bus 数据格式 */
+	struct v4l2_captureparm streamcap; /* 当前帧率/采集参数缓存 */
+	enum ov5640_frame_rate frame_rate; /* 当前离散帧率枚举 */
+	enum ov5640_frame_size frame_size; /* 当前传感器输出尺寸 */
+	bool powered; /* 时钟/GPIO 已进入可访问硬件状态 */
+	bool streaming; /* 传感器像素流是否正在输出 */
+	unsigned int power_users; /* host open/close 持有的 PM 引用数 */
+	int prev_sysclk; /* 预览模式 sysclk，用于曝光换算 */
+	int prev_hts; /* 预览模式 HTS，用于曝光换算 */
+	int ae_target; /* 自动曝光目标亮度 */
+	int ae_high; /* 自动曝光稳定上限 */
+	int ae_low; /* 自动曝光稳定下限 */
+	int night_mode; /* 夜景模式缓存状态 */
+
+	/* Legacy placeholders kept until matching image-processing controls exist. */
+	int brightness; /* 预留亮度控制缓存 */
+	int hue; /* 预留色调控制缓存 */
+	int contrast; /* 预留对比度控制缓存 */
+	int saturation; /* 预留饱和度控制缓存 */
+	int red; /* 预留红色增益缓存 */
+	int green; /* 预留绿色增益缓存 */
+	int blue; /* 预留蓝色增益缓存 */
+	int ae_mode; /* 预留自动曝光模式缓存 */
 };
 
 struct ov5640 {
-	struct v4l2_subdev		subdev;
-	struct device *dev;
-	struct i2c_client *i2c_client;
-	struct regmap *regmap;
-	struct gpio_desc *pwdn_gpio;
-	struct gpio_desc *reset_gpio;
-	struct v4l2_pix_format pix;
-	const struct ov5640_datafmt	*fmt;
-	struct v4l2_captureparm streamcap;
-	enum ov5640_frame_rate current_fr;
-	enum ov5640_mode current_mode;
-	bool powered;
-	bool streaming;
-	unsigned int power_users;
-	struct mutex lock;
-	struct v4l2_ctrl_handler ctrls;
-	struct v4l2_ctrl *hflip;
-	struct v4l2_ctrl *vflip;
-	struct v4l2_ctrl *power_line_frequency;
-	struct regulator *io_regulator;
-	struct regulator *core_regulator;
-	struct regulator *analog_regulator;
-	int prev_sysclk;
-	int prev_hts;
-	int ae_target;
-	int ae_high;
-	int ae_low;
-	int night_mode;
-
-	/* Legacy placeholders kept until matching image-processing controls exist. */
-	int brightness;
-	int hue;
-	int contrast;
-	int saturation;
-	int red;
-	int green;
-	int blue;
-	int ae_mode;
-
-	u32 mclk;
-	u8 mclk_source;
-	struct clk *sensor_clk;
-	int csi;
-
-	void (*io_init)(struct ov5640 *sensor);
+	struct v4l2_subdev subdev; /* V4L2 subdev 内嵌对象 */
+	struct device *dev; /* devm、日志和 runtime PM 所属设备 */
+	struct i2c_client *i2c_client; /* 绑定到传感器的 I2C client */
+	struct regmap *regmap; /* 16-bit 地址、8-bit 数据寄存器映射 */
+	struct gpio_desc *pwdn_gpio; /* PWDN 管脚，控制传感器 power-down */
+	struct gpio_desc *reset_gpio; /* RESET 管脚，控制传感器复位 */
+	struct mutex lock; /* 保护状态缓存和寄存器编程 */
+	struct ov5640_state state; /* V4L2、PM、曝光和遗留控制缓存状态 */
+	struct v4l2_ctrl_handler ctrls; /* V4L2 控制集合 */
+	struct v4l2_ctrl *hflip; /* 水平翻转控制 */
+	struct v4l2_ctrl *vflip; /* 垂直翻转控制 */
+	struct v4l2_ctrl *power_line_frequency; /* 工频抗闪控制 */
+	struct regulator *io_regulator; /* DOVDD，可选 IO 电源 */
+	struct regulator *core_regulator; /* DVDD，可选内核电源 */
+	struct regulator *analog_regulator; /* AVDD，可选模拟电源 */
+	u32 mclk; /* 外部输入时钟频率 */
+	u8 mclk_source; /* legacy DT 时钟源选择 */
+	struct clk *sensor_clk; /* CSI MCLK 时钟句柄 */
+	int csi; /* legacy CSI 控制器编号 */
+	void (*io_init)(struct ov5640 *sensor); /* 板级复位/上电时序回调 */
 };
 
 static const struct reg_value ov5640_global_init_setting[] = {
@@ -634,73 +636,73 @@ static const struct reg_value ov5640_setting_30fps_800_480[] = {
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct ov5640_mode_fps_info ov5640_vga_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_vga_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_VGA_640_480,
 	ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
 	{ov5640_30_fps, ov5640_setting_30fps_VGA_640_480,
 	ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_qvga_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_qvga_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_QVGA_320_240,
 	ARRAY_SIZE(ov5640_setting_15fps_QVGA_320_240)},
 	{ov5640_30_fps, ov5640_setting_30fps_QVGA_320_240,
 	ARRAY_SIZE(ov5640_setting_30fps_QVGA_320_240)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_ntsc_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_ntsc_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_NTSC_720_480,
 	ARRAY_SIZE(ov5640_setting_15fps_NTSC_720_480)},
 	{ov5640_30_fps, ov5640_setting_30fps_NTSC_720_480,
 	ARRAY_SIZE(ov5640_setting_30fps_NTSC_720_480)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_pal_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_pal_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_PAL_720_576,
 	ARRAY_SIZE(ov5640_setting_15fps_PAL_720_576)},
 	{ov5640_30_fps, ov5640_setting_30fps_PAL_720_576,
 	ARRAY_SIZE(ov5640_setting_30fps_PAL_720_576)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_720p_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_720p_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_720P_1280_720,
 	ARRAY_SIZE(ov5640_setting_15fps_720P_1280_720)},
 	{ov5640_30_fps, ov5640_setting_30fps_720P_1280_720,
 	ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_1080p_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_1080p_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_1080P_1920_1080,
 	ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_qsxga_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_qsxga_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_QSXGA_2592_1944,
 	ARRAY_SIZE(ov5640_setting_15fps_QSXGA_2592_1944)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_qcif_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_qcif_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_QCIF_176_144,
 	ARRAY_SIZE(ov5640_setting_15fps_QCIF_176_144)},
 	{ov5640_30_fps, ov5640_setting_30fps_QCIF_176_144,
 	ARRAY_SIZE(ov5640_setting_30fps_QCIF_176_144)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_xga_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_xga_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_XGA_1024_768,
 	ARRAY_SIZE(ov5640_setting_15fps_XGA_1024_768)},
 	{ov5640_30_fps, ov5640_setting_30fps_XGA_1024_768,
 	ARRAY_SIZE(ov5640_setting_30fps_XGA_1024_768)},
 };
 
-static const struct ov5640_mode_fps_info ov5640_800x480_fps[] = {
+static const struct ov5640_mode_reg_table ov5640_800x480_reg_tables[] = {
 	{ov5640_30_fps, ov5640_setting_30fps_800_480,
 	ARRAY_SIZE(ov5640_setting_30fps_800_480)},
 };
 
 static const struct ov5640_mode_info ov5640_modes[] = {
 	{
-		.mode = ov5640_mode_VGA_640_480,
+		.frame_size = ov5640_frame_size_VGA_640_480,
 		.width = 640,
 		.height = 480,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -709,10 +711,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_vga_fps,
-		.num_fps = ARRAY_SIZE(ov5640_vga_fps),
+		.reg_tables = ov5640_vga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_vga_reg_tables),
 	}, {
-		.mode = ov5640_mode_QVGA_320_240,
+		.frame_size = ov5640_frame_size_QVGA_320_240,
 		.width = 320,
 		.height = 240,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -721,10 +723,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_qvga_fps,
-		.num_fps = ARRAY_SIZE(ov5640_qvga_fps),
+		.reg_tables = ov5640_qvga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_qvga_reg_tables),
 	}, {
-		.mode = ov5640_mode_NTSC_720_480,
+		.frame_size = ov5640_frame_size_NTSC_720_480,
 		.width = 720,
 		.height = 480,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -733,10 +735,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_ntsc_fps,
-		.num_fps = ARRAY_SIZE(ov5640_ntsc_fps),
+		.reg_tables = ov5640_ntsc_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_ntsc_reg_tables),
 	}, {
-		.mode = ov5640_mode_PAL_720_576,
+		.frame_size = ov5640_frame_size_PAL_720_576,
 		.width = 720,
 		.height = 576,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -745,10 +747,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_pal_fps,
-		.num_fps = ARRAY_SIZE(ov5640_pal_fps),
+		.reg_tables = ov5640_pal_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_pal_reg_tables),
 	}, {
-		.mode = ov5640_mode_720P_1280_720,
+		.frame_size = ov5640_frame_size_720P_1280_720,
 		.width = 1280,
 		.height = 720,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -757,10 +759,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0764,
 		.vts_def = 0x02e4,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_720p_fps,
-		.num_fps = ARRAY_SIZE(ov5640_720p_fps),
+		.reg_tables = ov5640_720p_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_720p_reg_tables),
 	}, {
-		.mode = ov5640_mode_1080P_1920_1080,
+		.frame_size = ov5640_frame_size_1080P_1920_1080,
 		.width = 1920,
 		.height = 1080,
 		.downsize = OV5640_DOWNSIZE_SCALING,
@@ -769,10 +771,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0b1c,
 		.vts_def = 0x07b0,
 		.default_fps = ov5640_15_fps,
-		.fps = ov5640_1080p_fps,
-		.num_fps = ARRAY_SIZE(ov5640_1080p_fps),
+		.reg_tables = ov5640_1080p_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_1080p_reg_tables),
 	}, {
-		.mode = ov5640_mode_QSXGA_2592_1944,
+		.frame_size = ov5640_frame_size_QSXGA_2592_1944,
 		.width = 2592,
 		.height = 1944,
 		.downsize = OV5640_DOWNSIZE_SCALING,
@@ -781,10 +783,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0b1c,
 		.vts_def = 0x07b0,
 		.default_fps = ov5640_15_fps,
-		.fps = ov5640_qsxga_fps,
-		.num_fps = ARRAY_SIZE(ov5640_qsxga_fps),
+		.reg_tables = ov5640_qsxga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_qsxga_reg_tables),
 	}, {
-		.mode = ov5640_mode_QCIF_176_144,
+		.frame_size = ov5640_frame_size_QCIF_176_144,
 		.width = 176,
 		.height = 144,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -793,10 +795,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_qcif_fps,
-		.num_fps = ARRAY_SIZE(ov5640_qcif_fps),
+		.reg_tables = ov5640_qcif_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_qcif_reg_tables),
 	}, {
-		.mode = ov5640_mode_XGA_1024_768,
+		.frame_size = ov5640_frame_size_XGA_1024_768,
 		.width = 1024,
 		.height = 768,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -805,10 +807,10 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_xga_fps,
-		.num_fps = ARRAY_SIZE(ov5640_xga_fps),
+		.reg_tables = ov5640_xga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_xga_reg_tables),
 	}, {
-		.mode = ov5640_mode_800_480,
+		.frame_size = ov5640_frame_size_800_480,
 		.width = 800,
 		.height = 480,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
@@ -817,8 +819,8 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.fps = ov5640_800x480_fps,
-		.num_fps = ARRAY_SIZE(ov5640_800x480_fps),
+		.reg_tables = ov5640_800x480_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_800x480_reg_tables),
 	},
 };
 
@@ -828,505 +830,6 @@ static const struct regmap_config ov5640_regmap_config = {
 	.max_register = 0xffff,
 	.cache_type = REGCACHE_NONE,
 };
-
-static int ov5640_probe(struct i2c_client *adapter,
-				const struct i2c_device_id *device_id);
-static int ov5640_remove(struct i2c_client *client);
-static int ov5640_runtime_suspend(struct device *dev);
-static int ov5640_runtime_resume(struct device *dev);
-
-static int ov5640_read_reg(struct ov5640 *sensor, u16 reg, u8 *val);
-static int ov5640_write_reg(struct ov5640 *sensor, u16 reg, u8 val);
-static int init_device(struct ov5640 *sensor);
-static int ov5640_read_reg16(struct ov5640 *sensor, u16 reg, u16 *val);
-static int ov5640_write_reg16(struct ov5640 *sensor, u16 reg, u16 val);
-static int ov5640_write_reg16_low_first(struct ov5640 *sensor, u16 reg, u16 val);
-static int ov5640_mod_reg(struct ov5640 *sensor, u16 reg, u8 mask, u8 val);
-
-static const struct dev_pm_ops ov5640_pm_ops = {
-	SET_RUNTIME_PM_OPS(ov5640_runtime_suspend, ov5640_runtime_resume, NULL)
-};
-
-static const struct i2c_device_id ov5640_id[] = {
-	{"ov5640", 0},
-	{},
-};
-
-MODULE_DEVICE_TABLE(i2c, ov5640_id);
-
-static struct i2c_driver ov5640_i2c_driver = {
-	.driver = {
-		  .owner = THIS_MODULE,
-		  .name  = "ov5640",
-		  .pm = &ov5640_pm_ops,
-		  },
-	.probe  = ov5640_probe,
-	.remove = ov5640_remove,
-	.id_table = ov5640_id,
-};
-
-static const struct ov5640_datafmt ov5640_colour_fmts[] = {
-	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
-};
-
-static struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
-{
-	return container_of(sd, struct ov5640, subdev);
-}
-
-static struct ov5640 *to_ov5640(const struct i2c_client *client)
-{
-	return sd_to_ov5640(i2c_get_clientdata(client));
-}
-
-/* Find a data format by a pixel code in an array */
-static const struct ov5640_datafmt
-			*ov5640_find_datafmt(u32 code)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_colour_fmts); i++)
-		if (ov5640_colour_fmts[i].code == code)
-			return ov5640_colour_fmts + i;
-
-	return NULL;
-}
-
-static bool ov5640_mode_info_valid(const struct ov5640_mode_info *mode_info)
-{
-	return mode_info && mode_info->width && mode_info->height &&
-	       mode_info->fps && mode_info->num_fps;
-}
-
-static const struct ov5640_mode_info *
-ov5640_get_mode_info(enum ov5640_mode mode)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
-		if (ov5640_modes[i].mode == mode)
-			return &ov5640_modes[i];
-	}
-
-	return NULL;
-}
-
-static bool ov5640_mode_valid(enum ov5640_mode mode)
-{
-	return ov5640_mode_info_valid(ov5640_get_mode_info(mode));
-}
-
-static const struct ov5640_mode_fps_info *
-ov5640_get_mode_fps_info(const struct ov5640_mode_info *mode_info,
-				 enum ov5640_frame_rate frame_rate)
-{
-	int i;
-
-	if (!ov5640_mode_info_valid(mode_info))
-		return NULL;
-
-	for (i = 0; i < mode_info->num_fps; i++) {
-		if (mode_info->fps[i].frame_rate == frame_rate &&
-		    mode_info->fps[i].regs && mode_info->fps[i].num_regs)
-			return &mode_info->fps[i];
-	}
-
-	return NULL;
-}
-
-static u32 ov5640_abs_diff(u32 a, u32 b)
-{
-	return a > b ? a - b : b - a;
-}
-
-static const struct ov5640_mode_info *
-ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 height)
-{
-	const struct ov5640_mode_info *best = NULL;
-	u32 best_distance = ~0U;
-	int i;
-
-	if (frame_rate < ov5640_15_fps || frame_rate > ov5640_30_fps)
-		frame_rate = ov5640_30_fps;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
-		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
-		u32 distance;
-
-		if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
-			continue;
-
-		distance = ov5640_abs_diff(mode_info->width, width) +
-			   ov5640_abs_diff(mode_info->height, height);
-		if (!best || distance < best_distance) {
-			best = mode_info;
-			best_distance = distance;
-		}
-	}
-
-	return best;
-}
-
-static const struct ov5640_mode_info *
-ov5640_find_mode_by_size(enum ov5640_frame_rate frame_rate, u32 width, u32 height)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
-		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
-
-		if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
-			continue;
-
-		if (mode_info->width == width && mode_info->height == height)
-			return mode_info;
-	}
-
-	return NULL;
-}
-
-static const struct ov5640_mode_info *
-ov5640_find_mode(u32 width, u32 height, bool nearest)
-{
-	const struct ov5640_mode_info *best = NULL;
-	u32 best_distance = ~0U;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
-		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
-		u32 distance;
-
-		if (!ov5640_mode_info_valid(mode_info))
-			continue;
-
-		if (mode_info->width == width && mode_info->height == height)
-			return mode_info;
-
-		if (!nearest)
-			continue;
-
-		distance = ov5640_abs_diff(mode_info->width, width) +
-			   ov5640_abs_diff(mode_info->height, height);
-		if (!best || distance < best_distance) {
-			best = mode_info;
-			best_distance = distance;
-		}
-	}
-
-	return best;
-}
-
-static bool ov5640_mode_supports_fps(enum ov5640_mode mode,
-				     enum ov5640_frame_rate frame_rate)
-{
-	return ov5640_get_mode_fps_info(ov5640_get_mode_info(mode),
-				       frame_rate) != NULL;
-}
-
-static int ov5640_enum_frame_rate_for_mode(enum ov5640_mode mode,
-					   unsigned int index,
-					   enum ov5640_frame_rate *frame_rate)
-{
-	int i;
-	unsigned int count = 0;
-
-	if (!frame_rate || !ov5640_mode_valid(mode))
-		return -EINVAL;
-
-	for (i = ov5640_15_fps; i <= ov5640_30_fps; i++) {
-		if (!ov5640_mode_supports_fps(mode, i))
-			continue;
-
-		if (count == index) {
-			*frame_rate = i;
-			return 0;
-		}
-
-		count++;
-	}
-
-	return -EINVAL;
-}
-
-static u32 ov5640_pixelformat_from_code(u32 code)
-{
-	switch (code) {
-	case MEDIA_BUS_FMT_RGB565_2X8_LE:
-		return V4L2_PIX_FMT_RGB565;
-	default:
-		return 0;
-	}
-}
-
-static int ov5640_apply_format(struct ov5640 *sensor, const struct ov5640_datafmt *fmt)
-{
-	int ret;
-
-	if (!fmt)
-		return -EINVAL;
-
-	switch (fmt->code) {
-	case MEDIA_BUS_FMT_RGB565_2X8_LE:
-		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
-					OV5640_FORMAT_MUX_RGB);
-		if (ret < 0)
-			return ret;
-
-		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
-					OV5640_FORMAT_CTRL_RGB565);
-	default:
-		return -EINVAL;
-	}
-}
-
-static void ov5640_init_default_state(struct ov5640 *sensor)
-{
-	const struct ov5640_mode_info *mode_info =
-		ov5640_get_mode_info(ov5640_mode_800_480);
-
-	mutex_init(&sensor->lock);
-
-	sensor->fmt = &ov5640_colour_fmts[0];
-	sensor->current_fr = ov5640_30_fps;
-	sensor->current_mode = ov5640_mode_800_480;
-	sensor->powered = false;
-	sensor->streaming = false;
-	sensor->power_users = 0;
-	sensor->prev_sysclk = 0;
-	sensor->prev_hts = 0;
-	sensor->ae_target = 52;
-	sensor->ae_high = 0;
-	sensor->ae_low = 0;
-	sensor->night_mode = 0;
-
-	sensor->pix.pixelformat = V4L2_PIX_FMT_RGB565;
-	sensor->pix.width = mode_info->width;
-	sensor->pix.height = mode_info->height;
-	sensor->pix.field = V4L2_FIELD_NONE;
-	sensor->pix.colorspace = sensor->fmt->colorspace;
-
-	sensor->streamcap.capability = V4L2_MODE_HIGHQUALITY |
-					V4L2_CAP_TIMEPERFRAME;
-	sensor->streamcap.capturemode = V4L2_CAP_TIMEPERFRAME;
-	sensor->streamcap.timeperframe.denominator = DEFAULT_FPS;
-	sensor->streamcap.timeperframe.numerator = 1;
-}
-
-static inline void ov5640_set_power_down(struct ov5640 *sensor, bool enable)
-{
-	gpiod_set_value_cansleep(sensor->pwdn_gpio, enable);
-}
-
-static inline void ov5640_power_down(struct ov5640 *sensor, bool enable)
-{
-	ov5640_set_power_down(sensor, enable);
-	msleep(2);
-}
-
-static inline void ov5640_set_reset(struct ov5640 *sensor, bool assert)
-{
-	gpiod_set_value_cansleep(sensor->reset_gpio, assert);
-}
-
-static inline void ov5640_reset(struct ov5640 *sensor)
-{
-	/* Keep the original reset/powerdown timing, but use logical GPIO states. */
-	ov5640_set_reset(sensor, false);
-	ov5640_set_power_down(sensor, true);
-	msleep(5);
-	ov5640_set_power_down(sensor, false);
-	msleep(5);
-	ov5640_set_reset(sensor, true);
-	msleep(1);
-	ov5640_set_reset(sensor, false);
-	msleep(5);
-	ov5640_set_power_down(sensor, true);
-}
-
-static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
-{
-	return ov5640_write_reg(sensor, OV5640_REG_STREAM_CTRL,
-				enable ? OV5640_STREAM_ON : OV5640_STREAM_OFF);
-}
-
-static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
-{
-	int ret;
-
-	if (sensor->streaming == enable)
-		return 0;
-
-	if (enable && !sensor->powered)
-		return -EPIPE;
-
-	ret = ov5640_hw_set_stream(sensor, enable);
-	if (ret < 0)
-		return ret;
-
-	sensor->streaming = enable;
-	return 0;
-}
-
-static int ov5640_power_on(struct ov5640 *sensor)
-{
-	int ret;
-
-	if (sensor->powered)
-		return 0;
-
-	ret = clk_prepare_enable(sensor->sensor_clk);
-	if (ret < 0)
-		return ret;
-
-	if (sensor->io_init)
-		sensor->io_init(sensor);
-
-	ov5640_power_down(sensor, false);
-	sensor->powered = true;
-
-	return 0;
-}
-
-static void ov5640_power_off(struct ov5640 *sensor)
-{
-	int ret;
-
-	if (!sensor->powered)
-		return;
-
-	if (sensor->streaming) {
-		ret = ov5640_set_stream(sensor, false);
-		if (ret < 0)
-			dev_warn(sensor->dev,
-				 "stream off before power down failed: %d\n", ret);
-	} else {
-		ret = ov5640_hw_set_stream(sensor, false);
-		if (ret < 0)
-			dev_dbg(sensor->dev,
-				"stream-off register write failed: %d\n", ret);
-	}
-
-	ov5640_power_down(sensor, true);
-	clk_disable_unprepare(sensor->sensor_clk);
-	sensor->streaming = false;
-	sensor->powered = false;
-}
-
-static int ov5640_runtime_resume(struct device *dev)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ov5640 *sensor = to_ov5640(client);
-	int ret;
-
-	mutex_lock(&sensor->lock);
-
-	ret = ov5640_power_on(sensor);
-	if (ret < 0)
-		goto out;
-
-	ret = init_device(sensor);
-	if (ret < 0)
-		ov5640_power_off(sensor);
-
- out:
-	mutex_unlock(&sensor->lock);
-	return ret;
-}
-
-static int ov5640_runtime_suspend(struct device *dev)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ov5640 *sensor = to_ov5640(client);
-
-	mutex_lock(&sensor->lock);
-	if (sensor->streaming) {
-		mutex_unlock(&sensor->lock);
-		return -EBUSY;
-	}
-
-	ov5640_power_off(sensor);
-	mutex_unlock(&sensor->lock);
-
-	return 0;
-}
-
-static int ov5640_runtime_get(struct ov5640 *sensor)
-{
-	int ret;
-
-	ret = pm_runtime_get_sync(sensor->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(sensor->dev);
-		return ret;
-	}
-
-	return 0;
-}
-
-static void ov5640_runtime_put_autosuspend(struct ov5640 *sensor)
-{
-	pm_runtime_mark_last_busy(sensor->dev);
-	pm_runtime_put_autosuspend(sensor->dev);
-}
-
-static int ov5640_regulator_enable(struct ov5640 *sensor)
-{
-	struct device *dev = sensor->dev;
-	int ret = 0;
-
-	sensor->io_regulator = devm_regulator_get(dev, "DOVDD");
-	if (!IS_ERR(sensor->io_regulator)) {
-		regulator_set_voltage(sensor->io_regulator,
-				      OV5640_VOLTAGE_DIGITAL_IO,
-				      OV5640_VOLTAGE_DIGITAL_IO);
-		ret = regulator_enable(sensor->io_regulator);
-		if (ret) {
-			dev_err(dev, "set io voltage failed\n");
-			return ret;
-		} else {
-			dev_dbg(dev, "set io voltage ok\n");
-		}
-	} else {
-		sensor->io_regulator = NULL;
-		dev_warn(dev, "cannot get io voltage\n");
-	}
-
-	sensor->core_regulator = devm_regulator_get(dev, "DVDD");
-	if (!IS_ERR(sensor->core_regulator)) {
-		regulator_set_voltage(sensor->core_regulator,
-				      OV5640_VOLTAGE_DIGITAL_CORE,
-				      OV5640_VOLTAGE_DIGITAL_CORE);
-		ret = regulator_enable(sensor->core_regulator);
-		if (ret) {
-			dev_err(dev, "set core voltage failed\n");
-			return ret;
-		} else {
-			dev_dbg(dev, "set core voltage ok\n");
-		}
-	} else {
-		sensor->core_regulator = NULL;
-		dev_warn(dev, "cannot get core voltage\n");
-	}
-
-	sensor->analog_regulator = devm_regulator_get(dev, "AVDD");
-	if (!IS_ERR(sensor->analog_regulator)) {
-		regulator_set_voltage(sensor->analog_regulator,
-				      OV5640_VOLTAGE_ANALOG,
-				      OV5640_VOLTAGE_ANALOG);
-		ret = regulator_enable(sensor->analog_regulator);
-		if (ret) {
-			dev_err(dev, "set analog voltage failed\n");
-			return ret;
-		} else {
-			dev_dbg(dev, "set analog voltage ok\n");
-		}
-	} else {
-		sensor->analog_regulator = NULL;
-		dev_warn(dev, "cannot get analog voltage\n");
-	}
-
-	return ret;
-}
 
 static int ov5640_write_reg(struct ov5640 *sensor, u16 reg, u8 val)
 {
@@ -1391,6 +894,7 @@ static int ov5640_write_reg16(struct ov5640 *sensor, u16 reg, u16 val)
 	return ov5640_write_reg(sensor, reg + 1, val & 0xff);
 }
 
+/* Some OV5640 16-bit registers latch the new value when the high byte is written. */
 static int ov5640_write_reg16_low_first(struct ov5640 *sensor, u16 reg, u16 val)
 {
 	int ret;
@@ -1411,6 +915,432 @@ static int ov5640_mod_reg(struct ov5640 *sensor, u16 reg, u8 mask, u8 val)
 		dev_err(&sensor->i2c_client->dev,
 			"update reg 0x%04x mask 0x%02x val 0x%02x failed: %d\n",
 			reg, mask, val, ret);
+
+	return ret;
+}
+
+static const struct ov5640_datafmt ov5640_colour_fmts[] = {
+	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
+};
+
+static inline struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov5640, subdev);
+}
+
+static inline struct ov5640 *i2c_to_ov5640(const struct i2c_client *client)
+{
+	return sd_to_ov5640(i2c_get_clientdata(client));
+}
+
+/* Find a data format by a pixel code in an array */
+static const struct ov5640_datafmt *ov5640_find_datafmt(u32 code)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_colour_fmts); i++)
+		if (ov5640_colour_fmts[i].code == code)
+			return ov5640_colour_fmts + i;
+
+	return NULL;
+}
+
+static inline bool
+ov5640_mode_info_valid(const struct ov5640_mode_info *mode_info)
+{
+	return mode_info && mode_info->width && mode_info->height &&
+	       mode_info->reg_tables && mode_info->num_reg_tables;
+}
+
+static const struct ov5640_mode_info *
+ov5640_get_mode_info(enum ov5640_frame_size frame_size)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		if (ov5640_modes[i].frame_size == frame_size)
+			return &ov5640_modes[i];
+	}
+
+	return NULL;
+}
+
+static inline bool ov5640_mode_valid(enum ov5640_frame_size frame_size)
+{
+	return ov5640_mode_info_valid(ov5640_get_mode_info(frame_size));
+}
+
+static const struct ov5640_mode_reg_table *
+ov5640_get_mode_reg_table(const struct ov5640_mode_info *mode_info,
+			  enum ov5640_frame_rate frame_rate)
+{
+	int i;
+
+	if (!ov5640_mode_info_valid(mode_info))
+		return NULL;
+
+	for (i = 0; i < mode_info->num_reg_tables; i++) {
+		const struct ov5640_mode_reg_table *reg_table =
+			&mode_info->reg_tables[i];
+
+		if (reg_table->frame_rate == frame_rate &&
+		    reg_table->regs && reg_table->num_regs)
+			return reg_table;
+	}
+
+	return NULL;
+}
+
+static const struct ov5640_mode_info *
+ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 height)
+{
+	const struct ov5640_mode_info *best = NULL;
+	u32 best_distance = ~0U;
+	int i;
+
+	if (frame_rate < ov5640_15_fps || frame_rate > ov5640_30_fps)
+		frame_rate = ov5640_30_fps;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
+		u32 width_delta;
+		u32 height_delta;
+		u32 distance;
+
+		if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+			continue;
+
+		width_delta = mode_info->width > width ?
+			      mode_info->width - width : width - mode_info->width;
+		height_delta = mode_info->height > height ?
+			       mode_info->height - height : height - mode_info->height;
+		distance = width_delta + height_delta;
+
+		if (!best || distance < best_distance) {
+			best = mode_info;
+			best_distance = distance;
+		}
+	}
+
+	return best;
+}
+
+static const struct ov5640_mode_info *
+ov5640_find_mode_by_size(enum ov5640_frame_rate frame_rate, u32 width, u32 height)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
+
+		if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+			continue;
+
+		if (mode_info->width == width && mode_info->height == height)
+			return mode_info;
+	}
+
+	return NULL;
+}
+
+static const struct ov5640_mode_info *
+ov5640_find_mode(u32 width, u32 height, bool nearest)
+{
+	const struct ov5640_mode_info *best = NULL;
+	u32 best_distance = ~0U;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
+		u32 width_delta;
+		u32 height_delta;
+		u32 distance;
+
+		if (!ov5640_mode_info_valid(mode_info))
+			continue;
+
+		if (mode_info->width == width && mode_info->height == height)
+			return mode_info;
+
+		if (!nearest)
+			continue;
+
+		width_delta = mode_info->width > width ?
+			      mode_info->width - width : width - mode_info->width;
+		height_delta = mode_info->height > height ?
+			       mode_info->height - height : height - mode_info->height;
+		distance = width_delta + height_delta;
+
+		if (!best || distance < best_distance) {
+			best = mode_info;
+			best_distance = distance;
+		}
+	}
+
+	return best;
+}
+
+static inline bool ov5640_mode_supports_fps(enum ov5640_frame_size frame_size,
+					    enum ov5640_frame_rate frame_rate)
+{
+	return ov5640_get_mode_reg_table(ov5640_get_mode_info(frame_size),
+					 frame_rate) != NULL;
+}
+
+static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
+					   unsigned int index,
+					   enum ov5640_frame_rate *frame_rate)
+{
+	int i;
+	unsigned int count = 0;
+
+	if (!frame_rate || !ov5640_mode_valid(frame_size))
+		return -EINVAL;
+
+	for (i = ov5640_15_fps; i <= ov5640_30_fps; i++) {
+		if (!ov5640_mode_supports_fps(frame_size, i))
+			continue;
+
+		if (count == index) {
+			*frame_rate = i;
+			return 0;
+		}
+
+		count++;
+	}
+
+	return -EINVAL;
+}
+
+static inline u32 ov5640_pixelformat_from_code(u32 code)
+{
+	switch (code) {
+	case MEDIA_BUS_FMT_RGB565_2X8_LE:
+		return V4L2_PIX_FMT_RGB565;
+	default:
+		return 0;
+	}
+}
+
+static int ov5640_apply_format(struct ov5640 *sensor,
+			       const struct ov5640_datafmt *fmt)
+{
+	int ret;
+
+	if (!fmt)
+		return -EINVAL;
+
+	switch (fmt->code) {
+	case MEDIA_BUS_FMT_RGB565_2X8_LE:
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+					OV5640_FORMAT_MUX_RGB);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+					OV5640_FORMAT_CTRL_RGB565);
+	default:
+		return -EINVAL;
+	}
+}
+
+static void ov5640_init_default_state(struct ov5640 *sensor)
+{
+	const struct ov5640_mode_info *mode_info =
+		ov5640_get_mode_info(ov5640_frame_size_800_480);
+
+	mutex_init(&sensor->lock);
+
+	sensor->state.fmt = &ov5640_colour_fmts[0];
+	sensor->state.frame_rate = ov5640_30_fps;
+	sensor->state.frame_size = ov5640_frame_size_800_480;
+	sensor->state.powered = false;
+	sensor->state.streaming = false;
+	sensor->state.power_users = 0;
+	sensor->state.prev_sysclk = 0;
+	sensor->state.prev_hts = 0;
+	sensor->state.ae_target = 52;
+	sensor->state.ae_high = 0;
+	sensor->state.ae_low = 0;
+	sensor->state.night_mode = 0;
+
+	sensor->state.pix.pixelformat = V4L2_PIX_FMT_RGB565;
+	sensor->state.pix.width = mode_info->width;
+	sensor->state.pix.height = mode_info->height;
+	sensor->state.pix.field = V4L2_FIELD_NONE;
+	sensor->state.pix.colorspace = sensor->state.fmt->colorspace;
+
+	sensor->state.streamcap.capability = V4L2_MODE_HIGHQUALITY |
+					V4L2_CAP_TIMEPERFRAME;
+	sensor->state.streamcap.capturemode = V4L2_CAP_TIMEPERFRAME;
+	sensor->state.streamcap.timeperframe.denominator = DEFAULT_FPS;
+	sensor->state.streamcap.timeperframe.numerator = 1;
+}
+
+static inline void ov5640_power_down(struct ov5640 *sensor, bool enable)
+{
+	gpiod_set_value_cansleep(sensor->pwdn_gpio, enable);
+	msleep(2);
+}
+
+static inline void ov5640_reset(struct ov5640 *sensor)
+{
+	/* Keep the original reset/powerdown timing, but use logical GPIO states. */
+	gpiod_set_value_cansleep(sensor->reset_gpio, false);
+	gpiod_set_value_cansleep(sensor->pwdn_gpio, true);
+	msleep(5);
+	gpiod_set_value_cansleep(sensor->pwdn_gpio, false);
+	msleep(5);
+	gpiod_set_value_cansleep(sensor->reset_gpio, true);
+	msleep(1);
+	gpiod_set_value_cansleep(sensor->reset_gpio, false);
+	msleep(5);
+	gpiod_set_value_cansleep(sensor->pwdn_gpio, true);
+}
+
+static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
+{
+	return ov5640_write_reg(sensor, OV5640_REG_STREAM_CTRL,
+				enable ? OV5640_STREAM_ON : OV5640_STREAM_OFF);
+}
+
+static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
+{
+	int ret;
+
+	if (sensor->state.streaming == enable)
+		return 0;
+
+	if (enable && !sensor->state.powered)
+		return -EPIPE;
+
+	ret = ov5640_hw_set_stream(sensor, enable);
+	if (ret < 0)
+		return ret;
+
+	sensor->state.streaming = enable;
+	return 0;
+}
+
+static int ov5640_power_on(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (sensor->state.powered)
+		return 0;
+
+	ret = clk_prepare_enable(sensor->sensor_clk);
+	if (ret < 0)
+		return ret;
+
+	if (sensor->io_init)
+		sensor->io_init(sensor);
+
+	ov5640_power_down(sensor, false);
+	sensor->state.powered = true;
+
+	return 0;
+}
+
+static void ov5640_power_off(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (!sensor->state.powered)
+		return;
+
+	if (sensor->state.streaming) {
+		ret = ov5640_set_stream(sensor, false);
+		if (ret < 0)
+			dev_warn(sensor->dev,
+				 "stream off before power down failed: %d\n", ret);
+	} else {
+		ret = ov5640_hw_set_stream(sensor, false);
+		if (ret < 0)
+			dev_dbg(sensor->dev,
+				"stream-off register write failed: %d\n", ret);
+	}
+
+	ov5640_power_down(sensor, true);
+	clk_disable_unprepare(sensor->sensor_clk);
+	sensor->state.streaming = false;
+	sensor->state.powered = false;
+}
+
+static int ov5640_runtime_get(struct ov5640 *sensor)
+{
+	int ret;
+
+	ret = pm_runtime_get_sync(sensor->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(sensor->dev);
+		return ret;
+	}
+
+	return 0;
+}
+
+static inline void ov5640_runtime_put_autosuspend(struct ov5640 *sensor)
+{
+	pm_runtime_mark_last_busy(sensor->dev);
+	pm_runtime_put_autosuspend(sensor->dev);
+}
+
+static int ov5640_regulator_enable(struct ov5640 *sensor)
+{
+	struct device *dev = sensor->dev;
+	int ret = 0;
+
+	sensor->io_regulator = devm_regulator_get(dev, "DOVDD");
+	if (!IS_ERR(sensor->io_regulator)) {
+		regulator_set_voltage(sensor->io_regulator,
+				      OV5640_VOLTAGE_DIGITAL_IO,
+				      OV5640_VOLTAGE_DIGITAL_IO);
+		ret = regulator_enable(sensor->io_regulator);
+		if (ret) {
+			dev_err(dev, "set io voltage failed\n");
+			return ret;
+		} else {
+			dev_dbg(dev, "set io voltage ok\n");
+		}
+	} else {
+		sensor->io_regulator = NULL;
+		dev_warn(dev, "cannot get io voltage\n");
+	}
+
+	sensor->core_regulator = devm_regulator_get(dev, "DVDD");
+	if (!IS_ERR(sensor->core_regulator)) {
+		regulator_set_voltage(sensor->core_regulator,
+				      OV5640_VOLTAGE_DIGITAL_CORE,
+				      OV5640_VOLTAGE_DIGITAL_CORE);
+		ret = regulator_enable(sensor->core_regulator);
+		if (ret) {
+			dev_err(dev, "set core voltage failed\n");
+			return ret;
+		} else {
+			dev_dbg(dev, "set core voltage ok\n");
+		}
+	} else {
+		sensor->core_regulator = NULL;
+		dev_warn(dev, "cannot get core voltage\n");
+	}
+
+	sensor->analog_regulator = devm_regulator_get(dev, "AVDD");
+	if (!IS_ERR(sensor->analog_regulator)) {
+		regulator_set_voltage(sensor->analog_regulator,
+				      OV5640_VOLTAGE_ANALOG,
+				      OV5640_VOLTAGE_ANALOG);
+		ret = regulator_enable(sensor->analog_regulator);
+		if (ret) {
+			dev_err(dev, "set analog voltage failed\n");
+			return ret;
+		} else {
+			dev_dbg(dev, "set analog voltage ok\n");
+		}
+	} else {
+		sensor->analog_regulator = NULL;
+		dev_warn(dev, "cannot get analog voltage\n");
+	}
 
 	return ret;
 }
@@ -1484,7 +1414,7 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	int ret = 0;
 
 	mutex_lock(&sensor->lock);
-	if (!sensor->powered)
+	if (!sensor->state.powered)
 		goto out;
 
 	switch (ctrl->id) {
@@ -1690,7 +1620,7 @@ static int ov5640_get_sysclk(struct ov5640 *sensor)
 	return sysclk;
 }
 
-/* read HTS from register settings */
+/* read HTS from sensor registers */
 static int ov5640_get_HTS(struct ov5640 *sensor)
 {
 	u16 HTS;
@@ -1703,7 +1633,7 @@ static int ov5640_get_HTS(struct ov5640 *sensor)
 	return HTS;
 }
 
-/* read VTS from register settings */
+/* read VTS from sensor registers */
 static int ov5640_get_VTS(struct ov5640 *sensor)
 {
 	u16 VTS;
@@ -1824,26 +1754,26 @@ static int ov5640_set_bandingfilter(struct ov5640 *sensor)
 	int ret;
 
 	/* read preview PCLK */
-	sensor->prev_sysclk = ov5640_get_sysclk(sensor);
-	if (sensor->prev_sysclk < 0)
-		return sensor->prev_sysclk;
+	sensor->state.prev_sysclk = ov5640_get_sysclk(sensor);
+	if (sensor->state.prev_sysclk < 0)
+		return sensor->state.prev_sysclk;
 
 	/* read preview HTS */
-	sensor->prev_hts = ov5640_get_HTS(sensor);
-	if (sensor->prev_hts < 0)
-		return sensor->prev_hts;
+	sensor->state.prev_hts = ov5640_get_HTS(sensor);
+	if (sensor->state.prev_hts < 0)
+		return sensor->state.prev_hts;
 
 	/* read preview VTS */
 	prev_VTS = ov5640_get_VTS(sensor);
 	if (prev_VTS < 0)
 		return prev_VTS;
 
-	if (sensor->prev_hts == 0 || prev_VTS <= 4)
+	if (sensor->state.prev_hts == 0 || prev_VTS <= 4)
 		return -EINVAL;
 
 	/* calculate banding filter */
 	/* 60Hz */
-	band_step60 = sensor->prev_sysclk * 100 / sensor->prev_hts * 100 / 120;
+	band_step60 = sensor->state.prev_sysclk * 100 / sensor->state.prev_hts * 100 / 120;
 	if (band_step60 <= 0)
 		return -EINVAL;
 
@@ -1857,7 +1787,7 @@ static int ov5640_set_bandingfilter(struct ov5640 *sensor)
 		return ret;
 
 	/* 50Hz */
-	band_step50 = sensor->prev_sysclk * 100 / sensor->prev_hts;
+	band_step50 = sensor->state.prev_sysclk * 100 / sensor->state.prev_hts;
 	if (band_step50 <= 0)
 		return -EINVAL;
 
@@ -1875,24 +1805,24 @@ static int ov5640_set_AE_target(struct ov5640 *sensor, int target)
 	int fast_high, fast_low;
 	int ret;
 
-	sensor->ae_low = target * 23 / 25; /* 0.92 */
-	sensor->ae_high = target * 27 / 25; /* 1.08 */
-	fast_high = sensor->ae_high << 1;
+	sensor->state.ae_low = target * 23 / 25; /* 0.92 */
+	sensor->state.ae_high = target * 27 / 25; /* 1.08 */
+	fast_high = sensor->state.ae_high << 1;
 
 	if (fast_high > 255)
 		fast_high = 255;
-	fast_low = sensor->ae_low >> 1;
+	fast_low = sensor->state.ae_low >> 1;
 
-	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_HIGH, sensor->ae_high);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_HIGH, sensor->state.ae_high);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_LOW, sensor->ae_low);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_STABLE_LOW, sensor->state.ae_low);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1B, sensor->ae_high);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1B, sensor->state.ae_high);
 	if (ret < 0)
 		return ret;
-	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1E, sensor->ae_low);
+	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_CTRL1E, sensor->state.ae_low);
 	if (ret < 0)
 		return ret;
 	ret = ov5640_write_reg(sensor, OV5640_REG_AEC_FAST_HIGH, fast_high);
@@ -1949,7 +1879,7 @@ static int ov5640_write_reg_table(struct ov5640 *sensor,
 }
 
 /**
- * ov5640_init_mode - initialize the sensor into the default VGA mode
+ * ov5640_init_mode - initialize the sensor into the default VGA frame size
  *
  * Soft-reset the OV5640, write the common sensor initialization table,
  * then apply the default 30 fps VGA register table.  After the register
@@ -1990,10 +1920,10 @@ static int ov5640_init_mode(struct ov5640 *sensor)
 	retval = ov5640_set_bandingfilter(sensor);
 	if (retval < 0)
 		goto err;
-	retval = ov5640_set_AE_target(sensor, sensor->ae_target);
+	retval = ov5640_set_AE_target(sensor, sensor->state.ae_target);
 	if (retval < 0)
 		goto err;
-	retval = ov5640_set_night_mode(sensor, sensor->night_mode);
+	retval = ov5640_set_night_mode(sensor, sensor->state.night_mode);
 	if (retval < 0)
 		goto err;
 
@@ -2001,47 +1931,47 @@ static int ov5640_init_mode(struct ov5640 *sensor)
 	msleep(300);
 
 	/* turn off night mode */
-	sensor->night_mode = 0;
-	sensor->current_fr = ov5640_30_fps;
-	sensor->current_mode = ov5640_mode_VGA_640_480;
-	sensor->pix.width = 640;
-	sensor->pix.height = 480;
+	sensor->state.night_mode = 0;
+	sensor->state.frame_rate = ov5640_30_fps;
+	sensor->state.frame_size = ov5640_frame_size_VGA_640_480;
+	sensor->state.pix.width = 640;
+	sensor->state.pix.height = 480;
 err:
 	return retval;
 }
 
-/* change to or back to subsampling mode set the mode directly
+/* change to or back to subsampling mode set the frame size directly
  * image size below 1280 * 960 is subsampling mode */
 static int ov5640_change_mode_direct(struct ov5640 *sensor,
 			    enum ov5640_frame_rate frame_rate,
-			    enum ov5640_mode mode)
+			    enum ov5640_frame_size frame_size)
 {
 	const struct ov5640_mode_info *mode_info;
-	const struct ov5640_mode_fps_info *fps_info;
+	const struct ov5640_mode_reg_table *reg_table;
 	const struct reg_value *regs = NULL;
 	s32 num_regs = 0;
 	int retval = 0;
 
 	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
-	    mode > ov5640_mode_MAX || mode < ov5640_mode_MIN) {
-		pr_err("Wrong ov5640 mode detected!\n");
+	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN) {
+		pr_err("Wrong ov5640 frame size detected!\n");
 		return -EINVAL;
 	}
 
-	mode_info = ov5640_get_mode_info(mode);
-	fps_info = ov5640_get_mode_fps_info(mode_info, frame_rate);
-	if (!fps_info)
+	mode_info = ov5640_get_mode_info(frame_size);
+	reg_table = ov5640_get_mode_reg_table(mode_info, frame_rate);
+	if (!reg_table)
 		return -EINVAL;
 
-	regs = fps_info->regs;
-	num_regs = fps_info->num_regs;
+	regs = reg_table->regs;
+	num_regs = reg_table->num_regs;
 
 	/* set ov5640 to subsampling mode */
 	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
 
-	/* turn on AE AG for subsampling mode, in case the mode table did not */
+	/* turn on AE AG for subsampling mode, in case the register table did not */
 	retval = ov5640_turn_on_AE_AG(sensor, 1);
 	if (retval < 0)
 		goto err;
@@ -2052,17 +1982,17 @@ static int ov5640_change_mode_direct(struct ov5640 *sensor,
 		goto err;
 
 	/* set AE target */
-	retval = ov5640_set_AE_target(sensor, sensor->ae_target);
+	retval = ov5640_set_AE_target(sensor, sensor->state.ae_target);
 	if (retval < 0)
 		goto err;
 
 	/* update night mode setting */
-	retval = ov5640_set_night_mode(sensor, sensor->night_mode);
+	retval = ov5640_set_night_mode(sensor, sensor->state.night_mode);
 	if (retval < 0)
 		goto err;
 
 	/* skip 9 vysnc: start capture at 10th vsync */
-	if (mode == ov5640_mode_XGA_1024_768 && frame_rate == ov5640_30_fps) {
+	if (frame_size == ov5640_frame_size_XGA_1024_768 && frame_rate == ov5640_30_fps) {
 		pr_warning("ov5640: actual frame rate of XGA is 22.5fps\n");
 		/* 1/22.5 * 9*/
 		msleep(400);
@@ -2085,10 +2015,10 @@ err:
  * image size above 1280 * 960 is scaling mode */
 static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 			    enum ov5640_frame_rate frame_rate,
-			    enum ov5640_mode mode)
+			    enum ov5640_frame_size frame_size)
 {
 	const struct ov5640_mode_info *mode_info;
-	const struct ov5640_mode_fps_info *fps_info;
+	const struct ov5640_mode_reg_table *reg_table;
 	int prev_shutter, prev_gain16, average;
 	int cap_shutter, cap_gain16;
 	int cap_sysclk, cap_HTS, cap_VTS;
@@ -2099,18 +2029,18 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	s32 num_regs = 0;
 	int retval = 0;
 
-	/* check if the input mode and frame rate is valid */
+	/* check if the input frame size and frame rate is valid */
 	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
-	    mode > ov5640_mode_MAX || mode < ov5640_mode_MIN)
+	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN)
 		return -EINVAL;
 
-	mode_info = ov5640_get_mode_info(mode);
-	fps_info = ov5640_get_mode_fps_info(mode_info, frame_rate);
-	if (!fps_info)
+	mode_info = ov5640_get_mode_info(frame_size);
+	reg_table = ov5640_get_mode_reg_table(mode_info, frame_rate);
+	if (!reg_table)
 		return -EINVAL;
 
-	regs = fps_info->regs;
-	num_regs = fps_info->num_regs;
+	regs = reg_table->regs;
+	num_regs = reg_table->num_regs;
 
 	/* read preview shutter */
 	prev_shutter = ov5640_get_shutter(sensor);
@@ -2138,7 +2068,7 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	if (retval < 0)
 		return retval;
 
-	/* Write capture setting */
+	/* Write capture register table */
 	retval = ov5640_write_reg_table(sensor, regs, num_regs);
 	if (retval < 0)
 		goto err;
@@ -2159,7 +2089,7 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	if (cap_sysclk < 0)
 		return cap_sysclk;
 
-	if (sensor->prev_sysclk <= 0 || sensor->prev_hts <= 0 || cap_HTS <= 0 || cap_VTS <= 4)
+	if (sensor->state.prev_sysclk <= 0 || sensor->state.prev_hts <= 0 || cap_HTS <= 0 || cap_VTS <= 4)
 		return -EINVAL;
 
 	/* calculate capture banding filter */
@@ -2177,15 +2107,15 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 		return -EINVAL;
 	cap_maxband = (int)((cap_VTS - 4) / cap_bandfilt);
 	/* calculate capture shutter/gain16 */
-	if (average > sensor->ae_low && average < sensor->ae_high) {
+	if (average > sensor->state.ae_low && average < sensor->state.ae_high) {
 		/* in stable range */
 		cap_gain16_shutter =
-			prev_gain16 * prev_shutter * cap_sysclk/sensor->prev_sysclk *
-			sensor->prev_hts/cap_HTS * sensor->ae_target / average;
+			prev_gain16 * prev_shutter * cap_sysclk/sensor->state.prev_sysclk *
+			sensor->state.prev_hts/cap_HTS * sensor->state.ae_target / average;
 	} else {
 		cap_gain16_shutter =
-			prev_gain16 * prev_shutter * cap_sysclk/sensor->prev_sysclk *
-			sensor->prev_hts/cap_HTS;
+			prev_gain16 * prev_shutter * cap_sysclk/sensor->state.prev_sysclk *
+			sensor->state.prev_hts/cap_HTS;
 	}
 
 	/* gain to shutter */
@@ -2232,7 +2162,7 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	 * frame rate of QSXGA and 1080P is 7.5fps: 1/7.5 * 2
 	 */
 	pr_warning("ov5640: the actual frame rate of %s is 7.5fps\n",
-		mode == ov5640_mode_1080P_1920_1080 ? "1080P" : "QSXGA");
+		frame_size == ov5640_frame_size_1080P_1920_1080 ? "1080P" : "QSXGA");
 	msleep(267);
 err:
 	return retval;
@@ -2240,37 +2170,37 @@ err:
 
 static int ov5640_change_mode(struct ov5640 *sensor,
 			    enum ov5640_frame_rate frame_rate,
-			    enum ov5640_mode mode)
+			    enum ov5640_frame_size frame_size)
 {
 	const struct ov5640_mode_info *mode_info;
 	int retval = 0;
 
 	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
-	    mode > ov5640_mode_MAX || mode < ov5640_mode_MIN) {
-		pr_err("Wrong ov5640 mode detected!\n");
+	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN) {
+		pr_err("Wrong ov5640 frame size detected!\n");
 		return -EINVAL;
 	}
 
-	mode_info = ov5640_get_mode_info(mode);
-	if (!ov5640_get_mode_fps_info(mode_info, frame_rate))
+	mode_info = ov5640_get_mode_info(frame_size);
+	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
 		return -EINVAL;
 
 	switch (mode_info->downsize) {
 	case OV5640_DOWNSIZE_SCALING:
-		retval = ov5640_change_mode_exposure_calc(sensor, frame_rate, mode);
+		retval = ov5640_change_mode_exposure_calc(sensor, frame_rate, frame_size);
 		break;
 	case OV5640_DOWNSIZE_SUBSAMPLING:
-		retval = ov5640_change_mode_direct(sensor, frame_rate, mode);
+		retval = ov5640_change_mode_direct(sensor, frame_rate, frame_size);
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	if (retval == 0) {
-		sensor->current_fr = frame_rate;
-		sensor->current_mode = mode;
-		sensor->pix.width = mode_info->width;
-		sensor->pix.height = mode_info->height;
+		sensor->state.frame_rate = frame_rate;
+		sensor->state.frame_size = frame_size;
+		sensor->state.pix.width = mode_info->width;
+		sensor->state.pix.height = mode_info->height;
 	}
 
 	return retval;
@@ -2298,17 +2228,17 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 			return ret;
 
 		mutex_lock(&sensor->lock);
-		sensor->power_users++;
+		sensor->state.power_users++;
 		mutex_unlock(&sensor->lock);
 		return 0;
 	}
 
 	mutex_lock(&sensor->lock);
-	if (!sensor->power_users) {
+	if (!sensor->state.power_users) {
 		mutex_unlock(&sensor->lock);
 		return 0;
 	}
-	sensor->power_users--;
+	sensor->state.power_users--;
 	mutex_unlock(&sensor->lock);
 
 	ov5640_runtime_put_autosuspend(sensor);
@@ -2335,7 +2265,7 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 
 	if (enable) {
 		mutex_lock(&sensor->lock);
-		if (sensor->streaming) {
+		if (sensor->state.streaming) {
 			mutex_unlock(&sensor->lock);
 			return 0;
 		}
@@ -2346,7 +2276,7 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 			return ret;
 
 		mutex_lock(&sensor->lock);
-		if (sensor->streaming) {
+		if (sensor->state.streaming) {
 			started_streaming = false;
 			ret = 0;
 		} else {
@@ -2362,7 +2292,7 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 	}
 
 	mutex_lock(&sensor->lock);
-	was_streaming = sensor->streaming;
+	was_streaming = sensor->state.streaming;
 	if (was_streaming)
 		ret = ov5640_set_stream(sensor, false);
 	else
@@ -2386,9 +2316,9 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 		memset(a, 0, sizeof(*a));
 		a->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		cparm->capability = sensor->streamcap.capability;
-		cparm->timeperframe = sensor->streamcap.timeperframe;
-		cparm->capturemode = sensor->streamcap.capturemode;
+		cparm->capability = sensor->state.streamcap.capability;
+		cparm->timeperframe = sensor->state.streamcap.timeperframe;
+		cparm->capturemode = sensor->state.streamcap.capturemode;
 		ret = 0;
 		break;
 
@@ -2418,11 +2348,11 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
  *
  * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback normalizes the
  * requested frame interval to one of the discrete 15 fps and 30 fps modes,
- * checks that the current sensor mode supports it, and applies the matching
+ * checks that the current sensor frame size supports it, and applies the matching
  * register table immediately when the device is powered and not streaming.
  *
  * Return: 0 on success, -EBUSY if streaming is active, or -EINVAL if the
- * buffer type, frame rate, or current mode/fps combination is not supported.
+ * buffer type, frame rate, or current frame size/fps combination is not supported.
  */
 static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
@@ -2471,23 +2401,23 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 
 		mutex_lock(&sensor->lock);
 
-		mode_info = ov5640_get_mode_info(sensor->current_mode);
-		if (!ov5640_get_mode_fps_info(mode_info, frame_rate)) {
+		mode_info = ov5640_get_mode_info(sensor->state.frame_size);
+		if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
 
-		if (sensor->streaming && frame_rate != sensor->current_fr) {
+		if (sensor->state.streaming && frame_rate != sensor->state.frame_rate) {
 			ret = -EBUSY;
 			goto unlock;
 		}
 
-		if (sensor->powered && frame_rate != sensor->current_fr) {
-			ret = ov5640_change_mode(sensor, frame_rate, sensor->current_mode);
+		if (sensor->state.powered && frame_rate != sensor->state.frame_rate) {
+			ret = ov5640_change_mode(sensor, frame_rate, sensor->state.frame_size);
 			if (ret < 0)
 				goto unlock;
 
-			fmt = sensor->fmt ? sensor->fmt : &ov5640_colour_fmts[0];
+			fmt = sensor->state.fmt ? sensor->state.fmt : &ov5640_colour_fmts[0];
 			ret = ov5640_apply_format(sensor, fmt);
 			if (ret < 0)
 				goto unlock;
@@ -2501,12 +2431,12 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 				goto unlock;
 		}
 
-		sensor->streamcap.timeperframe = *timeperframe;
-		sensor->streamcap.capturemode = cparm->capturemode;
-		sensor->current_fr = frame_rate;
-		cparm->capability = sensor->streamcap.capability;
-		cparm->timeperframe = sensor->streamcap.timeperframe;
-		cparm->capturemode = sensor->streamcap.capturemode;
+		sensor->state.streamcap.timeperframe = *timeperframe;
+		sensor->state.streamcap.capturemode = cparm->capturemode;
+		sensor->state.frame_rate = frame_rate;
+		cparm->capability = sensor->state.streamcap.capability;
+		cparm->timeperframe = sensor->state.streamcap.timeperframe;
+		cparm->capturemode = sensor->state.streamcap.capturemode;
 
 unlock:
 		mutex_unlock(&sensor->lock);
@@ -2538,10 +2468,10 @@ unlock:
  * @mf: Media bus frame format to validate and adjust.
  *
  * Unsupported media bus codes are adjusted to the verified RGB565 path.  The
- * requested size is snapped to the nearest mode that is valid for the current
+ * requested size is snapped to the nearest frame size that is valid for the current
  * frame-rate cache; this callback never writes sensor registers.
  *
- * Return: 0 on success, or -EINVAL if no valid mode exists.
+ * Return: 0 on success, or -EINVAL if no valid frame size exists.
  */
 static int ov5640_try_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_mbus_framefmt *mf)
@@ -2553,7 +2483,7 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
 	if (!fmt)
 		fmt = &ov5640_colour_fmts[0];
 
-	mode_info = ov5640_find_nearest_mode(sensor->current_fr,
+	mode_info = ov5640_find_nearest_mode(sensor->state.frame_rate,
 						mf->width, mf->height);
 	if (!mode_info)
 		return -EINVAL;
@@ -2573,7 +2503,7 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
  * @mf: Requested media bus frame format, updated with the active frame size.
  *
  * This callback applies the same adjustment as ov5640_try_fmt(), then programs
- * the selected mode and the verified RGB565 output registers when the sensor is
+ * the selected frame size and the verified RGB565 output registers when the sensor is
  * powered.  If called while powered off, it only updates the cached request;
  * init_device(sensor) will apply that cache on the next power-on.
  *
@@ -2592,19 +2522,19 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 		return retval;
 
 	fmt = ov5640_find_datafmt(mf->code);
-	mode_info = ov5640_find_mode_by_size(sensor->current_fr,
+	mode_info = ov5640_find_mode_by_size(sensor->state.frame_rate,
 						mf->width, mf->height);
 	if (!fmt || !mode_info)
 		return -EINVAL;
 
 	mutex_lock(&sensor->lock);
-	if (sensor->streaming) {
+	if (sensor->state.streaming) {
 		retval = -EBUSY;
 		goto out;
 	}
 
-	if (sensor->powered) {
-		retval = ov5640_change_mode(sensor, sensor->current_fr, mode_info->mode);
+	if (sensor->state.powered) {
+		retval = ov5640_change_mode(sensor, sensor->state.frame_rate, mode_info->frame_size);
 		if (retval < 0)
 			goto out;
 
@@ -2621,13 +2551,13 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 			goto out;
 	}
 
-	sensor->fmt = fmt;
-	sensor->current_mode = mode_info->mode;
-	sensor->pix.pixelformat = ov5640_pixelformat_from_code(fmt->code);
-	sensor->pix.width = mf->width;
-	sensor->pix.height = mf->height;
-	sensor->pix.field = mf->field;
-	sensor->pix.colorspace = mf->colorspace;
+	sensor->state.fmt = fmt;
+	sensor->state.frame_size = mode_info->frame_size;
+	sensor->state.pix.pixelformat = ov5640_pixelformat_from_code(fmt->code);
+	sensor->state.pix.width = mf->width;
+	sensor->state.pix.height = mf->height;
+	sensor->state.pix.field = mf->field;
+	sensor->state.pix.colorspace = mf->colorspace;
 
 	retval = 0;
 out:
@@ -2650,14 +2580,14 @@ static int ov5640_g_fmt(struct v4l2_subdev *sd,
 {
 	struct ov5640 *sensor = sd_to_ov5640(sd);
 
-	const struct ov5640_datafmt *fmt = sensor->fmt ? sensor->fmt :
+	const struct ov5640_datafmt *fmt = sensor->state.fmt ? sensor->state.fmt :
 					   &ov5640_colour_fmts[0];
 
 	mf->code	= fmt->code;
 	mf->colorspace	= fmt->colorspace;
 	mf->field	= V4L2_FIELD_NONE;
-	mf->width	= sensor->pix.width;
-	mf->height	= sensor->pix.height;
+	mf->width	= sensor->state.pix.width;
+	mf->height	= sensor->state.pix.height;
 
 	return 0;
 }
@@ -2747,7 +2677,7 @@ static int ov5640_enum_frameintervals(struct v4l2_subdev *sd,
 	if (!mode_info)
 		return -EINVAL;
 
-	ret = ov5640_enum_frame_rate_for_mode(mode_info->mode,
+	ret = ov5640_enum_frame_rate_for_mode(mode_info->frame_size,
 					       fie->index, &frame_rate);
 	if (ret < 0)
 		return ret;
@@ -2778,14 +2708,14 @@ static int ov5640_set_clk_rate(struct ov5640 *sensor)
 /*!
  * dev_init - V4L2 sensor init
  * 
- * init device according to the mclk and fps(sensor->streamcap.timeperframe) in sensor
+ * init device according to the mclk and fps(sensor->state.streamcap.timeperframe) in sensor
  */
 static int init_device(struct ov5640 *sensor)
 {
 	u32 tgt_xclk;	/* target xclk */
 	u32 tgt_fps;	/* target frames per secound */
 	enum ov5640_frame_rate frame_rate;
-	enum ov5640_mode target_mode = sensor->current_mode;
+	enum ov5640_frame_size target_frame_size = sensor->state.frame_size;
 	const struct ov5640_mode_info *mode_info;
 	int ret;
 
@@ -2794,8 +2724,8 @@ static int init_device(struct ov5640 *sensor)
 	tgt_xclk = sensor->mclk;
 
 	/* Default camera frame rate is set in probe */
-	tgt_fps = sensor->streamcap.timeperframe.denominator /
-		  sensor->streamcap.timeperframe.numerator;
+	tgt_fps = sensor->state.streamcap.timeperframe.denominator /
+		  sensor->state.streamcap.timeperframe.numerator;
 
 	if (tgt_fps == 15)
 		frame_rate = ov5640_15_fps;
@@ -2804,28 +2734,28 @@ static int init_device(struct ov5640 *sensor)
 	else
 		return -EINVAL; /* Only support 15fps or 30fps now. */
 
-	mode_info = ov5640_get_mode_info(target_mode);
-	if (!ov5640_get_mode_fps_info(mode_info, frame_rate)) {
+	mode_info = ov5640_get_mode_info(target_frame_size);
+	if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {
 		mode_info = ov5640_find_nearest_mode(frame_rate,
-						sensor->pix.width,
-						sensor->pix.height);
+						sensor->state.pix.width,
+						sensor->state.pix.height);
 		if (!mode_info)
 			return -EINVAL;
-		target_mode = mode_info->mode;
+		target_frame_size = mode_info->frame_size;
 	}
 
 	ret = ov5640_init_mode(sensor);
 	if (ret < 0)
 		return ret;
 
-	if (sensor->current_fr != frame_rate ||
-	    sensor->current_mode != target_mode) {
-		ret = ov5640_change_mode(sensor, frame_rate, target_mode);
+	if (sensor->state.frame_rate != frame_rate ||
+	    sensor->state.frame_size != target_frame_size) {
+		ret = ov5640_change_mode(sensor, frame_rate, target_frame_size);
 		if (ret < 0)
 			return ret;
 	}
 
-	ret = ov5640_apply_format(sensor, sensor->fmt);
+	ret = ov5640_apply_format(sensor, sensor->state.fmt);
 	if (ret < 0)
 		return ret;
 
@@ -2837,7 +2767,7 @@ static int init_device(struct ov5640 *sensor)
 	if (ret < 0)
 		return ret;
 
-	sensor->streaming = false;
+	sensor->state.streaming = false;
 	return 0;
 }
 
@@ -3034,7 +2964,7 @@ power_off:
 static int ov5640_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct ov5640 *sensor = to_ov5640(client);
+	struct ov5640 *sensor = i2c_to_ov5640(client);
 
 	pm_runtime_disable(&client->dev);
 
@@ -3042,9 +2972,9 @@ static int ov5640_remove(struct i2c_client *client)
 	v4l2_ctrl_handler_free(&sensor->ctrls);
 
 	mutex_lock(&sensor->lock);
-	sensor->power_users = 0;
+	sensor->state.power_users = 0;
 	ov5640_power_off(sensor);
-	if (!sensor->powered)
+	if (!sensor->state.powered)
 		ov5640_power_down(sensor, true);
 	mutex_unlock(&sensor->lock);
 	pm_runtime_set_suspended(&client->dev);
@@ -3060,6 +2990,66 @@ static int ov5640_remove(struct i2c_client *client)
 
 	return 0;
 }
+
+static int ov5640_runtime_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ov5640 *sensor = i2c_to_ov5640(client);
+	int ret;
+
+	mutex_lock(&sensor->lock);
+
+	ret = ov5640_power_on(sensor);
+	if (ret < 0)
+		goto out;
+
+	ret = init_device(sensor);
+	if (ret < 0)
+		ov5640_power_off(sensor);
+
+ out:
+	mutex_unlock(&sensor->lock);
+	return ret;
+}
+
+static int ov5640_runtime_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ov5640 *sensor = i2c_to_ov5640(client);
+
+	mutex_lock(&sensor->lock);
+	if (sensor->state.streaming) {
+		mutex_unlock(&sensor->lock);
+		return -EBUSY;
+	}
+
+	ov5640_power_off(sensor);
+	mutex_unlock(&sensor->lock);
+
+	return 0;
+}
+
+static const struct dev_pm_ops ov5640_pm_ops = {
+	SET_RUNTIME_PM_OPS(ov5640_runtime_suspend, ov5640_runtime_resume, NULL)
+};
+
+static const struct i2c_device_id ov5640_id[] = {
+	{"ov5640", 0},
+	{},
+};
+
+MODULE_DEVICE_TABLE(i2c, ov5640_id);
+
+static struct i2c_driver ov5640_i2c_driver = {
+	.driver = {
+		.owner = THIS_MODULE,
+		.name  = "ov5640",
+		.pm = &ov5640_pm_ops,
+	},
+	.probe  = ov5640_probe,
+	.remove = ov5640_remove,
+	.id_table = ov5640_id,
+};
 
 module_i2c_driver(ov5640_i2c_driver);
 
