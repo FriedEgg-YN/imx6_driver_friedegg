@@ -6,12 +6,18 @@ APP_NAME := ov5640_test
 APP_SRC := ov5640_test.c
 APP_CFLAGS ?= -Wall -O2
 
+DEMO_NAME := ov5640_interface_demo
+DEMO_SRC := ov5640_interface_demo.c
+DEMO_CFLAGS ?= -Wall -O2
+
 .PHONY: all app kernel_modules clean
 
 all: modules app
 
 app:
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(APP_CFLAGS) $(APP_SRC) -o $(APP_NAME) $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEMO_CFLAGS) $(DEMO_SRC) -o $(DEMO_NAME) $(LDFLAGS)
+	
 
 kernel_modules:
 	$(MAKE) -C $(KERNELDIR) \
@@ -24,4 +30,4 @@ clean:
 		ARCH=$(ARCH) \
 		CROSS_COMPILE=$(CROSS_COMPILE) \
 		M=$(CURDIR) clean
-	rm -f $(APP_NAME)
+	rm -f $(APP_NAME) $(DEMO_NAME)

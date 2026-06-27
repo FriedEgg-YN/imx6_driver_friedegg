@@ -11,6 +11,7 @@ endef
 
 define OV5640_DRV_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/ov5640_test $(TARGET_DIR)/usr/bin/ov5640_test
+	$(INSTALL) -D -m 0755 $(@D)/ov5640_interface_demo $(TARGET_DIR)/usr/bin/ov5640_interface_demo
 endef
 
 $(eval $(kernel-module))
