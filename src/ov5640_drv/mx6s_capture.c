@@ -300,8 +300,7 @@ struct csi_config_t {
 /**
  * struct mx6s_fmt - CSI host 支持的视频格式映射
  * @name: 给 VIDIOC_ENUM_FMT 返回的人类可读格式名。
- * @fourcc: V4L2 fourcc。保留字段，当前和 @pixelformat 相同。
- * @pixelformat: 用户态 V4L2_PIX_FMT_* 像素格式。
+ * @pixelformat: 用户态 V4L2_PIX_FMT_* fourcc 像素格式。
  * @mbus_code: sensor subdev 端 media bus code。
  * @bpp: 每像素字节数，用于计算 sizeimage/bytesperline。
  *
@@ -311,7 +310,6 @@ struct csi_config_t {
  */
 struct mx6s_fmt {
 	char  name[32];
-	u32   fourcc;		/* v4l2 format id */
 	u32   pixelformat;
 	u32   mbus_code;
 	int   bpp;
@@ -320,31 +318,26 @@ struct mx6s_fmt {
 static struct mx6s_fmt formats[] = {
 	{
 		.name		= "UYVY-16",
-		.fourcc		= V4L2_PIX_FMT_UYVY,
 		.pixelformat	= V4L2_PIX_FMT_UYVY,
 		.mbus_code	= MEDIA_BUS_FMT_UYVY8_2X8,
 		.bpp		= 2,
 	}, {
 		.name		= "YUYV-16",
-		.fourcc		= V4L2_PIX_FMT_YUYV,
 		.pixelformat	= V4L2_PIX_FMT_YUYV,
 		.mbus_code	= MEDIA_BUS_FMT_YUYV8_2X8,
 		.bpp		= 2,
 	}, {
 		.name		= "YUV32 (X-Y-U-V)",
-		.fourcc		= V4L2_PIX_FMT_YUV32,
 		.pixelformat	= V4L2_PIX_FMT_YUV32,
 		.mbus_code	= MEDIA_BUS_FMT_AYUV8_1X32,
 		.bpp		= 4,
 	}, {
 		.name		= "RAWRGB8 (SBGGR8)",
-		.fourcc		= V4L2_PIX_FMT_SBGGR8,
 		.pixelformat	= V4L2_PIX_FMT_SBGGR8,
 		.mbus_code	= MEDIA_BUS_FMT_SBGGR8_1X8,
 		.bpp		= 1,
 	}, {
 		.name		= "RGB565_LE",
-		.fourcc		= V4L2_PIX_FMT_RGB565,
 		.pixelformat	= V4L2_PIX_FMT_RGB565,
 		.mbus_code	= MEDIA_BUS_FMT_RGB565_2X8_LE,
 		.bpp		= 2,
@@ -1207,7 +1200,7 @@ static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 		if (csi_dev->csi_mux_mipi == true)
 			width = pix->width;
 		else
-			/* For parallel 8-bit sensor input */
+			/* For parallel 8-bit sensor input，bpp(byte per pix)=2 */
 			width = pix->width * 2;
 		break;
 	default:

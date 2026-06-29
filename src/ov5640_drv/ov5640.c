@@ -137,13 +137,6 @@ enum ov5640_downsize_mode {
 	OV5640_DOWNSIZE_SCALING,
 };
 
-struct ov5640_rect {
-	u32 left;
-	u32 top;
-	u32 width;
-	u32 height;
-};
-
 struct ov5640_mode_reg_table {
 	enum ov5640_frame_rate frame_rate;
 	const struct reg_value *regs;
@@ -155,8 +148,8 @@ struct ov5640_mode_info {
 	u32 width;
 	u32 height;
 	enum ov5640_downsize_mode downsize;
-	struct ov5640_rect analog_crop;
-	struct ov5640_rect crop;
+	struct v4l2_rect analog_crop;
+	struct v4l2_rect crop;
 	u32 htot;
 	u32 vts_def;
 	u32 pixel_rate;
@@ -166,8 +159,7 @@ struct ov5640_mode_info {
 };
 
 struct ov5640_state {
-	struct v4l2_pix_format pix; /* 当前对 host 暴露的像素格式缓存 */
-	const struct ov5640_datafmt *fmt; /* 当前 media-bus 数据格式 */
+	struct v4l2_mbus_framefmt mbus_fmt; /* 当前 active media-bus 格式缓存 */
 	struct v4l2_captureparm streamcap; /* 当前帧率/采集参数缓存 */
 	enum ov5640_frame_rate frame_rate; /* 当前离散帧率枚举 */
 	enum ov5640_frame_size frame_size; /* 当前传感器输出尺寸 */
@@ -1112,16 +1104,6 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 	return -EINVAL;
 }
 
-static inline u32 ov5640_pixelformat_from_code(u32 code)
-{
-	switch (code) {
-	case MEDIA_BUS_FMT_RGB565_2X8_LE:
-		return V4L2_PIX_FMT_RGB565;
-	default:
-		return 0;
-	}
-}
-
 static int ov5640_apply_format(struct ov5640 *sensor,
 			       const struct ov5640_datafmt *fmt)
 {
@@ -1151,7 +1133,6 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 
 	mutex_init(&sensor->lock);
 
-	sensor->state.fmt = &ov5640_colour_fmts[0];
 	sensor->state.frame_rate = ov5640_30_fps;
 	sensor->state.frame_size = ov5640_frame_size_800_480;
 	sensor->state.powered = false;
@@ -1164,11 +1145,11 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->state.ae_low = 0;
 	sensor->state.night_mode = 0;
 
-	sensor->state.pix.pixelformat = V4L2_PIX_FMT_RGB565;
-	sensor->state.pix.width = mode_info->width;
-	sensor->state.pix.height = mode_info->height;
-	sensor->state.pix.field = V4L2_FIELD_NONE;
-	sensor->state.pix.colorspace = sensor->state.fmt->colorspace;
+	sensor->state.mbus_fmt.width = mode_info->width;
+	sensor->state.mbus_fmt.height = mode_info->height;
+	sensor->state.mbus_fmt.code = ov5640_colour_fmts[0].code;
+	sensor->state.mbus_fmt.field = V4L2_FIELD_NONE;
+	sensor->state.mbus_fmt.colorspace = ov5640_colour_fmts[0].colorspace;
 
 	sensor->state.streamcap.capability = V4L2_MODE_HIGHQUALITY |
 					V4L2_CAP_TIMEPERFRAME;
@@ -1934,8 +1915,8 @@ static int ov5640_init_mode(struct ov5640 *sensor)
 	sensor->state.night_mode = 0;
 	sensor->state.frame_rate = ov5640_30_fps;
 	sensor->state.frame_size = ov5640_frame_size_VGA_640_480;
-	sensor->state.pix.width = 640;
-	sensor->state.pix.height = 480;
+	sensor->state.mbus_fmt.width = 640;
+	sensor->state.mbus_fmt.height = 480;
 err:
 	return retval;
 }
@@ -2199,8 +2180,8 @@ static int ov5640_change_mode(struct ov5640 *sensor,
 	if (retval == 0) {
 		sensor->state.frame_rate = frame_rate;
 		sensor->state.frame_size = frame_size;
-		sensor->state.pix.width = mode_info->width;
-		sensor->state.pix.height = mode_info->height;
+		sensor->state.mbus_fmt.width = mode_info->width;
+		sensor->state.mbus_fmt.height = mode_info->height;
 	}
 
 	return retval;
@@ -2417,7 +2398,9 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 			if (ret < 0)
 				goto unlock;
 
-			fmt = sensor->state.fmt ? sensor->state.fmt : &ov5640_colour_fmts[0];
+			fmt = ov5640_find_datafmt(sensor->state.mbus_fmt.code);
+			if (!fmt)
+				fmt = &ov5640_colour_fmts[0];
 			ret = ov5640_apply_format(sensor, fmt);
 			if (ret < 0)
 				goto unlock;
@@ -2551,13 +2534,8 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 			goto out;
 	}
 
-	sensor->state.fmt = fmt;
 	sensor->state.frame_size = mode_info->frame_size;
-	sensor->state.pix.pixelformat = ov5640_pixelformat_from_code(fmt->code);
-	sensor->state.pix.width = mf->width;
-	sensor->state.pix.height = mf->height;
-	sensor->state.pix.field = mf->field;
-	sensor->state.pix.colorspace = mf->colorspace;
+	sensor->state.mbus_fmt = *mf;
 
 	retval = 0;
 out:
@@ -2570,8 +2548,8 @@ out:
  * @sd: V4L2 sub-device that represents the OV5640 sensor.
  * @mf: Media bus frame format container to fill.
  *
- * The callback reports the media bus code and colorspace cached in the sensor
- * state and forces progressive field order.
+ * The callback returns the active media-bus format cached in the sensor
+ * state.
  *
  * Return: 0.
  */
@@ -2580,14 +2558,7 @@ static int ov5640_g_fmt(struct v4l2_subdev *sd,
 {
 	struct ov5640 *sensor = sd_to_ov5640(sd);
 
-	const struct ov5640_datafmt *fmt = sensor->state.fmt ? sensor->state.fmt :
-					   &ov5640_colour_fmts[0];
-
-	mf->code	= fmt->code;
-	mf->colorspace	= fmt->colorspace;
-	mf->field	= V4L2_FIELD_NONE;
-	mf->width	= sensor->state.pix.width;
-	mf->height	= sensor->state.pix.height;
+	*mf = sensor->state.mbus_fmt;
 
 	return 0;
 }
@@ -2717,6 +2688,7 @@ static int init_device(struct ov5640 *sensor)
 	enum ov5640_frame_rate frame_rate;
 	enum ov5640_frame_size target_frame_size = sensor->state.frame_size;
 	const struct ov5640_mode_info *mode_info;
+	const struct ov5640_datafmt *fmt;
 	int ret;
 
 
@@ -2737,8 +2709,8 @@ static int init_device(struct ov5640 *sensor)
 	mode_info = ov5640_get_mode_info(target_frame_size);
 	if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {
 		mode_info = ov5640_find_nearest_mode(frame_rate,
-						sensor->state.pix.width,
-						sensor->state.pix.height);
+						sensor->state.mbus_fmt.width,
+						sensor->state.mbus_fmt.height);
 		if (!mode_info)
 			return -EINVAL;
 		target_frame_size = mode_info->frame_size;
@@ -2755,7 +2727,11 @@ static int init_device(struct ov5640 *sensor)
 			return ret;
 	}
 
-	ret = ov5640_apply_format(sensor, sensor->state.fmt);
+	fmt = ov5640_find_datafmt(sensor->state.mbus_fmt.code);
+	if (!fmt)
+		fmt = &ov5640_colour_fmts[0];
+
+	ret = ov5640_apply_format(sensor, fmt);
 	if (ret < 0)
 		return ret;
 
