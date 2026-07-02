@@ -1,14 +1,3 @@
-/***************************************************************
- Copyright (C) ALIENTEK Co., Ltd. 1998-2021. All rights reserved.
- 文件名 : ov5640_test.c
- 描述 : OV5640 V4L2摄像头LCD预览测试程序
- 硬件 : 正点原子i.MX6ULL + OV5640 摄像头 + ATK4384 LCD
- 编译 : arm-linux-gnueabihf-gcc ov5640_test.c -o ov5640_test
- 使用 : ./ov5640_test /dev/video0
- 线程 : 邓涛
- 修改 : 适配800x480 RGB565
- ***************************************************************/
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>

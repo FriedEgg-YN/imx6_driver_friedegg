@@ -2240,8 +2240,6 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct ov5640 *sensor = sd_to_ov5640(sd);
-	bool started_streaming;
-	bool was_streaming;
 	int ret;
 
 	if (enable) {
@@ -2258,32 +2256,32 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 
 		mutex_lock(&sensor->lock);
 		if (sensor->state.streaming) {
-			started_streaming = false;
 			ret = 0;
-		} else {
-			ret = ov5640_set_stream(sensor, true);
-			started_streaming = ret == 0;
+			goto err_unlock_put;
 		}
+
+		ret = ov5640_set_stream(sensor, true);
+		if (ret < 0)
+			goto err_unlock_put;
 		mutex_unlock(&sensor->lock);
+		return 0;
 
-		if (ret < 0 || !started_streaming)
+	err_unlock_put:
+		mutex_unlock(&sensor->lock);
+		ov5640_runtime_put_autosuspend(sensor);
+		return ret;
+	} else {
+		mutex_lock(&sensor->lock);
+		if (!sensor->state.streaming) {
+			mutex_unlock(&sensor->lock);
+			return 0;
+		}
+		ret = ov5640_set_stream(sensor, false);
+		mutex_unlock(&sensor->lock);
+		if (ret == 0)
 			ov5640_runtime_put_autosuspend(sensor);
-
 		return ret;
 	}
-
-	mutex_lock(&sensor->lock);
-	was_streaming = sensor->state.streaming;
-	if (was_streaming)
-		ret = ov5640_set_stream(sensor, false);
-	else
-		ret = 0;
-	mutex_unlock(&sensor->lock);
-
-	if (was_streaming && ret == 0)
-		ov5640_runtime_put_autosuspend(sensor);
-
-	return ret;
 }
 
 static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)

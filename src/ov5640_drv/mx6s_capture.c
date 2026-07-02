@@ -942,7 +942,10 @@ static int mx6s_videobuf_setup(struct vb2_queue *vq,
 	 */
 	alloc_ctxs[0] = csi_dev->alloc_ctx;
 
-	/* sizeimage 来自 TRY/S_FMT 后的当前像素格式，是单帧最小 DMA 大小。 */
+	/* 
+	 * sizeimage 来自 TRY/S_FMT 后的当前像素格式，是单帧最小 DMA 大小 
+	 * 最终变成plane的length即容量
+	 */
 	sizes[0] = csi_dev->pix.sizeimage;
 
 	pr_debug("size=%d\n", sizes[0]);
@@ -984,7 +987,8 @@ static int mx6s_videobuf_prepare(struct vb2_buffer *vb)
 		memset((void *)vb2_plane_vaddr(vb, 0),
 		       0xaa, vb2_get_plane_payload(vb, 0));
 #endif
-
+	
+	/* payload 最终变成 plane 的bytesused，描述有效数据长度 */
 	vb2_set_plane_payload(vb, 0, csi_dev->pix.sizeimage);
 	if (vb2_plane_vaddr(vb, 0) &&
 	    vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0)) {
@@ -1100,6 +1104,7 @@ static int mx6s_csi_enable(struct mx6s_csi_dev *csi_dev)
 		return 0;
 	}
 
+	/* close local irq and save irq status to flags */
 	local_irq_save(flags);
 	for (timeout = 10000000; timeout > 0; timeout--) {
 		if (csi_read(csi_dev, CSI_CSISR) & BIT_SOF_INT) {
