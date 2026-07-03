@@ -28,7 +28,7 @@ null::sysinit:/bin/ln -sf /proc/self/fd/2 /dev/stderr
 # LCD framebuffer console
 tty1::askfirst:-/bin/sh
 # serial console
-ttymxc0::respawn:/sbin/getty -L ttymxc0 115200 vt100
+ttymxc0::respawn:/sbin/getty -L -n -l /usr/sbin/autologin-root ttymxc0 115200 vt100
 # now run any rc scripts
 ::sysinit:/etc/init.d/rcS
 
