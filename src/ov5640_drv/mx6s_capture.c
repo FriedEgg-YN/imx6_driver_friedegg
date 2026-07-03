@@ -1717,6 +1717,8 @@ static int mx6s_csi_close(struct file *file)
 
 	/* vb2_queue_release() 释放 REQBUFS 创建的队列资源并归还残留 buffer。 */
 	vb2_queue_release(&csi_dev->vb2_vidq);
+	/* 关stream，维护ov5640.state.streaming状态 */
+	v4l2_subdev_call(sd, video, s_stream, 0);
 
 	mx6s_csi_deinit(csi_dev);
 	v4l2_subdev_call(sd, core, s_power, 0);
