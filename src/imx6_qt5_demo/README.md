@@ -38,6 +38,50 @@ bash buildscripts/build_and_deploy.sh config reset buildroot
 NFS_DIR=<nfs-dir> bash buildscripts/build_and_deploy.sh rootfs
 ```
 
+## 离板 UI 预览
+
+本 demo 已拆分为 `.ui` + C++：
+
+- `monitorpanel.ui` 负责静态布局，可用 Qt Designer 或 VSCode Qt 插件离板查看。
+- `monitorpanel.cpp` 负责 HTTP 控制、状态刷新、RGB565 预览和按钮状态。
+- `main.cpp` 只保留启动参数、默认 `linuxfb` 平台和全屏显示。
+
+Ubuntu 24.04 推荐先安装发行版 Qt5 工具，当前 apt 源提供 Qt 5.15.13，和板端 Buildroot Qt 5.15.14 只差一个 patch 版本，适合布局预览：
+
+```bash
+sudo apt update
+sudo apt install qtbase5-dev qt5-qmake qttools5-dev-tools
+```
+
+可选安装 Qt Creator：
+
+```bash
+sudo apt install qtcreator
+```
+
+安装后检查：
+
+```bash
+qmake -query QT_VERSION
+designer -version
+qtcreator -version
+```
+
+VSCode 建议安装官方 Qt C++ Extension Pack。注册主机 Qt 时选择 `/usr/bin/qmake` 或 `/usr/lib/qt5/bin/qtpaths`；打开 `.ui` 时使用 Qt Widgets Designer。不要把个人 Qt 安装路径写入项目文件。
+
+注意：`buildroot/output/host/bin/qmake` 用于 ARM 交叉编译和处理 `.ui`，不能作为 PC 桌面预览环境。
+
+主机离板编译预览可在安装桌面 Qt 后运行：
+
+```bash
+cd src/imx6_qt5_demo
+mkdir -p build-host
+cd build-host
+qmake ..
+make -j$(nproc)
+QT_QPA_PLATFORM=xcb ./imx6-qt5-demo --duration-ms 5000
+```
+
 ## 主机侧检查
 
 ```bash
