@@ -160,6 +160,20 @@
 			gpios = <&gpio1 18 GPIO_ACTIVE_LOW>;
 		};
 	};
+
+	dummy-chasingled1 {
+		compatible = "friedegg,chasingled";
+		led-count = <3>;
+		period-ms = <1000>;
+		status = "okay";
+	};
+
+	dummy-chasingled2 {
+		compatible = "friedegg,chasingled";
+		led-count = <10>;
+		period-ms = <400>;
+		status = "okay";
+	};
 };
 
 &cpu0 {

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_PRINT_CHASING_LED
+    bool "print chasing LED simulation driver"
+    depends on BR2_LINUX_KERNEL
+    help
+      simulate chasing LED by printk.
