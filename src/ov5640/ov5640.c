@@ -71,6 +71,7 @@
 #define OV5640_REG_AEC_CTRL1B           0x3a1b
 #define OV5640_REG_AEC_CTRL1E           0x3a1e
 #define OV5640_REG_AEC_FAST_LOW         0x3a1f
+#define OV5640_REG_STROBE_CTRL          0x3b00
 #define OV5640_REG_BANDING_50_STEP_H    0x3a08
 #define OV5640_REG_BANDING_50_MAX       0x3a0e
 #define OV5640_REG_BANDING_60_STEP_H    0x3a0a
@@ -94,6 +95,11 @@
 #define OV5640_STREAM_ON                0x00
 #define OV5640_STREAM_OFF               0x0f
 #define OV5640_AUTOSUSPEND_DELAY_MS     1000
+#define OV5640_STROBE_REQUEST_ON        0x80
+#define OV5640_STROBE_MODE_LED3         0x03
+#define OV5640_STROBE_LED3_ON           (OV5640_STROBE_REQUEST_ON | \
+						 OV5640_STROBE_MODE_LED3)
+#define OV5640_STROBE_LED3_OFF          OV5640_STROBE_MODE_LED3
 
 enum ov5640_frame_size {
 	ov5640_frame_size_MIN = 0,
@@ -1179,6 +1185,32 @@ static inline void ov5640_reset(struct ov5640 *sensor)
 	gpiod_set_value_cansleep(sensor->pwdn_gpio, true);
 }
 
+static void ov5640_log_strobe_ctrl(struct ov5640 *sensor, const char *tag)
+{
+	u8 ctrl;
+	int ret;
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
+	if (ret < 0)
+		return;
+
+	dev_info(sensor->dev, "OV5640 strobe %s: 3b00=0x%02x\n", tag, ctrl);
+}
+
+static int ov5640_set_strobe_led3(struct ov5640 *sensor, bool enable)
+{
+	int ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+				enable ? OV5640_STROBE_LED3_ON :
+					 OV5640_STROBE_LED3_OFF);
+	if (ret < 0)
+		return ret;
+
+	ov5640_log_strobe_ctrl(sensor, enable ? "LED3 on" : "LED3 off");
+	return 0;
+}
+
 static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
 {
 	return ov5640_write_reg(sensor, OV5640_REG_STREAM_CTRL,
@@ -1198,6 +1230,16 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 	ret = ov5640_hw_set_stream(sensor, enable);
 	if (ret < 0)
 		return ret;
+
+	if (enable) {
+		ret = ov5640_set_strobe_led3(sensor, true);
+		if (ret < 0) {
+			ov5640_hw_set_stream(sensor, false);
+			return ret;
+		}
+	} else {
+		ov5640_set_strobe_led3(sensor, false);
+	}
 
 	sensor->state.streaming = enable;
 	return 0;

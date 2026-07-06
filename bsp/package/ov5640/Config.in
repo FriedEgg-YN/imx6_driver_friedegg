@@ -1,4 +1,4 @@
-config BR2_PACKAGE_OV5640_DRV
+config BR2_PACKAGE_OV5640
     bool "ov5640 camera driver + test app"
     depends on BR2_LINUX_KERNEL
     help
