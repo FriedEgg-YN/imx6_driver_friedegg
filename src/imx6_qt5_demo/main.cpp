@@ -1,4 +1,4 @@
-#include "monitorpanel.h"
+#include "phoneshell.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -43,8 +43,8 @@ int main(int argc, char **argv)
         qputenv("QT_QPA_PLATFORM", "linuxfb");
 
     QApplication app(argc, argv);
-    MonitorPanel panel;
-    panel.showFullScreen();
+    PhoneShell shell;
+    shell.showFullScreen();
 
     const int timeout = durationMs(argc, argv);
     if (timeout > 0)

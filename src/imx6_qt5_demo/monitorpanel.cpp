@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHBoxLayout>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -11,6 +12,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QStringList>
+#include <QVBoxLayout>
 
 MonitorPanel::MonitorPanel(QWidget *parent)
     : QWidget(parent)
@@ -20,13 +22,25 @@ MonitorPanel::MonitorPanel(QWidget *parent)
 {
     ui->setupUi(this);
 
+    QPushButton *homeButton = new QPushButton(QStringLiteral("Home"), this);
+    homeButton->setObjectName(QStringLiteral("homeButton"));
+    if (QVBoxLayout *root = qobject_cast<QVBoxLayout *>(layout())) {
+        root->removeWidget(ui->title);
+        QHBoxLayout *titleLayout = new QHBoxLayout;
+        titleLayout->setContentsMargins(0, 0, 0, 0);
+        titleLayout->addWidget(ui->title, 1);
+        titleLayout->addWidget(homeButton);
+        root->insertLayout(0, titleLayout);
+    }
+    connect(homeButton, &QPushButton::clicked, this, &MonitorPanel::homeRequested);
+
     setStyleSheet(QStringLiteral(
         "QWidget{background:#111820;color:#eef3f5;font-family:DejaVu Sans;}"
         "QLabel{font-size:16px;}"
         "QPushButton{font-size:18px;padding:14px 10px;border-radius:6px;background:#25313b;color:#eef3f5;}"
         "QPushButton:checked{background:#1f8f64;color:white;}"
         "QPushButton:pressed{background:#2f4555;}"
-        "#title{font-size:24px;font-weight:700;}"
+        "#title{font-size:24px;font-weight:700;}#homeButton{min-width:88px;}"
         "#previewLabel{background:#050607;border:2px solid #2a3944;}"
         "#stateLabel,#sensorLabel,#videoLabel{font-size:14px;color:#b7c5cd;}"));
 

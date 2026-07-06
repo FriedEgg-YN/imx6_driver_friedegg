@@ -20,6 +20,9 @@ public:
     explicit MonitorPanel(QWidget *parent = nullptr);
     ~MonitorPanel() override;
 
+signals:
+    void homeRequested();
+
 private:
     Ui::MonitorPanel *ui;
     QNetworkAccessManager *manager;

@@ -1,10 +1,12 @@
-# IMX6 Qt5 Monitor HMI
+# IMX6 Qt5 Touch Launcher
 
-本目录现在是 i.MX6ULL 触摸屏 HMI，用 Qt Widgets + linuxfb 控制 `imx6-monitor`：
+本目录现在是 i.MX6ULL 触摸屏 launcher，用 Qt Widgets + linuxfb 提供类手机主界面，并把 Monitor HMI 作为其中一个 app：
 
-- Qt 启动时先探测 `http://127.0.0.1:8080/api/status`。
-- 如果 monitor 未运行，Qt 使用 `QProcess` 启动 `/usr/bin/imx6-monitor`。
-- 触摸按钮控制 monitor、摄像头采集、Qt 内嵌 LCD 预览、摄像头网络访问、AP3216C 轮询和 AP3216C 网络访问。
+- 程序默认进入 Touch Launcher 主界面，主界面显示 Monitor、Sensors、Network、Settings 等 app 图标。
+- 点击 Monitor app 后进入原来的监控 HMI，并探测 `http://127.0.0.1:8080/api/status`。
+- 如果 monitor 未运行，Monitor app 使用 `QProcess` 启动 `/usr/bin/imx6-monitor`。
+- Monitor app 内的触摸按钮控制 monitor、摄像头采集、Qt 内嵌 LCD 预览、摄像头网络访问、AP3216C 轮询和 AP3216C 网络访问。
+- Monitor app 右上角 `Home` 可退出 app 回到主界面；若 monitor 是 Qt 自己启动的，退出时随 app 一起停止。
 - 本地预览由 Qt 请求本机 `/frame.rgb565` 原始帧后显示在界面中，避免 JPEG 编解码；monitor 默认不直接写 `/dev/fb0`。
 
 | 项 | 内容 |
@@ -44,6 +46,7 @@ NFS_DIR=<nfs-dir> bash buildscripts/build_and_deploy.sh rootfs
 
 - `monitorpanel.ui` 负责静态布局，可用 Qt Designer 或 VSCode Qt 插件离板查看。
 - `monitorpanel.cpp` 负责 HTTP 控制、状态刷新、RGB565 预览和按钮状态。
+- `phoneshell.cpp` 负责 launcher 主界面、app 图标和页面切换。
 - `main.cpp` 只保留启动参数、默认 `linuxfb` 平台和全屏显示。
 
 Ubuntu 24.04 推荐先安装发行版 Qt5 工具，当前 apt 源提供 Qt 5.15.13，和板端 Buildroot Qt 5.15.14 只差一个 patch 版本，适合布局预览：
@@ -102,7 +105,7 @@ file buildroot/output/target/usr/bin/imx6-qt5-demo
 QT_QPA_PLATFORM=linuxfb imx6-qt5-demo --self-test
 ```
 
-运行触摸 HMI：
+运行触摸 launcher：
 
 ```bash
 QT_QPA_PLATFORM=linuxfb imx6-qt5-demo
@@ -131,6 +134,8 @@ QT_QPA_PLATFORM=linuxfb imx6-qt5-demo
 
 在触摸屏上验证：
 
+- 默认显示 Touch Launcher 主界面，而不是直接进入 Monitor HMI。
+- 点击 `Monitor` 图标进入原监控界面，点击右上角 `Home` 返回主界面。
 - `Monitor` 可启动/停止 monitor。若 Qt 检测到外部已有 monitor，只接管控制，不强杀外部进程。
 - `Camera` 打开后 `LCD Preview` 可显示本机 RGB565 预览刷新。
 - `Camera Net` 关闭时板外 `/stream.mjpg` 被拒绝，已有 MJPEG 长连接也会断开；打开后可浏览 MJPEG。

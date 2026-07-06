@@ -5,9 +5,11 @@ QT += widgets network
 CONFIG += c++11
 
 SOURCES += main.cpp \
-           monitorpanel.cpp
+           monitorpanel.cpp \
+           phoneshell.cpp
 
-HEADERS += monitorpanel.h
+HEADERS += monitorpanel.h \
+           phoneshell.h
 
 FORMS += monitorpanel.ui
 
