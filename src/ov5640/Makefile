@@ -4,7 +4,7 @@ obj-m += ov5640.o mx6s_capture.o
 
 APP_NAME := ov5640_test
 APP_SRC := ov5640_test.c
-APP_CFLAGS ?= -Wall -O2
+APP_CFLAGS ?= -Wall -O2 -pthread
 
 DEMO_NAME := ov5640_interface_demo
 DEMO_SRC := ov5640_interface_demo.c

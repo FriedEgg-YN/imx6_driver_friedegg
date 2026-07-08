@@ -21,6 +21,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
@@ -52,6 +53,9 @@
 
 #define OV5640_REG_PAD_OUTPUT_ENABLE00	0x3016
 #define OV5640_REG_PAD_SELECT00			0x301c
+#define OV5640_REG_SYSTEM_RESET00      0x3000
+#define OV5640_REG_SYSTEM_RESET01      0x3001
+#define OV5640_REG_CLOCK_ENABLE01      0x3005
 #define OV5640_REG_SYSCLK_PLL_CTRL0     0x3034
 #define OV5640_REG_SYSCLK_PLL_CTRL1     0x3035
 #define OV5640_REG_SYSCLK_PLL_MULT      0x3036
@@ -74,6 +78,16 @@
 #define OV5640_REG_AEC_CTRL1E           0x3a1e
 #define OV5640_REG_AEC_FAST_LOW         0x3a1f
 #define OV5640_REG_STROBE_CTRL          0x3b00
+#define OV5640_REG_VCM_CONTROL2         0x3602
+#define OV5640_REG_VCM_CONTROL3         0x3603
+#define OV5640_REG_AF_CMD_MAIN          0x3022
+#define OV5640_REG_AF_CMD_ACK           0x3023
+#define OV5640_REG_AF_CMD_PARA0         0x3024
+#define OV5640_REG_AF_CMD_PARA1         0x3025
+#define OV5640_REG_AF_CMD_PARA2         0x3026
+#define OV5640_REG_AF_CMD_PARA3         0x3027
+#define OV5640_REG_AF_CMD_PARA4         0x3028
+#define OV5640_REG_AF_FW_STATUS         0x3029
 #define OV5640_REG_BANDING_50_STEP_H    0x3a08
 #define OV5640_REG_BANDING_50_MAX       0x3a0e
 #define OV5640_REG_BANDING_60_STEP_H    0x3a0a
@@ -102,6 +116,51 @@
 #define OV5640_STROBE_MODE_LED1			0x01
 #define OV5640_STROBE_MODE_LED2			0x02
 #define OV5640_STROBE_MODE_LED3         0x03
+#define OV5640_VCM_TARGET_MAX           1023
+#define OV5640_VCM_CONTROL2_TARGET_MASK 0xf0
+#define OV5640_VCM_CONTROL2_STEP_3200US 0x0f
+#define OV5640_VCM_CONTROL3_PWDN        0x80
+#define OV5640_VCM_CONTROL3_TARGET_MASK 0x3f
+#define OV5640_SYSTEM_RESET00_MCU       0x20
+
+#define OV5640_AF_FIRMWARE_NAME         "ov5640_af.bin"
+#define OV5640_AF_FIRMWARE_MAX_SIZE     4096
+#define OV5640_AF_FIRMWARE_START        0x8000
+#define OV5640_AF_IDLE_TIMEOUT_MS       2000
+#define OV5640_AF_CMD_TIMEOUT_MS        500
+#define OV5640_AF_CMD_POLL_MS           5
+#define OV5640_AF_STATUS_POLL_MS        20
+#define OV5640_AF_NUM_ZONES             5
+#define OV5640_AF_VVF_WIDTH             80
+#define OV5640_AF_VVF_HEIGHT            60
+#define OV5640_AF_TOUCH_ZONE_WIDTH      16
+#define OV5640_AF_TOUCH_ZONE_HEIGHT     12
+#define OV5640_AF_TOUCH_X_MAX           2591
+#define OV5640_AF_TOUCH_Y_MAX           1943
+
+#define OV5640_AF_CMD_TRIG_AUTO_FOCUS   0x03
+#define OV5640_AF_CMD_GET_FOCUS_RESULT  0x07
+#define OV5640_AF_CMD_RELEASE_FOCUS     0x08
+#define OV5640_AF_CMD_RELAUNCH_ZONE     0x12
+#define OV5640_AF_CMD_DEFAULT_ZONE      0x80
+#define OV5640_AF_CMD_TOUCH_ZONE        0x81
+
+#define OV5640_AF_STATUS_FIRMWARE       0x7f
+#define OV5640_AF_STATUS_STARTUP        0x7e
+#define OV5640_AF_STATUS_IDLE           0x70
+#define OV5640_AF_STATUS_FOCUSED        0x10
+#define OV5640_AF_STATUS_ZONE_CONFIG    0x16
+
+#define OV5640_CID_AF_BASE              (V4L2_CID_USER_BASE | 0xf000)
+#define OV5640_CID_AF_ZONE_MODE         (OV5640_CID_AF_BASE + 0)
+#define OV5640_CID_AF_TOUCH_X           (OV5640_CID_AF_BASE + 1)
+#define OV5640_CID_AF_TOUCH_Y           (OV5640_CID_AF_BASE + 2)
+#define OV5640_CID_AF_ZONE_RESULT       (OV5640_CID_AF_BASE + 3)
+
+enum ov5640_af_zone_mode {
+	OV5640_AF_ZONE_MODE_DEFAULT = 0,
+	OV5640_AF_ZONE_MODE_TOUCH = 1,
+};
 
 enum ov5640_frame_size {
 	ov5640_frame_size_MIN = 0,
@@ -191,6 +250,15 @@ struct ov5640_state {
 	int ae_mode; /* 预留自动曝光模式缓存 */
 };
 
+struct ov5640_af_state {
+	bool firmware_loaded;
+	bool zone_pending;
+	enum ov5640_af_zone_mode zone_mode;
+	u32 touch_x_q16;
+	u32 touch_y_q16;
+	u8 zone_result;
+};
+
 struct ov5640_ctrls {
 	struct v4l2_ctrl_handler ctrl_handler; /* V4L2 控制集合 */
 	struct v4l2_ctrl *hflip; /* 水平翻转控制 */
@@ -199,6 +267,14 @@ struct ov5640_ctrls {
 	struct v4l2_ctrl *strobe_mode; /* LED 闪光灯模式控制 */
 	struct v4l2_ctrl *strobe_request;
 	struct v4l2_ctrl *strobe_stop;
+	struct v4l2_ctrl *focus_absolute; /* VCM absolute focus target */
+	struct v4l2_ctrl *auto_focus_start;
+	struct v4l2_ctrl *auto_focus_stop;
+	struct v4l2_ctrl *auto_focus_status;
+	struct v4l2_ctrl *af_zone_mode;
+	struct v4l2_ctrl *af_touch_x;
+	struct v4l2_ctrl *af_touch_y;
+	struct v4l2_ctrl *af_zone_result;
 };
 
 struct ov5640 {
@@ -210,6 +286,7 @@ struct ov5640 {
 	struct gpio_desc *reset_gpio; /* RESET 管脚，控制传感器复位 */
 	struct mutex lock; /* 保护状态缓存和寄存器编程 */
 	struct ov5640_state state; /* V4L2、PM、曝光和遗留控制缓存状态 */
+	struct ov5640_af_state af; /* MCU firmware AF runtime cache */
 	struct ov5640_ctrls ctrls; /* V4L2 控制集合 */
 	struct regulator *io_regulator; /* DOVDD，可选 IO 电源 */
 	struct regulator *core_regulator; /* DVDD，可选内核电源 */
@@ -220,6 +297,8 @@ struct ov5640 {
 	int csi; /* legacy CSI 控制器编号 */
 	void (*io_init)(struct ov5640 *sensor); /* 板级复位/上电时序回调 */
 };
+
+static void ov5640_af_invalidate(struct ov5640 *sensor);
 
 static const struct reg_value ov5640_global_init_setting[] = {
 	{0x3008, 0x42, 0, 0},
@@ -1151,6 +1230,12 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->state.frame_size = ov5640_frame_size_800_480;
 	sensor->state.powered = false;
 	sensor->state.streaming = false;
+	sensor->af.firmware_loaded = false;
+	sensor->af.zone_pending = true;
+	sensor->af.zone_mode = OV5640_AF_ZONE_MODE_DEFAULT;
+	sensor->af.touch_x_q16 = 0;
+	sensor->af.touch_y_q16 = 0;
+	sensor->af.zone_result = 0;
 	sensor->state.prev_sysclk = 0;
 	sensor->state.prev_hts = 0;
 	sensor->state.ae_target = 52;
@@ -1259,6 +1344,7 @@ static void ov5640_power_off(struct ov5640 *sensor)
 	clk_disable_unprepare(sensor->sensor_clk);
 	sensor->state.streaming = false;
 	sensor->state.powered = false;
+	ov5640_af_invalidate(sensor);
 }
 
 static inline int ov5640_runtime_get(struct ov5640 *sensor)
@@ -1373,6 +1459,431 @@ static int ov5640_set_vflip(struct ov5640 *sensor)
 	return 0;
 }
 
+static bool ov5640_af_status_is_focusing(u8 status)
+{
+	return status <= 0x0f || (status >= 0x80 && status <= 0x8f);
+}
+
+static void ov5640_af_invalidate(struct ov5640 *sensor)
+{
+	sensor->af.firmware_loaded = false;
+	sensor->af.zone_pending = true;
+	sensor->af.zone_result = 0;
+}
+
+static int ov5640_af_wait_status(struct ov5640 *sensor, u8 expected,
+				  unsigned int timeout_ms)
+{
+	u8 status = 0;
+	unsigned int elapsed;
+	int ret;
+
+	for (elapsed = 0; elapsed <= timeout_ms;
+	     elapsed += OV5640_AF_STATUS_POLL_MS) {
+		ret = ov5640_read_reg(sensor, OV5640_REG_AF_FW_STATUS, &status);
+		if (ret < 0)
+			return ret;
+		if (status == expected)
+			return 0;
+		if (elapsed >= timeout_ms)
+			break;
+		msleep(OV5640_AF_STATUS_POLL_MS);
+	}
+
+	dev_warn(sensor->dev,
+		 "AF firmware status timeout: got 0x%02x, expected 0x%02x\n",
+		 status, expected);
+	ov5640_af_invalidate(sensor);
+	return -ETIMEDOUT;
+}
+
+static int ov5640_af_wait_ack(struct ov5640 *sensor, u8 command)
+{
+	u8 ack = 0;
+	unsigned int elapsed;
+	int ret;
+
+	for (elapsed = 0; elapsed <= OV5640_AF_CMD_TIMEOUT_MS;
+	     elapsed += OV5640_AF_CMD_POLL_MS) {
+		ret = ov5640_read_reg(sensor, OV5640_REG_AF_CMD_ACK, &ack);
+		if (ret < 0)
+			return ret;
+		if (ack == 0)
+			return 0;
+		if (elapsed >= OV5640_AF_CMD_TIMEOUT_MS)
+			break;
+		msleep(OV5640_AF_CMD_POLL_MS);
+	}
+
+	dev_warn(sensor->dev, "AF command 0x%02x ACK timeout\n", command);
+	ov5640_af_invalidate(sensor);
+	return -ETIMEDOUT;
+}
+
+static int ov5640_af_command(struct ov5640 *sensor, u8 command,
+			     const u8 *params, unsigned int num_params)
+{
+	unsigned int i;
+	int ret;
+
+	if (num_params > OV5640_AF_NUM_ZONES)
+		return -EINVAL;
+
+	for (i = 0; i < num_params; i++) {
+		ret = ov5640_write_reg(sensor, OV5640_REG_AF_CMD_PARA0 + i,
+				       params[i]);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_AF_CMD_ACK, 0x01);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_AF_CMD_MAIN, command);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_af_wait_ack(sensor, command);
+}
+
+static int ov5640_af_load_firmware(struct ov5640 *sensor)
+{
+	const struct firmware *fw = NULL;
+	size_t i;
+	int ret;
+
+	if (sensor->af.firmware_loaded)
+		return 0;
+
+	ret = request_firmware(&fw, OV5640_AF_FIRMWARE_NAME, sensor->dev);
+	if (ret < 0) {
+		dev_err(sensor->dev, "request firmware %s failed: %d\n",
+			OV5640_AF_FIRMWARE_NAME, ret);
+		return ret;
+	}
+
+	if (!fw->size || fw->size > OV5640_AF_FIRMWARE_MAX_SIZE) {
+		dev_err(sensor->dev, "invalid AF firmware size: %u\n",
+			(unsigned int)fw->size);
+		ret = -EINVAL;
+		goto release_fw;
+	}
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_SYSTEM_RESET00,
+				OV5640_SYSTEM_RESET00_MCU);
+	if (ret < 0)
+		goto release_fw;
+
+	for (i = 0; i < fw->size; i++) {
+		ret = ov5640_write_reg(sensor, OV5640_AF_FIRMWARE_START + i,
+				       fw->data[i]);
+		if (ret < 0)
+			goto release_fw;
+	}
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_SYSTEM_RESET00, 0x00);
+	if (ret < 0)
+		goto release_fw;
+
+	ret = ov5640_af_wait_status(sensor, OV5640_AF_STATUS_IDLE,
+				     OV5640_AF_IDLE_TIMEOUT_MS);
+	if (ret < 0)
+		goto release_fw;
+
+	sensor->af.firmware_loaded = true;
+	sensor->af.zone_pending = true;
+	sensor->af.zone_result = 0;
+	dev_info(sensor->dev, "loaded %s (%u bytes)\n",
+		 OV5640_AF_FIRMWARE_NAME, (unsigned int)fw->size);
+
+release_fw:
+	release_firmware(fw);
+	return ret;
+}
+
+static void ov5640_af_touch_zone_vvf(struct ov5640 *sensor, u8 *x0, u8 *y0)
+{
+	u32 x_center;
+	u32 y_center;
+	u32 x;
+	u32 y;
+	u32 max_x;
+	u32 max_y;
+
+	x_center = (sensor->af.touch_x_q16 * (OV5640_AF_VVF_WIDTH - 1) +
+		    (1U << 15)) >> 16;
+	y_center = (sensor->af.touch_y_q16 * (OV5640_AF_VVF_HEIGHT - 1) +
+		    (1U << 15)) >> 16;
+
+	if (x_center >= OV5640_AF_TOUCH_ZONE_WIDTH / 2)
+		x = x_center - OV5640_AF_TOUCH_ZONE_WIDTH / 2;
+	else
+		x = 0;
+
+	if (y_center >= OV5640_AF_TOUCH_ZONE_HEIGHT / 2)
+		y = y_center - OV5640_AF_TOUCH_ZONE_HEIGHT / 2;
+	else
+		y = 0;
+
+	max_x = OV5640_AF_VVF_WIDTH - OV5640_AF_TOUCH_ZONE_WIDTH;
+	max_y = OV5640_AF_VVF_HEIGHT - OV5640_AF_TOUCH_ZONE_HEIGHT;
+	if (x > max_x)
+		x = max_x;
+	if (y > max_y)
+		y = max_y;
+
+	*x0 = x;
+	*y0 = y;
+}
+
+static int ov5640_af_apply_zone(struct ov5640 *sensor)
+{
+	u8 params[2];
+	u8 x0;
+	u8 y0;
+	int ret;
+
+	if (!sensor->af.firmware_loaded) {
+		sensor->af.zone_pending = true;
+		return 0;
+	}
+
+	sensor->af.zone_result = 0;
+	switch (sensor->af.zone_mode) {
+	case OV5640_AF_ZONE_MODE_DEFAULT:
+		ret = ov5640_af_command(sensor, OV5640_AF_CMD_DEFAULT_ZONE,
+					 NULL, 0);
+		break;
+	case OV5640_AF_ZONE_MODE_TOUCH:
+		ov5640_af_touch_zone_vvf(sensor, &x0, &y0);
+		params[0] = x0;
+		params[1] = y0;
+		ret = ov5640_af_command(sensor, OV5640_AF_CMD_TOUCH_ZONE,
+					 params, 2);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	if (ret < 0) {
+		sensor->af.zone_pending = true;
+		return ret;
+	}
+
+	sensor->af.zone_pending = false;
+	return 0;
+}
+
+static int ov5640_af_note_zone_change(struct ov5640 *sensor)
+{
+	sensor->af.zone_pending = true;
+	sensor->af.zone_result = 0;
+
+	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
+		return 0;
+
+	return ov5640_af_apply_zone(sensor);
+}
+
+static int ov5640_af_note_mode_change(struct ov5640 *sensor)
+{
+	int ret;
+
+	sensor->af.zone_pending = true;
+	sensor->af.zone_result = 0;
+
+	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
+		return 0;
+
+	ret = ov5640_af_command(sensor, OV5640_AF_CMD_RELAUNCH_ZONE, NULL, 0);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_af_apply_zone(sensor);
+}
+
+static int ov5640_af_get_focus_result(struct ov5640 *sensor)
+{
+	u8 zone;
+	u8 result = 0;
+	unsigned int i;
+	int ret;
+
+	ret = ov5640_af_command(sensor, OV5640_AF_CMD_GET_FOCUS_RESULT, NULL, 0);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < OV5640_AF_NUM_ZONES; i++) {
+		ret = ov5640_read_reg(sensor, OV5640_REG_AF_CMD_PARA0 + i,
+				       &zone);
+		if (ret < 0)
+			return ret;
+		if (zone == 0)
+			result |= 1 << i;
+	}
+
+	sensor->af.zone_result = result;
+	return 0;
+}
+
+static int ov5640_af_release(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (!sensor->af.firmware_loaded)
+		return 0;
+
+	ret = ov5640_af_command(sensor, OV5640_AF_CMD_RELEASE_FOCUS, NULL, 0);
+	if (ret < 0)
+		return ret;
+
+	sensor->af.zone_result = 0;
+	return 0;
+}
+
+static int ov5640_af_start(struct ov5640 *sensor)
+{
+	int ret;
+
+	if (!sensor->state.streaming)
+		return -EPIPE;
+
+	ret = ov5640_af_load_firmware(sensor);
+	if (ret < 0)
+		return ret;
+
+	if (sensor->af.zone_pending) {
+		ret = ov5640_af_apply_zone(sensor);
+		if (ret < 0)
+			return ret;
+	}
+
+	sensor->af.zone_result = 0;
+	return ov5640_af_command(sensor, OV5640_AF_CMD_TRIG_AUTO_FOCUS, NULL, 0);
+}
+
+static int ov5640_af_stop(struct ov5640 *sensor)
+{
+	int ret;
+
+	sensor->af.zone_result = 0;
+	if (!sensor->state.powered || !sensor->af.firmware_loaded)
+		return 0;
+
+	ret = ov5640_af_release(sensor);
+	if (ret < 0)
+		return ret;
+
+	sensor->af.zone_result = 0;
+	return 0;
+}
+
+static int ov5640_af_get_status(struct ov5640 *sensor, int *status)
+{
+	u8 fw_status;
+	int ret;
+
+	if (!status)
+		return -EINVAL;
+
+	if (!sensor->af.firmware_loaded) {
+		*status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+		return 0;
+	}
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_AF_FW_STATUS, &fw_status);
+	if (ret < 0)
+		return ret;
+
+	if (fw_status == OV5640_AF_STATUS_IDLE) {
+		*status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	} else if (fw_status == OV5640_AF_STATUS_FOCUSED) {
+		ret = ov5640_af_get_focus_result(sensor);
+		if (ret < 0)
+			return ret;
+		*status = sensor->af.zone_result ?
+			  V4L2_AUTO_FOCUS_STATUS_REACHED :
+			  V4L2_AUTO_FOCUS_STATUS_FAILED;
+	} else if (fw_status == OV5640_AF_STATUS_FIRMWARE ||
+		   fw_status == OV5640_AF_STATUS_STARTUP ||
+		   fw_status == OV5640_AF_STATUS_ZONE_CONFIG ||
+		   ov5640_af_status_is_focusing(fw_status)) {
+		*status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+	} else {
+		dev_dbg(sensor->dev, "unknown AF firmware status 0x%02x\n",
+			fw_status);
+		*status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+	}
+
+	return 0;
+}
+
+static int ov5640_af_get_zone_result(struct ov5640 *sensor, int *result)
+{
+	if (!result)
+		return -EINVAL;
+
+	*result = sensor->af.zone_result;
+	return 0;
+}
+
+static void ov5640_af_update_touch_x(struct ov5640 *sensor, u32 x)
+{
+	u32 width = sensor->state.mbus_fmt.width;
+
+	if (width <= 1) {
+		sensor->af.touch_x_q16 = 0;
+		return;
+	}
+
+	if (x >= width)
+		x = width - 1;
+	sensor->af.touch_x_q16 = (x << 16) / (width - 1);
+}
+
+static void ov5640_af_update_touch_y(struct ov5640 *sensor, u32 y)
+{
+	u32 height = sensor->state.mbus_fmt.height;
+
+	if (height <= 1) {
+		sensor->af.touch_y_q16 = 0;
+		return;
+	}
+
+	if (y >= height)
+		y = height - 1;
+	sensor->af.touch_y_q16 = (y << 16) / (height - 1);
+}
+
+static int ov5640_set_focus_absolute(struct ov5640 *sensor, int code)
+{
+	int ret;
+
+	if (code < 0)
+		code = 0;
+	else if (code > OV5640_VCM_TARGET_MAX)
+		code = OV5640_VCM_TARGET_MAX;
+
+	ret = ov5640_af_release(sensor);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_VCM_CONTROL3,
+			     OV5640_VCM_CONTROL3_PWDN |
+			     OV5640_VCM_CONTROL3_TARGET_MASK,
+			     (code >> 4) & OV5640_VCM_CONTROL3_TARGET_MASK);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_mod_reg(sensor, OV5640_REG_VCM_CONTROL2,
+			       OV5640_VCM_CONTROL2_TARGET_MASK |
+			       OV5640_VCM_CONTROL2_STEP_3200US,
+			       ((code & 0x0f) << 4) |
+			       OV5640_VCM_CONTROL2_STEP_3200US);
+}
+
 static int ov5640_set_power_line_frequency(struct ov5640 *sensor)
 {
 	int ret;
@@ -1478,7 +1989,8 @@ static int ov5640_apply_controls(struct ov5640 *sensor)
 	int ret;
 
 	if (!sensor->ctrls.hflip || !sensor->ctrls.vflip ||
-	    !sensor->ctrls.power_line_frequency || !sensor->ctrls.strobe_mode)
+	    !sensor->ctrls.power_line_frequency || !sensor->ctrls.strobe_mode ||
+	    !sensor->ctrls.focus_absolute)
 		return 0;
 
 	ret = ov5640_set_vflip(sensor);
@@ -1491,7 +2003,10 @@ static int ov5640_apply_controls(struct ov5640 *sensor)
 	ret = ov5640_set_power_line_frequency(sensor);
 	if (ret < 0)
 		return ret;
-	return ov5640_set_strobe_mode(sensor);
+	ret = ov5640_set_strobe_mode(sensor);
+	if (ret < 0)
+		return ret;
+	return ov5640_set_focus_absolute(sensor, sensor->ctrls.focus_absolute->val);
 }
 
 static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
@@ -1501,6 +2016,34 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	int ret = 0;
 
 	mutex_lock(&sensor->lock);
+
+	switch (ctrl->id) {
+	case OV5640_CID_AF_ZONE_MODE:
+		sensor->af.zone_mode = ctrl->val;
+		ret = ov5640_af_note_zone_change(sensor);
+		goto out;
+	case OV5640_CID_AF_TOUCH_X:
+		ov5640_af_update_touch_x(sensor, ctrl->val);
+		ret = ov5640_af_note_zone_change(sensor);
+		goto out;
+	case OV5640_CID_AF_TOUCH_Y:
+		ov5640_af_update_touch_y(sensor, ctrl->val);
+		ret = ov5640_af_note_zone_change(sensor);
+		goto out;
+	case V4L2_CID_AUTO_FOCUS_STOP:
+		ret = ov5640_af_stop(sensor);
+		goto out;
+	case V4L2_CID_AUTO_FOCUS_START:
+		if (!sensor->state.powered) {
+			ret = -EPIPE;
+			goto out;
+		}
+		ret = ov5640_af_start(sensor);
+		goto out;
+	default:
+		break;
+	}
+
 	if (!sensor->state.powered)
 		goto out;
 
@@ -1523,6 +2066,9 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_FLASH_STROBE_STOP:
 		ret = ov5640_set_strobe_stop(sensor);
 		break;
+	case V4L2_CID_FOCUS_ABSOLUTE:
+		ret = ov5640_set_focus_absolute(sensor, ctrl->val);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -1533,8 +2079,83 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	return ret;
 }
 
+static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct ov5640 *sensor =
+		container_of(ctrl->handler, struct ov5640, ctrls.ctrl_handler);
+	int value = 0;
+	int ret = 0;
+
+	mutex_lock(&sensor->lock);
+	switch (ctrl->id) {
+	case V4L2_CID_AUTO_FOCUS_STATUS:
+		ret = ov5640_af_get_status(sensor, &value);
+		if (ret == 0)
+			ctrl->val = value;
+		break;
+	case OV5640_CID_AF_ZONE_RESULT:
+		ret = ov5640_af_get_zone_result(sensor, &value);
+		if (ret == 0)
+			ctrl->val = value;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	mutex_unlock(&sensor->lock);
+	return ret;
+}
+
 static const struct v4l2_ctrl_ops ov5640_ctrl_ops = {
+	.g_volatile_ctrl = ov5640_g_volatile_ctrl,
 	.s_ctrl = ov5640_s_ctrl,
+};
+
+static const char * const ov5640_af_zone_mode_menu[] = {
+	"default",
+	"touch",
+	NULL,
+};
+
+static const struct v4l2_ctrl_config ov5640_af_ctrls[] = {
+	{
+		.ops = &ov5640_ctrl_ops,
+		.id = OV5640_CID_AF_ZONE_MODE,
+		.name = "af_zone_mode",
+		.type = V4L2_CTRL_TYPE_MENU,
+		.min = OV5640_AF_ZONE_MODE_DEFAULT,
+		.max = OV5640_AF_ZONE_MODE_TOUCH,
+		.def = OV5640_AF_ZONE_MODE_DEFAULT,
+		.qmenu = ov5640_af_zone_mode_menu,
+	}, {
+		.ops = &ov5640_ctrl_ops,
+		.id = OV5640_CID_AF_TOUCH_X,
+		.name = "af_touch_x",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.min = 0,
+		.max = OV5640_AF_TOUCH_X_MAX,
+		.step = 1,
+		.def = 0,
+	}, {
+		.ops = &ov5640_ctrl_ops,
+		.id = OV5640_CID_AF_TOUCH_Y,
+		.name = "af_touch_y",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.min = 0,
+		.max = OV5640_AF_TOUCH_Y_MAX,
+		.step = 1,
+		.def = 0,
+	}, {
+		.ops = &ov5640_ctrl_ops,
+		.id = OV5640_CID_AF_ZONE_RESULT,
+		.name = "af_zone_result",
+		.type = V4L2_CTRL_TYPE_BITMASK,
+		.min = 0,
+		.max = (1 << OV5640_AF_NUM_ZONES) - 1,
+		.step = 0,
+		.def = 0,
+		.flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE,
+	},
 };
 
 /* TODO: 可以通过v4l2_ctrl_handler_setup()把所有可写control 写入硬件，可用于初始化*/
@@ -1543,12 +2164,12 @@ static int ov5640_init_controls(struct ov5640 *sensor)
 	struct v4l2_ctrl_handler *hdl = &sensor->ctrls.ctrl_handler;
 	int ret;
 
-	ret = v4l2_ctrl_handler_init(hdl, 6);
+	ret = v4l2_ctrl_handler_init(hdl, 14);
 	if (ret < 0)
 		return ret;
 
 	sensor->ctrls.hflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
-					      V4L2_CID_HFLIP, 0, 1, 1, 1);
+					      V4L2_CID_HFLIP, 0, 1, 1, 0);
 	sensor->ctrls.vflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
 					      V4L2_CID_VFLIP, 0, 1, 1, 1);
 	sensor->ctrls.power_line_frequency =
@@ -1567,6 +2188,32 @@ static int ov5640_init_controls(struct ov5640 *sensor)
 	sensor->ctrls.strobe_stop = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
 						V4L2_CID_FLASH_STROBE_STOP,
 						0, 0, 0, 0);
+	sensor->ctrls.focus_absolute = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+						  V4L2_CID_FOCUS_ABSOLUTE, 0,
+						  OV5640_VCM_TARGET_MAX, 1, 0);
+	sensor->ctrls.auto_focus_start =
+		v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+				  V4L2_CID_AUTO_FOCUS_START, 0, 0, 0, 0);
+	sensor->ctrls.auto_focus_stop =
+		v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+				  V4L2_CID_AUTO_FOCUS_STOP, 0, 0, 0, 0);
+	sensor->ctrls.auto_focus_status =
+		v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+				  V4L2_CID_AUTO_FOCUS_STATUS, 0,
+				  V4L2_AUTO_FOCUS_STATUS_BUSY |
+				  V4L2_AUTO_FOCUS_STATUS_REACHED |
+				  V4L2_AUTO_FOCUS_STATUS_FAILED,
+				  0, V4L2_AUTO_FOCUS_STATUS_IDLE);
+	if (sensor->ctrls.auto_focus_status)
+		sensor->ctrls.auto_focus_status->flags |= V4L2_CTRL_FLAG_VOLATILE;
+	sensor->ctrls.af_zone_mode =
+		v4l2_ctrl_new_custom(hdl, &ov5640_af_ctrls[0], NULL);
+	sensor->ctrls.af_touch_x =
+		v4l2_ctrl_new_custom(hdl, &ov5640_af_ctrls[1], NULL);
+	sensor->ctrls.af_touch_y =
+		v4l2_ctrl_new_custom(hdl, &ov5640_af_ctrls[2], NULL);
+	sensor->ctrls.af_zone_result =
+		v4l2_ctrl_new_custom(hdl, &ov5640_af_ctrls[3], NULL);
 
 	if (hdl->error) {
 		ret = hdl->error;
@@ -2284,6 +2931,7 @@ static int ov5640_change_mode(struct ov5640 *sensor,
 		sensor->state.frame_size = frame_size;
 		sensor->state.mbus_fmt.width = mode_info->width;
 		sensor->state.mbus_fmt.height = mode_info->height;
+		retval = ov5640_af_note_mode_change(sensor);
 	}
 
 	return retval;
@@ -2628,6 +3276,11 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 
 	sensor->state.frame_size = mode_info->frame_size;
 	sensor->state.mbus_fmt = *mf;
+	if (!sensor->state.powered) {
+		retval = ov5640_af_note_mode_change(sensor);
+		if (retval < 0)
+			goto out;
+	}
 
 	retval = 0;
 out:
@@ -3037,7 +3690,7 @@ static int ov5640_remove(struct i2c_client *client)
 	pm_runtime_disable(&client->dev);
 
 	v4l2_async_unregister_subdev(sd);
-	v4l2_ctrl_handler_free(&sensor->ctrls);
+	v4l2_ctrl_handler_free(&sensor->ctrls.ctrl_handler);
 
 	mutex_lock(&sensor->lock);
 	ov5640_power_off(sensor);
@@ -3120,6 +3773,7 @@ static struct i2c_driver ov5640_i2c_driver = {
 
 module_i2c_driver(ov5640_i2c_driver);
 
+MODULE_FIRMWARE(OV5640_AF_FIRMWARE_NAME);
 MODULE_AUTHOR("Freescale Semiconductor, Inc.");
 MODULE_DESCRIPTION("OV5640 Camera Driver");
 MODULE_LICENSE("GPL");
