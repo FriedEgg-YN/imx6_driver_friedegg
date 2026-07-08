@@ -2489,6 +2489,7 @@ static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 			    struct v4l2_async_subdev *asd)
 {
 	struct mx6s_csi_dev *csi_dev = notifier_to_mx6s_dev(notifier);
+	int ret;
 
 	if (subdev == NULL)
 		return -EINVAL;
@@ -2496,6 +2497,14 @@ static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 	/* Find platform data for this sensor subdev */
 	if (csi_dev->asd.match.of.node == subdev->dev->of_node)
 		csi_dev->sd = subdev;
+
+	ret = v4l2_ctrl_add_handler(&csi_dev->ctrl_handler,
+				    subdev->ctrl_handler, NULL);
+	if (ret)
+		return ret;
+
+	if (csi_dev->vdev)
+		csi_dev->vdev->ctrl_handler = &csi_dev->ctrl_handler;
 
 	v4l2_info(&csi_dev->v4l2_dev, "Registered sensor subdevice: %s\n",
 		  subdev->name);

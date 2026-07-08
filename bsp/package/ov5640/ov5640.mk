@@ -12,6 +12,7 @@ endef
 define OV5640_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/ov5640_test $(TARGET_DIR)/usr/bin/ov5640_test
 	$(INSTALL) -D -m 0755 $(@D)/ov5640_interface_demo $(TARGET_DIR)/usr/bin/ov5640_interface_demo
+	$(INSTALL) -D -m 0755 $(@D)/reinsmod.sh $(TARGET_DIR)/usr/bin/reinsmod.sh
 endef
 
 $(eval $(kernel-module))

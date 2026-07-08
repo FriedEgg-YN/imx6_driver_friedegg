@@ -50,6 +50,8 @@
 #define OV5640_CHIP_ID_HIGH_BYTE        0x300A
 #define OV5640_CHIP_ID_LOW_BYTE         0x300B
 
+#define OV5640_REG_PAD_OUTPUT_ENABLE00	0x3016
+#define OV5640_REG_PAD_SELECT00			0x301c
 #define OV5640_REG_SYSCLK_PLL_CTRL0     0x3034
 #define OV5640_REG_SYSCLK_PLL_CTRL1     0x3035
 #define OV5640_REG_SYSCLK_PLL_MULT      0x3036
@@ -96,10 +98,10 @@
 #define OV5640_STREAM_OFF               0x0f
 #define OV5640_AUTOSUSPEND_DELAY_MS     1000
 #define OV5640_STROBE_REQUEST_ON        0x80
+#define OV5640_STROBE_PULSE_REVERSE		0x40
+#define OV5640_STROBE_MODE_LED1			0x01
+#define OV5640_STROBE_MODE_LED2			0x02
 #define OV5640_STROBE_MODE_LED3         0x03
-#define OV5640_STROBE_LED3_ON           (OV5640_STROBE_REQUEST_ON | \
-						 OV5640_STROBE_MODE_LED3)
-#define OV5640_STROBE_LED3_OFF          OV5640_STROBE_MODE_LED3
 
 enum ov5640_frame_size {
 	ov5640_frame_size_MIN = 0,
@@ -171,7 +173,6 @@ struct ov5640_state {
 	enum ov5640_frame_size frame_size; /* 当前传感器输出尺寸 */
 	bool powered; /* 时钟/GPIO 已进入可访问硬件状态 */
 	bool streaming; /* 传感器像素流是否正在输出 */
-	unsigned int power_users; /* host open/close 持有的 PM 引用数 */
 	int prev_sysclk; /* 预览模式 sysclk，用于曝光换算 */
 	int prev_hts; /* 预览模式 HTS，用于曝光换算 */
 	int ae_target; /* 自动曝光目标亮度 */
@@ -190,6 +191,16 @@ struct ov5640_state {
 	int ae_mode; /* 预留自动曝光模式缓存 */
 };
 
+struct ov5640_ctrls {
+	struct v4l2_ctrl_handler ctrl_handler; /* V4L2 控制集合 */
+	struct v4l2_ctrl *hflip; /* 水平翻转控制 */
+	struct v4l2_ctrl *vflip; /* 垂直翻转控制 */
+	struct v4l2_ctrl *power_line_frequency; /* 工频抗闪控制 */
+	struct v4l2_ctrl *strobe_mode; /* LED 闪光灯模式控制 */
+	struct v4l2_ctrl *strobe_request;
+	struct v4l2_ctrl *strobe_stop;
+};
+
 struct ov5640 {
 	struct v4l2_subdev subdev; /* V4L2 subdev 内嵌对象 */
 	struct device *dev; /* devm、日志和 runtime PM 所属设备 */
@@ -199,10 +210,7 @@ struct ov5640 {
 	struct gpio_desc *reset_gpio; /* RESET 管脚，控制传感器复位 */
 	struct mutex lock; /* 保护状态缓存和寄存器编程 */
 	struct ov5640_state state; /* V4L2、PM、曝光和遗留控制缓存状态 */
-	struct v4l2_ctrl_handler ctrls; /* V4L2 控制集合 */
-	struct v4l2_ctrl *hflip; /* 水平翻转控制 */
-	struct v4l2_ctrl *vflip; /* 垂直翻转控制 */
-	struct v4l2_ctrl *power_line_frequency; /* 工频抗闪控制 */
+	struct ov5640_ctrls ctrls; /* V4L2 控制集合 */
 	struct regulator *io_regulator; /* DOVDD，可选 IO 电源 */
 	struct regulator *core_regulator; /* DVDD，可选内核电源 */
 	struct regulator *analog_regulator; /* AVDD，可选模拟电源 */
@@ -1143,7 +1151,6 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->state.frame_size = ov5640_frame_size_800_480;
 	sensor->state.powered = false;
 	sensor->state.streaming = false;
-	sensor->state.power_users = 0;
 	sensor->state.prev_sysclk = 0;
 	sensor->state.prev_hts = 0;
 	sensor->state.ae_target = 52;
@@ -1185,32 +1192,6 @@ static inline void ov5640_reset(struct ov5640 *sensor)
 	gpiod_set_value_cansleep(sensor->pwdn_gpio, true);
 }
 
-static void ov5640_log_strobe_ctrl(struct ov5640 *sensor, const char *tag)
-{
-	u8 ctrl;
-	int ret;
-
-	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
-	if (ret < 0)
-		return;
-
-	dev_info(sensor->dev, "OV5640 strobe %s: 3b00=0x%02x\n", tag, ctrl);
-}
-
-static int ov5640_set_strobe_led3(struct ov5640 *sensor, bool enable)
-{
-	int ret;
-
-	ret = ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
-				enable ? OV5640_STROBE_LED3_ON :
-					 OV5640_STROBE_LED3_OFF);
-	if (ret < 0)
-		return ret;
-
-	ov5640_log_strobe_ctrl(sensor, enable ? "LED3 on" : "LED3 off");
-	return 0;
-}
-
 static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
 {
 	return ov5640_write_reg(sensor, OV5640_REG_STREAM_CTRL,
@@ -1230,16 +1211,6 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 	ret = ov5640_hw_set_stream(sensor, enable);
 	if (ret < 0)
 		return ret;
-
-	if (enable) {
-		ret = ov5640_set_strobe_led3(sensor, true);
-		if (ret < 0) {
-			ov5640_hw_set_stream(sensor, false);
-			return ret;
-		}
-	} else {
-		ov5640_set_strobe_led3(sensor, false);
-	}
 
 	sensor->state.streaming = enable;
 	return 0;
@@ -1290,7 +1261,7 @@ static void ov5640_power_off(struct ov5640 *sensor)
 	sensor->state.powered = false;
 }
 
-static int ov5640_runtime_get(struct ov5640 *sensor)
+static inline int ov5640_runtime_get(struct ov5640 *sensor)
 {
 	int ret;
 
@@ -1368,26 +1339,45 @@ static int ov5640_regulator_enable(struct ov5640 *sensor)
 	return ret;
 }
 
-static int ov5640_set_flip(struct ov5640 *sensor)
+/*
+ * Set horizontal flip according to the control values.
+ * sensor->ctrls.hflip->val are used to determine the flip settings.
+ */
+static int ov5640_set_hflip(struct ov5640 *sensor)
 {
 	int ret;
-	u8 hflip = sensor->hflip->val ? OV5640_TIMING_FLIP_MASK : 0;
-	u8 vflip = sensor->vflip->val ? OV5640_TIMING_FLIP_MASK : 0;
+	u8 hflip = sensor->ctrls.hflip->val ? OV5640_TIMING_FLIP_MASK : 0;
 
 	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
 				     OV5640_TIMING_FLIP_MASK, hflip);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG20,
-			       OV5640_TIMING_FLIP_MASK, vflip);
+	return 0;
+}
+
+/*
+ * Set vertical flip according to the control values.
+ * sensor->ctrls.vflip->val are used to determine the flip settings.
+ */
+static int ov5640_set_vflip(struct ov5640 *sensor)
+{
+	int ret;
+	u8 vflip = sensor->ctrls.vflip->val ? OV5640_TIMING_FLIP_MASK : 0;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG20,
+				     OV5640_TIMING_FLIP_MASK, vflip);
+	if (ret < 0)
+		return ret;
+
+	return 0;
 }
 
 static int ov5640_set_power_line_frequency(struct ov5640 *sensor)
 {
 	int ret;
 
-	switch (sensor->power_line_frequency->val) {
+	switch (sensor->ctrls.power_line_frequency->val) {
 	case V4L2_CID_POWER_LINE_FREQUENCY_50HZ:
 		ret = ov5640_mod_reg(sensor, OV5640_REG_BANDING_FILTER_CTRL,
 				     OV5640_BANDING_MANUAL_ENABLE,
@@ -1415,25 +1405,99 @@ static int ov5640_set_power_line_frequency(struct ov5640 *sensor)
 	}
 }
 
+static int ov5640_set_strobe_mode(struct ov5640 *sensor)
+{
+	int ret;
+
+	switch (sensor->ctrls.strobe_mode->val) {
+	case V4L2_FLASH_LED_MODE_NONE:
+		return ov5640_write_reg(sensor, OV5640_REG_PAD_OUTPUT_ENABLE00,
+					0x00);
+	case V4L2_FLASH_LED_MODE_FLASH:
+		ret = ov5640_write_reg(sensor, OV5640_REG_PAD_SELECT00,
+					0x00);
+		if (ret < 0)
+			return ret;
+		ret = ov5640_write_reg(sensor, OV5640_REG_PAD_OUTPUT_ENABLE00,
+					0x02);
+		if (ret < 0)
+			return ret;
+
+		ret = ov5640_write_reg(sensor, 0x3b0b,
+					0xff);
+		if (ret < 0)
+			return ret;
+
+		ret = ov5640_write_reg(sensor, 0x3b0c,
+					0xff);
+		if (ret < 0)
+			return ret;
+
+		ret = ov5640_mod_reg(sensor, 0x3b06, 0x0f, 0x0f);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+					OV5640_STROBE_MODE_LED2 | OV5640_STROBE_PULSE_REVERSE);
+	case V4L2_FLASH_LED_MODE_TORCH:
+		ret = ov5640_write_reg(sensor, OV5640_REG_PAD_SELECT00,
+					0x00);
+		if (ret < 0)
+			return ret;
+		ret = ov5640_write_reg(sensor, OV5640_REG_PAD_OUTPUT_ENABLE00,
+					0x02);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+					OV5640_STROBE_MODE_LED3 | OV5640_STROBE_REQUEST_ON | OV5640_STROBE_PULSE_REVERSE);
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ov5640_set_strobe_request(struct ov5640 *sensor)
+{
+	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
+		return -EINVAL;
+	return ov5640_mod_reg(sensor, OV5640_REG_STROBE_CTRL,
+				     OV5640_STROBE_REQUEST_ON,
+				     OV5640_STROBE_REQUEST_ON);
+}
+
+static int ov5640_set_strobe_stop(struct ov5640 *sensor)
+{
+	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
+		return -EINVAL;
+	return ov5640_mod_reg(sensor, OV5640_REG_STROBE_CTRL,
+				     OV5640_STROBE_REQUEST_ON, 0);
+}
+
 static int ov5640_apply_controls(struct ov5640 *sensor)
 {
 	int ret;
 
-	if (!sensor->hflip || !sensor->vflip ||
-	    !sensor->power_line_frequency)
+	if (!sensor->ctrls.hflip || !sensor->ctrls.vflip ||
+	    !sensor->ctrls.power_line_frequency || !sensor->ctrls.strobe_mode)
 		return 0;
 
-	ret = ov5640_set_flip(sensor);
+	ret = ov5640_set_vflip(sensor);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_set_hflip(sensor);
 	if (ret < 0)
 		return ret;
 
-	return ov5640_set_power_line_frequency(sensor);
+	ret = ov5640_set_power_line_frequency(sensor);
+	if (ret < 0)
+		return ret;
+	return ov5640_set_strobe_mode(sensor);
 }
 
 static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct ov5640 *sensor =
-		container_of(ctrl->handler, struct ov5640, ctrls);
+		container_of(ctrl->handler, struct ov5640, ctrls.ctrl_handler);
 	int ret = 0;
 
 	mutex_lock(&sensor->lock);
@@ -1442,11 +1506,22 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	switch (ctrl->id) {
 	case V4L2_CID_HFLIP:
+		ret = ov5640_set_hflip(sensor);
+		break;
 	case V4L2_CID_VFLIP:
-		ret = ov5640_set_flip(sensor);
+		ret = ov5640_set_vflip(sensor);
 		break;
 	case V4L2_CID_POWER_LINE_FREQUENCY:
 		ret = ov5640_set_power_line_frequency(sensor);
+		break;
+	case V4L2_CID_FLASH_LED_MODE:
+		ret = ov5640_set_strobe_mode(sensor);
+		break;
+	case V4L2_CID_FLASH_STROBE:
+		ret = ov5640_set_strobe_request(sensor);
+		break;
+	case V4L2_CID_FLASH_STROBE_STOP:
+		ret = ov5640_set_strobe_stop(sensor);
 		break;
 	default:
 		ret = -EINVAL;
@@ -1462,25 +1537,36 @@ static const struct v4l2_ctrl_ops ov5640_ctrl_ops = {
 	.s_ctrl = ov5640_s_ctrl,
 };
 
+/* TODO: 可以通过v4l2_ctrl_handler_setup()把所有可写control 写入硬件，可用于初始化*/
 static int ov5640_init_controls(struct ov5640 *sensor)
 {
-	struct v4l2_ctrl_handler *hdl = &sensor->ctrls;
+	struct v4l2_ctrl_handler *hdl = &sensor->ctrls.ctrl_handler;
 	int ret;
 
-	ret = v4l2_ctrl_handler_init(hdl, 3);
+	ret = v4l2_ctrl_handler_init(hdl, 6);
 	if (ret < 0)
 		return ret;
 
-	sensor->hflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+	sensor->ctrls.hflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
 					      V4L2_CID_HFLIP, 0, 1, 1, 1);
-	sensor->vflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+	sensor->ctrls.vflip = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
 					      V4L2_CID_VFLIP, 0, 1, 1, 1);
-	sensor->power_line_frequency =
+	sensor->ctrls.power_line_frequency =
 		v4l2_ctrl_new_std_menu(hdl, &ov5640_ctrl_ops,
 				       V4L2_CID_POWER_LINE_FREQUENCY,
 				       V4L2_CID_POWER_LINE_FREQUENCY_AUTO,
 				       1 << V4L2_CID_POWER_LINE_FREQUENCY_DISABLED,
 				       V4L2_CID_POWER_LINE_FREQUENCY_AUTO);
+	sensor->ctrls.strobe_mode = v4l2_ctrl_new_std_menu(hdl, &ov5640_ctrl_ops,
+						 V4L2_CID_FLASH_LED_MODE,
+						 V4L2_FLASH_LED_MODE_TORCH,
+						 0, V4L2_FLASH_LED_MODE_NONE);
+	sensor->ctrls.strobe_request = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+						 V4L2_CID_FLASH_STROBE,
+						 0, 0, 0, 0);
+	sensor->ctrls.strobe_stop = v4l2_ctrl_new_std(hdl, &ov5640_ctrl_ops,
+						V4L2_CID_FLASH_STROBE_STOP,
+						0, 0, 0, 0);
 
 	if (hdl->error) {
 		ret = hdl->error;
@@ -1493,19 +1579,6 @@ static int ov5640_init_controls(struct ov5640 *sensor)
 }
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
-/**
- * ov5640_get_register - read one OV5640 register through V4L2 debug ioctl
- * @sd: V4L2 sub-device that represents the OV5640 sensor.
- * @reg: Debug register descriptor.  On entry, @reg->reg is the sensor
- *       register address to read.  On success, @reg->size is set to 1 and
- *       @reg->val contains the 8-bit register value.
- *
- * The OV5640 register map uses 16-bit register addresses and 8-bit register
- * values, so addresses outside 0x0000..0xffff are rejected.
- *
- * Return: 0 on success, -EINVAL for an out-of-range address, or a negative
- * error code from the I2C register read helper.
- */
 static int ov5640_get_register(struct v4l2_subdev *sd,
 					struct v4l2_dbg_register *reg)
 {
@@ -1527,19 +1600,6 @@ static int ov5640_get_register(struct v4l2_subdev *sd,
 	return 0;
 }
 
-/**
- * ov5640_set_register - write one OV5640 register through V4L2 debug ioctl
- * @sd: V4L2 sub-device that represents the OV5640 sensor.
- * @reg: Debug register descriptor.  @reg->reg is the sensor register address
- *       to write and @reg->val is the new register value.
- *
- * The OV5640 register map uses 16-bit register addresses and 8-bit register
- * values, so addresses outside 0x0000..0xffff and values outside 0x00..0xff
- * are rejected before touching the bus.
- *
- * Return: 0 on success, -EINVAL for an out-of-range address or value, or a
- * negative error code from the I2C register write helper.
- */
 static int ov5640_set_register(struct v4l2_subdev *sd,
 					const struct v4l2_dbg_register *reg)
 {
@@ -2248,24 +2308,16 @@ static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 	if (on) {
 		ret = ov5640_runtime_get(sensor);
 		if (ret < 0)
-			return ret;
+			goto err;
+		return 0;
+	} else {
 
-		mutex_lock(&sensor->lock);
-		sensor->state.power_users++;
-		mutex_unlock(&sensor->lock);
+		ov5640_runtime_put_autosuspend(sensor);
 		return 0;
 	}
 
-	mutex_lock(&sensor->lock);
-	if (!sensor->state.power_users) {
-		mutex_unlock(&sensor->lock);
-		return 0;
-	}
-	sensor->state.power_users--;
-	mutex_unlock(&sensor->lock);
-
-	ov5640_runtime_put_autosuspend(sensor);
-	return 0;
+err:
+	return ret;
 }
 
 /**
@@ -2965,7 +3017,7 @@ static int ov5640_probe(struct i2c_client *client,
 	return 0;
 
 free_ctrls:
-	v4l2_ctrl_handler_free(&sensor->ctrls);
+	v4l2_ctrl_handler_free(&sensor->ctrls.ctrl_handler);
 power_off:
 	ov5640_power_off(sensor);
 	return retval;
@@ -2988,7 +3040,6 @@ static int ov5640_remove(struct i2c_client *client)
 	v4l2_ctrl_handler_free(&sensor->ctrls);
 
 	mutex_lock(&sensor->lock);
-	sensor->state.power_users = 0;
 	ov5640_power_off(sensor);
 	if (!sensor->state.powered)
 		ov5640_power_down(sensor, true);
