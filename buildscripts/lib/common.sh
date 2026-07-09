@@ -22,8 +22,27 @@ if [ -z "${DEFCONFIG_NAME:-}" ]; then
     DEFCONFIG_NAME="${DEFCONFIG_NAME//-/_}_defconfig"
 fi
 
-NFS_DIR="${NFS_DIR:-$HOME/linux/nfs/rootfs}"
-TFTP_DIR="${TFTP_DIR:-$HOME/linux/tftp}"
+default_deploy_home() {
+    local passwd_entry user_home
+
+    # Keep deploy paths under the invoking user home even if the whole
+    # script is launched through sudo.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        if passwd_entry=$(getent passwd "$SUDO_USER" 2>/dev/null); then
+            IFS=: read -r _ _ _ _ _ user_home _ <<< "$passwd_entry"
+            if [ -n "$user_home" ]; then
+                printf "%s\n" "$user_home"
+                return 0
+            fi
+        fi
+    fi
+
+    printf "%s\n" "$HOME"
+}
+
+DEPLOY_HOME="${DEPLOY_HOME:-$(default_deploy_home)}"
+NFS_DIR="${NFS_DIR:-$DEPLOY_HOME/linux/nfs/rootfs}"
+TFTP_DIR="${TFTP_DIR:-$DEPLOY_HOME/linux/tftp}"
 MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
 
 OUTPUT_IMAGE_DIR="$BUILDROOT_DIR/output/images"
