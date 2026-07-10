@@ -1549,8 +1549,11 @@ static int ov5640_af_command(struct ov5640 *sensor, u8 command,
 
 static int ov5640_af_load_firmware(struct ov5640 *sensor)
 {
+	const size_t max_chunk_size = 64;
 	const struct firmware *fw = NULL;
-	size_t i;
+	size_t chunk_size;
+	size_t offset;
+	unsigned int fw_size = 0;
 	int ret;
 
 	if (sensor->af.firmware_loaded)
@@ -1563,6 +1566,7 @@ static int ov5640_af_load_firmware(struct ov5640 *sensor)
 		return ret;
 	}
 
+	fw_size = fw->size;
 	if (!fw->size || fw->size > OV5640_AF_FIRMWARE_MAX_SIZE) {
 		dev_err(sensor->dev, "invalid AF firmware size: %u\n",
 			(unsigned int)fw->size);
@@ -1575,11 +1579,21 @@ static int ov5640_af_load_firmware(struct ov5640 *sensor)
 	if (ret < 0)
 		goto release_fw;
 
-	for (i = 0; i < fw->size; i++) {
-		ret = ov5640_write_reg(sensor, OV5640_AF_FIRMWARE_START + i,
-				       fw->data[i]);
-		if (ret < 0)
+	for (offset = 0; offset < fw->size; offset += chunk_size) {
+		chunk_size = fw->size - offset;
+		if (chunk_size > max_chunk_size)
+			chunk_size = max_chunk_size;
+
+		ret = regmap_raw_write(sensor->regmap,
+				       OV5640_AF_FIRMWARE_START + offset,
+				       fw->data + offset, chunk_size);
+		if (ret < 0) {
+			dev_err(sensor->dev,
+				"AF firmware block write failed at offset %u (%u bytes): %d\n",
+				(unsigned int)offset, (unsigned int)chunk_size,
+				ret);
 			goto release_fw;
+		}
 	}
 
 	ret = ov5640_write_reg(sensor, OV5640_REG_SYSTEM_RESET00, 0x00);
@@ -1594,10 +1608,16 @@ static int ov5640_af_load_firmware(struct ov5640 *sensor)
 	sensor->af.firmware_loaded = true;
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
-	dev_info(sensor->dev, "loaded %s (%u bytes)\n",
-		 OV5640_AF_FIRMWARE_NAME, (unsigned int)fw->size);
 
 release_fw:
+	if (ret < 0)
+		dev_info(sensor->dev,
+			 "AF firmware load failed (%u bytes): ret %d\n",
+			 fw_size, ret);
+	else
+		dev_info(sensor->dev,
+			 "loaded %s (%u bytes)\n",
+			 OV5640_AF_FIRMWARE_NAME, fw_size);
 	release_firmware(fw);
 	return ret;
 }
