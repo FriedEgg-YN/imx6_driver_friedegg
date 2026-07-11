@@ -42,7 +42,7 @@
 #define OV5640_VOLTAGE_DIGITAL_IO           1800000
 
 #define MIN_FPS 15
-#define MAX_FPS 30
+#define MAX_FPS 120
 #define DEFAULT_FPS 30
 
 #define OV5640_XCLK_MIN 6000000
@@ -84,9 +84,6 @@
 #define OV5640_REG_AF_CMD_ACK           0x3023
 #define OV5640_REG_AF_CMD_PARA0         0x3024
 #define OV5640_REG_AF_CMD_PARA1         0x3025
-#define OV5640_REG_AF_CMD_PARA2         0x3026
-#define OV5640_REG_AF_CMD_PARA3         0x3027
-#define OV5640_REG_AF_CMD_PARA4         0x3028
 #define OV5640_REG_AF_FW_STATUS         0x3029
 #define OV5640_REG_BANDING_50_STEP_H    0x3a08
 #define OV5640_REG_BANDING_50_MAX       0x3a0e
@@ -100,8 +97,13 @@
 #define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
+#define OV5640_FORMAT_MUX_YUV422        0x00
 #define OV5640_FORMAT_MUX_RGB           0x01
+#define OV5640_FORMAT_MUX_RAW_DPC       0x03
+#define OV5640_FORMAT_CTRL_YUYV         0x30
+#define OV5640_FORMAT_CTRL_UYVY         0x3f
 #define OV5640_FORMAT_CTRL_RGB565       0x6f
+#define OV5640_FORMAT_CTRL_RAW_BGGR     0x00
 #define OV5640_REG_AVG_READOUT          0x56a1
 
 #define OV5640_TIMING_FLIP_MASK         0x06
@@ -110,6 +112,8 @@
 
 #define OV5640_STREAM_ON                0x00
 #define OV5640_STREAM_OFF               0x0f
+#define OV5640_STREAM_START_FRAMES      2
+#define OV5640_STREAM_START_MIN_MS      50
 #define OV5640_AUTOSUSPEND_DELAY_MS     1000
 #define OV5640_STROBE_REQUEST_ON        0x80
 #define OV5640_STROBE_PULSE_REVERSE		0x40
@@ -130,7 +134,8 @@
 #define OV5640_AF_CMD_TIMEOUT_MS        500
 #define OV5640_AF_CMD_POLL_MS           5
 #define OV5640_AF_STATUS_POLL_MS        20
-#define OV5640_AF_NUM_ZONES             5
+#define OV5640_AF_MAX_CMD_PARAMS        2
+#define OV5640_AF_ZONE_RESULT_FOCUSED   0x01
 #define OV5640_AF_VVF_WIDTH             80
 #define OV5640_AF_VVF_HEIGHT            60
 #define OV5640_AF_TOUCH_ZONE_WIDTH      16
@@ -174,18 +179,33 @@ enum ov5640_frame_size {
 	ov5640_frame_size_QCIF_176_144 = 7,
 	ov5640_frame_size_XGA_1024_768 = 8,
 	ov5640_frame_size_800_480 = 9,
-	ov5640_frame_size_MAX = 9
+	ov5640_frame_size_960P_1280_960 = 10,
+	ov5640_frame_size_MAX = 10
 };
 
 enum ov5640_frame_rate {
 	ov5640_15_fps,
-	ov5640_30_fps
+	ov5640_30_fps,
+	ov5640_45_fps,
+	ov5640_60_fps,
+	ov5640_90_fps,
+	ov5640_120_fps,
+	ov5640_num_framerates
 };
 
 static int ov5640_framerates[] = {
 	[ov5640_15_fps] = 15,
 	[ov5640_30_fps] = 30,
+	[ov5640_45_fps] = 45,
+	[ov5640_60_fps] = 60,
+	[ov5640_90_fps] = 90,
+	[ov5640_120_fps] = 120,
 };
+
+static bool expose_pdf_modes;
+module_param(expose_pdf_modes, bool, 0644);
+MODULE_PARM_DESC(expose_pdf_modes,
+		 "Expose experimental OV5640 PDF target modes with verified register tables");
 
 struct ov5640_datafmt {
 	u32 code; /* MEDIA_BUS_FMT_*，描述 subdev 到 host 的总线像素编码 */
@@ -208,6 +228,7 @@ struct ov5640_mode_reg_table {
 	enum ov5640_frame_rate frame_rate;
 	const struct reg_value *regs;
 	u32 num_regs;
+	bool experimental;
 };
 
 struct ov5640_mode_info {
@@ -413,31 +434,13 @@ static const struct reg_value ov5640_init_setting_30fps_VGA[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct reg_value ov5640_setting_30fps_VGA_640_480[] = {
+static const struct reg_value ov5640_setting_15fps_QCIF_176_144[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
 	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
 	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
-	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
-	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
-	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
-	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
-};
-
-static const struct reg_value ov5640_setting_15fps_VGA_640_480[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
-	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x00, 0, 0}, {0x3809, 0xb0, 0, 0},
+	{0x380a, 0x00, 0, 0}, {0x380b, 0x90, 0, 0}, {0x380c, 0x07, 0, 0},
 	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
 	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
 	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
@@ -446,16 +449,16 @@ static const struct reg_value ov5640_setting_15fps_VGA_640_480[] = {
 	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
 	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
 	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct reg_value ov5640_setting_30fps_QVGA_320_240[] = {
+static const struct reg_value ov5640_setting_30fps_QCIF_176_144[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
 	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
 	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x01, 0, 0}, {0x3809, 0x40, 0, 0},
-	{0x380a, 0x00, 0, 0}, {0x380b, 0xf0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x00, 0, 0}, {0x3809, 0xb0, 0, 0},
+	{0x380a, 0x00, 0, 0}, {0x380b, 0x90, 0, 0}, {0x380c, 0x07, 0, 0},
 	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
 	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
 	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
@@ -485,6 +488,114 @@ static const struct reg_value ov5640_setting_15fps_QVGA_320_240[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
+static const struct reg_value ov5640_setting_30fps_QVGA_320_240[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x01, 0, 0}, {0x3809, 0x40, 0, 0},
+	{0x380a, 0x00, 0, 0}, {0x380b, 0xf0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_120fps_QVGA_320_240[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x01, 0, 0}, {0x3809, 0x40, 0, 0},
+	{0x380a, 0x00, 0, 0}, {0x380b, 0xf0, 0, 0}, {0x380c, 0x01, 0, 0},
+	{0x380d, 0x44, 0, 0}, {0x380e, 0x00, 0, 0}, {0x380f, 0xf2, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x00, 0, 0},
+	{0x3a03, 0xee, 0, 0}, {0x3a14, 0x00, 0, 0}, {0x3a15, 0xee, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x61, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_15fps_VGA_640_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_30fps_VGA_640_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_90fps_VGA_640_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x02, 0, 0},
+	{0x380d, 0x88, 0, 0}, {0x380e, 0x01, 0, 0}, {0x380f, 0xe4, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x01, 0, 0},
+	{0x3a03, 0xe0, 0, 0}, {0x3a14, 0x01, 0, 0}, {0x3a15, 0xe0, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_15fps_NTSC_720_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0},
+	{0x3807, 0xd4, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0xd0, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
 static const struct reg_value ov5640_setting_30fps_NTSC_720_480[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
@@ -503,13 +614,32 @@ static const struct reg_value ov5640_setting_30fps_NTSC_720_480[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct reg_value ov5640_setting_15fps_NTSC_720_480[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+/* 0x3820 0x46, vflip ISP and Sensor together. */
+static const struct reg_value ov5640_setting_30fps_800_480[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x46, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
 	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0},
-	{0x3807, 0xd4, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0xd0, 0, 0},
+	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x03, 0, 0}, {0x3809, 0x20, 0, 0},
 	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
+	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x01, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_15fps_PAL_720_576[] = {
+	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
+	{0x3801, 0x60, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
+	{0x3804, 0x09, 0, 0}, {0x3805, 0x7e, 0, 0}, {0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0xd0, 0, 0},
+	{0x380a, 0x02, 0, 0}, {0x380b, 0x40, 0, 0}, {0x380c, 0x07, 0, 0},
 	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
 	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
 	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
@@ -539,92 +669,20 @@ static const struct reg_value ov5640_setting_30fps_PAL_720_576[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct reg_value ov5640_setting_15fps_PAL_720_576[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x60, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x09, 0, 0}, {0x3805, 0x7e, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0xd0, 0, 0},
-	{0x380a, 0x02, 0, 0}, {0x380b, 0x40, 0, 0}, {0x380c, 0x07, 0, 0},
-	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
-	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
-	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
-};
-
-static const struct reg_value ov5640_setting_30fps_720P_1280_720[] = {
-	{0x3035, 0x21, 0, 0}, {0x3036, 0x69, 0, 0}, {0x3c07, 0x07, 0, 0},
-	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
-	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
-	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
-	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
-	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
-	{0x380b, 0xd0, 0, 0}, {0x380c, 0x07, 0, 0}, {0x380d, 0x64, 0, 0},
-	{0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0}, {0x3813, 0x04, 0, 0},
-	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
-	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xe0, 0, 0},
-	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xe0, 0, 0}, {0x4004, 0x02, 0, 0},
-	{0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0}, {0x4713, 0x03, 0, 0},
-	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
-	{0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
-	{0x3503, 0x00, 0, 0},
-};
-
-static const struct reg_value ov5640_setting_15fps_720P_1280_720[] = {
-	{0x3035, 0x41, 0, 0}, {0x3036, 0x69, 0, 0}, {0x3c07, 0x07, 0, 0},
-	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
-	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
-	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
-	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
-	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
-	{0x380b, 0xd0, 0, 0}, {0x380c, 0x07, 0, 0}, {0x380d, 0x64, 0, 0},
-	{0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0}, {0x3813, 0x04, 0, 0},
-	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
-	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xe0, 0, 0},
-	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xe0, 0, 0}, {0x4004, 0x02, 0, 0},
-	{0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0}, {0x4713, 0x03, 0, 0},
-	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
-	{0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
-	{0x3503, 0x00, 0, 0},
-};
-
-static const struct reg_value ov5640_setting_30fps_QCIF_176_144[] = {
+static const struct reg_value ov5640_setting_15fps_XGA_1024_768[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
 	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
 	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x00, 0, 0}, {0x3809, 0xb0, 0, 0},
-	{0x380a, 0x00, 0, 0}, {0x380b, 0x90, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x04, 0, 0}, {0x3809, 0x00, 0, 0},
+	{0x380a, 0x03, 0, 0}, {0x380b, 0x00, 0, 0}, {0x380c, 0x07, 0, 0},
 	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
 	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
 	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
 	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
 	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
 	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
-};
-
-static const struct reg_value ov5640_setting_15fps_QCIF_176_144[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x00, 0, 0}, {0x3809, 0xb0, 0, 0},
-	{0x380a, 0x00, 0, 0}, {0x380b, 0x90, 0, 0}, {0x380c, 0x07, 0, 0},
-	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
-	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
-	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x01, 0, 0},
 	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
@@ -647,24 +705,77 @@ static const struct reg_value ov5640_setting_30fps_XGA_1024_768[] = {
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-static const struct reg_value ov5640_setting_15fps_XGA_1024_768[] = {
+static const struct reg_value ov5640_setting_15fps_720P_1280_720[] = {
+	{0x3035, 0x41, 0, 0}, {0x3036, 0x69, 0, 0}, {0x3c07, 0x07, 0, 0},
+	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
+	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
+	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
+	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
+	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
+	{0x380b, 0xd0, 0, 0}, {0x380c, 0x07, 0, 0}, {0x380d, 0x64, 0, 0},
+	{0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0}, {0x3813, 0x04, 0, 0},
+	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
+	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xe0, 0, 0},
+	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xe0, 0, 0}, {0x4004, 0x02, 0, 0},
+	{0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0}, {0x4713, 0x03, 0, 0},
+	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
+	{0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
+	{0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_30fps_720P_1280_720[] = {
+	{0x3035, 0x21, 0, 0}, {0x3036, 0x69, 0, 0}, {0x3c07, 0x07, 0, 0},
+	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
+	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
+	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
+	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
+	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
+	{0x380b, 0xd0, 0, 0}, {0x380c, 0x07, 0, 0}, {0x380d, 0x64, 0, 0},
+	{0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0}, {0x3813, 0x04, 0, 0},
+	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
+	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xe0, 0, 0},
+	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xe0, 0, 0}, {0x4004, 0x02, 0, 0},
+	{0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0}, {0x4713, 0x03, 0, 0},
+	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
+	{0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
+	{0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_60fps_720P_1280_720[] = {
+	{0x3035, 0x11, 0, 0}, {0x3036, 0x46, 0, 0}, {0x3c07, 0x07, 0, 0},
+	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
+	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
+	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
+	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
+	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
+	{0x380b, 0xd0, 0, 0}, {0x380c, 0x05, 0, 0}, {0x380d, 0x10, 0, 0},
+	{0x380e, 0x02, 0, 0}, {0x380f, 0xd8, 0, 0}, {0x3813, 0x04, 0, 0},
+	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
+	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xd4, 0, 0},
+	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xd4, 0, 0}, {0x4004, 0x02, 0, 0},
+	{0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0}, {0x4713, 0x03, 0, 0},
+	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
+	{0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
+	{0x3503, 0x00, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_45fps_960P_1280_960[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
 	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
 	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
 	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x04, 0, 0}, {0x3809, 0x00, 0, 0},
-	{0x380a, 0x03, 0, 0}, {0x380b, 0x00, 0, 0}, {0x380c, 0x07, 0, 0},
-	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
+	{0x3807, 0x9b, 0, 0}, {0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0},
+	{0x380a, 0x03, 0, 0}, {0x380b, 0xc0, 0, 0}, {0x380c, 0x05, 0, 0},
+	{0x380d, 0x10, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xc8, 0, 0},
 	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
-	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x03, 0, 0},
+	{0x3a03, 0xc4, 0, 0}, {0x3a14, 0x03, 0, 0}, {0x3a15, 0xc4, 0, 0},
 	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
 	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x01, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
-
 
 static const struct reg_value ov5640_setting_15fps_1080P_1920_1080[] = {
 	{0x3c07, 0x07, 0, 0}, {0x3820, 0x40, 0, 0}, {0x3821, 0x06, 0, 0},
@@ -681,6 +792,24 @@ static const struct reg_value ov5640_setting_15fps_1080P_1920_1080[] = {
 	{0x4713, 0x02, 0, 0}, {0x4407, 0x0c, 0, 0}, {0x460b, 0x37, 0, 0},
 	{0x460c, 0x20, 0, 0}, {0x4837, 0x2c, 0, 0}, {0x3824, 0x01, 0, 0},
 	{0x5001, 0x83, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
+	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
+};
+
+static const struct reg_value ov5640_setting_30fps_1080P_1920_1080[] = {
+	{0x3c07, 0x07, 0, 0}, {0x3820, 0x40, 0, 0}, {0x3821, 0x06, 0, 0},
+	{0x3814, 0x11, 0, 0}, {0x3815, 0x11, 0, 0}, {0x3800, 0x01, 0, 0},
+	{0x3801, 0x50, 0, 0}, {0x3802, 0x01, 0, 0}, {0x3803, 0xb2, 0, 0},
+	{0x3804, 0x08, 0, 0}, {0x3805, 0xef, 0, 0}, {0x3806, 0x05, 0, 0},
+	{0x3807, 0xf1, 0, 0}, {0x3808, 0x07, 0, 0}, {0x3809, 0x80, 0, 0},
+	{0x380a, 0x04, 0, 0}, {0x380b, 0x38, 0, 0}, {0x380c, 0x09, 0, 0},
+	{0x380d, 0xc4, 0, 0}, {0x380e, 0x04, 0, 0}, {0x380f, 0x60, 0, 0},
+	{0x3813, 0x04, 0, 0}, {0x3618, 0x04, 0, 0}, {0x3612, 0x2b, 0, 0},
+	{0x3709, 0x12, 0, 0}, {0x370c, 0x00, 0, 0}, {0x3a02, 0x04, 0, 0},
+	{0x3a03, 0x5c, 0, 0}, {0x3a14, 0x04, 0, 0}, {0x3a15, 0x5c, 0, 0},
+	{0x4004, 0x06, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
+	{0x4713, 0x02, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0},
+	{0x5001, 0x83, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
@@ -702,30 +831,11 @@ static const struct reg_value ov5640_setting_15fps_QSXGA_2592_1944[] = {
 	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
-/* 0x3820 0x46, vflip ISP and Sensor together. */
-static const struct reg_value ov5640_setting_30fps_800_480[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x46, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x03, 0, 0}, {0x3809, 0x20, 0, 0},
-	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
-	{0x380d, 0x68, 0, 0}, {0x380e, 0x03, 0, 0}, {0x380f, 0xd8, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x0b, 0, 0},
-	{0x3a03, 0x88, 0, 0}, {0x3a14, 0x0b, 0, 0}, {0x3a15, 0x88, 0, 0},
-	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x20, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x01, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
-	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
-};
-
-static const struct ov5640_mode_reg_table ov5640_vga_reg_tables[] = {
-	{ov5640_15_fps, ov5640_setting_15fps_VGA_640_480,
-	ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
-	{ov5640_30_fps, ov5640_setting_30fps_VGA_640_480,
-	ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
+static const struct ov5640_mode_reg_table ov5640_qcif_reg_tables[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_QCIF_176_144,
+	ARRAY_SIZE(ov5640_setting_15fps_QCIF_176_144)},
+	{ov5640_30_fps, ov5640_setting_30fps_QCIF_176_144,
+	ARRAY_SIZE(ov5640_setting_30fps_QCIF_176_144)},
 };
 
 static const struct ov5640_mode_reg_table ov5640_qvga_reg_tables[] = {
@@ -733,6 +843,17 @@ static const struct ov5640_mode_reg_table ov5640_qvga_reg_tables[] = {
 	ARRAY_SIZE(ov5640_setting_15fps_QVGA_320_240)},
 	{ov5640_30_fps, ov5640_setting_30fps_QVGA_320_240,
 	ARRAY_SIZE(ov5640_setting_30fps_QVGA_320_240)},
+	{ov5640_120_fps, ov5640_setting_120fps_QVGA_320_240,
+	ARRAY_SIZE(ov5640_setting_120fps_QVGA_320_240), true},
+};
+
+static const struct ov5640_mode_reg_table ov5640_vga_reg_tables[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_VGA_640_480,
+	ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
+	{ov5640_30_fps, ov5640_setting_30fps_VGA_640_480,
+	ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
+	{ov5640_90_fps, ov5640_setting_90fps_VGA_640_480,
+	ARRAY_SIZE(ov5640_setting_90fps_VGA_640_480), true},
 };
 
 static const struct ov5640_mode_reg_table ov5640_ntsc_reg_tables[] = {
@@ -742,35 +863,16 @@ static const struct ov5640_mode_reg_table ov5640_ntsc_reg_tables[] = {
 	ARRAY_SIZE(ov5640_setting_30fps_NTSC_720_480)},
 };
 
+static const struct ov5640_mode_reg_table ov5640_800x480_reg_tables[] = {
+	{ov5640_30_fps, ov5640_setting_30fps_800_480,
+	ARRAY_SIZE(ov5640_setting_30fps_800_480)},
+};
+
 static const struct ov5640_mode_reg_table ov5640_pal_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_PAL_720_576,
 	ARRAY_SIZE(ov5640_setting_15fps_PAL_720_576)},
 	{ov5640_30_fps, ov5640_setting_30fps_PAL_720_576,
 	ARRAY_SIZE(ov5640_setting_30fps_PAL_720_576)},
-};
-
-static const struct ov5640_mode_reg_table ov5640_720p_reg_tables[] = {
-	{ov5640_15_fps, ov5640_setting_15fps_720P_1280_720,
-	ARRAY_SIZE(ov5640_setting_15fps_720P_1280_720)},
-	{ov5640_30_fps, ov5640_setting_30fps_720P_1280_720,
-	ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
-};
-
-static const struct ov5640_mode_reg_table ov5640_1080p_reg_tables[] = {
-	{ov5640_15_fps, ov5640_setting_15fps_1080P_1920_1080,
-	ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
-};
-
-static const struct ov5640_mode_reg_table ov5640_qsxga_reg_tables[] = {
-	{ov5640_15_fps, ov5640_setting_15fps_QSXGA_2592_1944,
-	ARRAY_SIZE(ov5640_setting_15fps_QSXGA_2592_1944)},
-};
-
-static const struct ov5640_mode_reg_table ov5640_qcif_reg_tables[] = {
-	{ov5640_15_fps, ov5640_setting_15fps_QCIF_176_144,
-	ARRAY_SIZE(ov5640_setting_15fps_QCIF_176_144)},
-	{ov5640_30_fps, ov5640_setting_30fps_QCIF_176_144,
-	ARRAY_SIZE(ov5640_setting_30fps_QCIF_176_144)},
 };
 
 static const struct ov5640_mode_reg_table ov5640_xga_reg_tables[] = {
@@ -780,24 +882,45 @@ static const struct ov5640_mode_reg_table ov5640_xga_reg_tables[] = {
 	ARRAY_SIZE(ov5640_setting_30fps_XGA_1024_768)},
 };
 
-static const struct ov5640_mode_reg_table ov5640_800x480_reg_tables[] = {
-	{ov5640_30_fps, ov5640_setting_30fps_800_480,
-	ARRAY_SIZE(ov5640_setting_30fps_800_480)},
+static const struct ov5640_mode_reg_table ov5640_720p_reg_tables[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_720P_1280_720,
+	ARRAY_SIZE(ov5640_setting_15fps_720P_1280_720)},
+	{ov5640_30_fps, ov5640_setting_30fps_720P_1280_720,
+	ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
+	{ov5640_60_fps, ov5640_setting_60fps_720P_1280_720,
+	ARRAY_SIZE(ov5640_setting_60fps_720P_1280_720), true},
+};
+
+static const struct ov5640_mode_reg_table ov5640_960p_reg_tables[] = {
+	{ov5640_45_fps, ov5640_setting_45fps_960P_1280_960,
+	ARRAY_SIZE(ov5640_setting_45fps_960P_1280_960), true},
+};
+
+static const struct ov5640_mode_reg_table ov5640_1080p_reg_tables[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_1080P_1920_1080,
+	ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
+	{ov5640_30_fps, ov5640_setting_30fps_1080P_1920_1080,
+	ARRAY_SIZE(ov5640_setting_30fps_1080P_1920_1080), true},
+};
+
+static const struct ov5640_mode_reg_table ov5640_qsxga_reg_tables[] = {
+	{ov5640_15_fps, ov5640_setting_15fps_QSXGA_2592_1944,
+	ARRAY_SIZE(ov5640_setting_15fps_QSXGA_2592_1944)},
 };
 
 static const struct ov5640_mode_info ov5640_modes[] = {
 	{
-		.frame_size = ov5640_frame_size_VGA_640_480,
-		.width = 640,
-		.height = 480,
+		.frame_size = ov5640_frame_size_QCIF_176_144,
+		.width = 176,
+		.height = 144,
 		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
 		.analog_crop = {0, 4, 2624, 1944},
-		.crop = {0, 0, 640, 480},
+		.crop = {0, 0, 176, 144},
 		.htot = 0x0768,
 		.vts_def = 0x03d8,
 		.default_fps = ov5640_30_fps,
-		.reg_tables = ov5640_vga_reg_tables,
-		.num_reg_tables = ARRAY_SIZE(ov5640_vga_reg_tables),
+		.reg_tables = ov5640_qcif_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_qcif_reg_tables),
 	}, {
 		.frame_size = ov5640_frame_size_QVGA_320_240,
 		.width = 320,
@@ -811,6 +934,18 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.reg_tables = ov5640_qvga_reg_tables,
 		.num_reg_tables = ARRAY_SIZE(ov5640_qvga_reg_tables),
 	}, {
+		.frame_size = ov5640_frame_size_VGA_640_480,
+		.width = 640,
+		.height = 480,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 640, 480},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.reg_tables = ov5640_vga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_vga_reg_tables),
+	}, {
 		.frame_size = ov5640_frame_size_NTSC_720_480,
 		.width = 720,
 		.height = 480,
@@ -822,6 +957,18 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.default_fps = ov5640_30_fps,
 		.reg_tables = ov5640_ntsc_reg_tables,
 		.num_reg_tables = ARRAY_SIZE(ov5640_ntsc_reg_tables),
+	}, {
+		.frame_size = ov5640_frame_size_800_480,
+		.width = 800,
+		.height = 480,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 800, 480},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.reg_tables = ov5640_800x480_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_800x480_reg_tables),
 	}, {
 		.frame_size = ov5640_frame_size_PAL_720_576,
 		.width = 720,
@@ -835,6 +982,18 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.reg_tables = ov5640_pal_reg_tables,
 		.num_reg_tables = ARRAY_SIZE(ov5640_pal_reg_tables),
 	}, {
+		.frame_size = ov5640_frame_size_XGA_1024_768,
+		.width = 1024,
+		.height = 768,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 1024, 768},
+		.htot = 0x0768,
+		.vts_def = 0x03d8,
+		.default_fps = ov5640_30_fps,
+		.reg_tables = ov5640_xga_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_xga_reg_tables),
+	}, {
 		.frame_size = ov5640_frame_size_720P_1280_720,
 		.width = 1280,
 		.height = 720,
@@ -846,6 +1005,18 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.default_fps = ov5640_30_fps,
 		.reg_tables = ov5640_720p_reg_tables,
 		.num_reg_tables = ARRAY_SIZE(ov5640_720p_reg_tables),
+	}, {
+		.frame_size = ov5640_frame_size_960P_1280_960,
+		.width = 1280,
+		.height = 960,
+		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
+		.analog_crop = {0, 4, 2624, 1944},
+		.crop = {0, 0, 1280, 960},
+		.htot = 0x0510,
+		.vts_def = 0x03c8,
+		.default_fps = ov5640_45_fps,
+		.reg_tables = ov5640_960p_reg_tables,
+		.num_reg_tables = ARRAY_SIZE(ov5640_960p_reg_tables),
 	}, {
 		.frame_size = ov5640_frame_size_1080P_1920_1080,
 		.width = 1920,
@@ -870,42 +1041,6 @@ static const struct ov5640_mode_info ov5640_modes[] = {
 		.default_fps = ov5640_15_fps,
 		.reg_tables = ov5640_qsxga_reg_tables,
 		.num_reg_tables = ARRAY_SIZE(ov5640_qsxga_reg_tables),
-	}, {
-		.frame_size = ov5640_frame_size_QCIF_176_144,
-		.width = 176,
-		.height = 144,
-		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
-		.analog_crop = {0, 4, 2624, 1944},
-		.crop = {0, 0, 176, 144},
-		.htot = 0x0768,
-		.vts_def = 0x03d8,
-		.default_fps = ov5640_30_fps,
-		.reg_tables = ov5640_qcif_reg_tables,
-		.num_reg_tables = ARRAY_SIZE(ov5640_qcif_reg_tables),
-	}, {
-		.frame_size = ov5640_frame_size_XGA_1024_768,
-		.width = 1024,
-		.height = 768,
-		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
-		.analog_crop = {0, 4, 2624, 1944},
-		.crop = {0, 0, 1024, 768},
-		.htot = 0x0768,
-		.vts_def = 0x03d8,
-		.default_fps = ov5640_30_fps,
-		.reg_tables = ov5640_xga_reg_tables,
-		.num_reg_tables = ARRAY_SIZE(ov5640_xga_reg_tables),
-	}, {
-		.frame_size = ov5640_frame_size_800_480,
-		.width = 800,
-		.height = 480,
-		.downsize = OV5640_DOWNSIZE_SUBSAMPLING,
-		.analog_crop = {0, 4, 2624, 1944},
-		.crop = {0, 0, 800, 480},
-		.htot = 0x0768,
-		.vts_def = 0x03d8,
-		.default_fps = ov5640_30_fps,
-		.reg_tables = ov5640_800x480_reg_tables,
-		.num_reg_tables = ARRAY_SIZE(ov5640_800x480_reg_tables),
 	},
 };
 
@@ -1006,6 +1141,9 @@ static int ov5640_mod_reg(struct ov5640 *sensor, u16 reg, u8 mask, u8 val)
 
 static const struct ov5640_datafmt ov5640_colour_fmts[] = {
 	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_UYVY8_2X8, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_YUYV8_2X8, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_SBGGR8_1X8, V4L2_COLORSPACE_SRGB},
 };
 
 static inline struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
@@ -1050,9 +1188,37 @@ ov5640_get_mode_info(enum ov5640_frame_size frame_size)
 	return NULL;
 }
 
+static bool ov5640_mode_has_available_reg_table(
+	const struct ov5640_mode_info *mode_info);
+
 static inline bool ov5640_mode_valid(enum ov5640_frame_size frame_size)
 {
-	return ov5640_mode_info_valid(ov5640_get_mode_info(frame_size));
+	return ov5640_mode_has_available_reg_table(
+		ov5640_get_mode_info(frame_size));
+}
+
+static inline bool ov5640_frame_rate_valid(enum ov5640_frame_rate frame_rate)
+{
+	return frame_rate >= ov5640_15_fps &&
+	       frame_rate < ov5640_num_framerates;
+}
+
+static int ov5640_find_frame_rate(u32 fps,
+				  enum ov5640_frame_rate *frame_rate)
+{
+	int i;
+
+	if (!frame_rate)
+		return -EINVAL;
+
+	for (i = ov5640_15_fps; i < ov5640_num_framerates; i++) {
+		if (ov5640_framerates[i] == fps) {
+			*frame_rate = i;
+			return 0;
+		}
+	}
+
+	return -EINVAL;
 }
 
 static const struct ov5640_mode_reg_table *
@@ -1068,12 +1234,37 @@ ov5640_get_mode_reg_table(const struct ov5640_mode_info *mode_info,
 		const struct ov5640_mode_reg_table *reg_table =
 			&mode_info->reg_tables[i];
 
+		if (reg_table->experimental && !expose_pdf_modes)
+			continue;
+
 		if (reg_table->frame_rate == frame_rate &&
 		    reg_table->regs && reg_table->num_regs)
 			return reg_table;
 	}
 
 	return NULL;
+}
+
+static bool ov5640_mode_has_available_reg_table(
+	const struct ov5640_mode_info *mode_info)
+{
+	int i;
+
+	if (!ov5640_mode_info_valid(mode_info))
+		return false;
+
+	for (i = 0; i < mode_info->num_reg_tables; i++) {
+		const struct ov5640_mode_reg_table *reg_table =
+			&mode_info->reg_tables[i];
+
+		if (reg_table->experimental && !expose_pdf_modes)
+			continue;
+
+		if (reg_table->regs && reg_table->num_regs)
+			return true;
+	}
+
+	return false;
 }
 
 static const struct ov5640_mode_info *
@@ -1083,7 +1274,7 @@ ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 	u32 best_distance = ~0U;
 	int i;
 
-	if (frame_rate < ov5640_15_fps || frame_rate > ov5640_30_fps)
+	if (!ov5640_frame_rate_valid(frame_rate))
 		frame_rate = ov5640_30_fps;
 
 	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
@@ -1141,7 +1332,7 @@ ov5640_find_mode(u32 width, u32 height, bool nearest)
 		u32 height_delta;
 		u32 distance;
 
-		if (!ov5640_mode_info_valid(mode_info))
+		if (!ov5640_mode_has_available_reg_table(mode_info))
 			continue;
 
 		if (mode_info->width == width && mode_info->height == height)
@@ -1182,7 +1373,7 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 	if (!frame_rate || !ov5640_mode_valid(frame_size))
 		return -EINVAL;
 
-	for (i = ov5640_15_fps; i <= ov5640_30_fps; i++) {
+	for (i = ov5640_15_fps; i < ov5640_num_framerates; i++) {
 		if (!ov5640_mode_supports_fps(frame_size, i))
 			continue;
 
@@ -1206,6 +1397,22 @@ static int ov5640_apply_format(struct ov5640 *sensor,
 		return -EINVAL;
 
 	switch (fmt->code) {
+	case MEDIA_BUS_FMT_UYVY8_2X8:
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+					OV5640_FORMAT_MUX_YUV422);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+					OV5640_FORMAT_CTRL_UYVY);
+	case MEDIA_BUS_FMT_YUYV8_2X8:
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+					OV5640_FORMAT_MUX_YUV422);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+					OV5640_FORMAT_CTRL_YUYV);
 	case MEDIA_BUS_FMT_RGB565_2X8_LE:
 		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
 					OV5640_FORMAT_MUX_RGB);
@@ -1214,6 +1421,14 @@ static int ov5640_apply_format(struct ov5640 *sensor,
 
 		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
 					OV5640_FORMAT_CTRL_RGB565);
+	case MEDIA_BUS_FMT_SBGGR8_1X8:
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+					OV5640_FORMAT_MUX_RAW_DPC);
+		if (ret < 0)
+			return ret;
+
+		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+					OV5640_FORMAT_CTRL_RAW_BGGR);
 	default:
 		return -EINVAL;
 	}
@@ -1285,6 +1500,8 @@ static int ov5640_hw_set_stream(struct ov5640 *sensor, bool enable)
 
 static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 {
+	unsigned int delay_ms;
+	unsigned int fps;
 	int ret;
 
 	if (sensor->state.streaming == enable)
@@ -1298,6 +1515,17 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 		return ret;
 
 	sensor->state.streaming = enable;
+	if (enable) {
+		fps = DEFAULT_FPS;
+		if (ov5640_frame_rate_valid(sensor->state.frame_rate))
+			fps = ov5640_framerates[sensor->state.frame_rate];
+
+		delay_ms = DIV_ROUND_UP(OV5640_STREAM_START_FRAMES * 1000, fps);
+		if (delay_ms < OV5640_STREAM_START_MIN_MS)
+			delay_ms = OV5640_STREAM_START_MIN_MS;
+		msleep(delay_ms);
+	}
+
 	return 0;
 }
 
@@ -1526,7 +1754,7 @@ static int ov5640_af_command(struct ov5640 *sensor, u8 command,
 	unsigned int i;
 	int ret;
 
-	if (num_params > OV5640_AF_NUM_ZONES)
+	if (num_params > OV5640_AF_MAX_CMD_PARAMS || (num_params && !params))
 		return -EINVAL;
 
 	for (i = 0; i < num_params; i++) {
@@ -1727,24 +1955,17 @@ static int ov5640_af_note_mode_change(struct ov5640 *sensor)
 static int ov5640_af_get_focus_result(struct ov5640 *sensor)
 {
 	u8 zone;
-	u8 result = 0;
-	unsigned int i;
 	int ret;
 
 	ret = ov5640_af_command(sensor, OV5640_AF_CMD_GET_FOCUS_RESULT, NULL, 0);
 	if (ret < 0)
 		return ret;
 
-	for (i = 0; i < OV5640_AF_NUM_ZONES; i++) {
-		ret = ov5640_read_reg(sensor, OV5640_REG_AF_CMD_PARA0 + i,
-				       &zone);
-		if (ret < 0)
-			return ret;
-		if (zone == 0)
-			result |= 1 << i;
-	}
+	ret = ov5640_read_reg(sensor, OV5640_REG_AF_CMD_PARA0, &zone);
+	if (ret < 0)
+		return ret;
 
-	sensor->af.zone_result = result;
+	sensor->af.zone_result = zone == 0 ? OV5640_AF_ZONE_RESULT_FOCUSED : 0;
 	return 0;
 }
 
@@ -2171,7 +2392,7 @@ static const struct v4l2_ctrl_config ov5640_af_ctrls[] = {
 		.name = "af_zone_result",
 		.type = V4L2_CTRL_TYPE_BITMASK,
 		.min = 0,
-		.max = (1 << OV5640_AF_NUM_ZONES) - 1,
+		.max = OV5640_AF_ZONE_RESULT_FOCUSED,
 		.step = 0,
 		.def = 0,
 		.flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE,
@@ -2702,7 +2923,7 @@ static int ov5640_change_mode_direct(struct ov5640 *sensor,
 	s32 num_regs = 0;
 	int retval = 0;
 
-	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
+	if (!ov5640_frame_rate_valid(frame_rate) ||
 	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN) {
 		pr_err("Wrong ov5640 frame size detected!\n");
 		return -EINVAL;
@@ -2749,13 +2970,7 @@ static int ov5640_change_mode_direct(struct ov5640 *sensor,
 		return retval;
 	}
 
-	if (frame_rate == ov5640_15_fps) {
-		/* 1/15 * 9*/
-		msleep(600);
-	} else if (frame_rate == ov5640_30_fps) {
-		/* 1/30 * 9*/
-		msleep(300);
-	}
+	msleep(DIV_ROUND_UP(9000, ov5640_framerates[frame_rate]));
 
 err:
 	return retval;
@@ -2780,7 +2995,7 @@ static int ov5640_change_mode_exposure_calc(struct ov5640 *sensor,
 	int retval = 0;
 
 	/* check if the input frame size and frame rate is valid */
-	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
+	if (!ov5640_frame_rate_valid(frame_rate) ||
 	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN)
 		return -EINVAL;
 
@@ -2925,7 +3140,7 @@ static int ov5640_change_mode(struct ov5640 *sensor,
 	const struct ov5640_mode_info *mode_info;
 	int retval = 0;
 
-	if (frame_rate > ov5640_30_fps || frame_rate < ov5640_15_fps ||
+	if (!ov5640_frame_rate_valid(frame_rate) ||
 	    frame_size > ov5640_frame_size_MAX || frame_size < ov5640_frame_size_MIN) {
 		pr_err("Wrong ov5640 frame size detected!\n");
 		return -EINVAL;
@@ -3049,7 +3264,6 @@ static int ov5640_s_stream(struct v4l2_subdev *sd, int enable)
 static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 {
 	struct ov5640 *sensor = sd_to_ov5640(sd);
-	struct v4l2_captureparm *cparm = &a->parm.capture;
 	int ret = 0;
 
 	switch (a->type) {
@@ -3057,9 +3271,9 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 		memset(a, 0, sizeof(*a));
 		a->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		cparm->capability = sensor->state.streamcap.capability;
-		cparm->timeperframe = sensor->state.streamcap.timeperframe;
-		cparm->capturemode = sensor->state.streamcap.capturemode;
+		a->parm.capture.capability = sensor->state.streamcap.capability;
+		a->parm.capture.capturemode = sensor->state.streamcap.capturemode;
+		a->parm.capture.timeperframe = sensor->state.streamcap.timeperframe;
 		ret = 0;
 		break;
 
@@ -3088,8 +3302,8 @@ static int ov5640_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
  * @a: V4L2 stream parameter container supplied by the caller.
  *
  * Only V4L2_BUF_TYPE_VIDEO_CAPTURE is supported.  The callback normalizes the
- * requested frame interval to one of the discrete 15 fps and 30 fps modes,
- * checks that the current sensor frame size supports it, and applies the matching
+ * requested frame interval to a discrete mode, checks that the current sensor
+ * frame size supports it, and applies the matching
  * register table immediately when the device is powered and not streaming.
  *
  * Return: 0 on success, -EBUSY if streaming is active, or -EINVAL if the
@@ -3128,11 +3342,8 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 		tgt_fps = timeperframe->denominator /
 			  timeperframe->numerator;
 
-		if (tgt_fps == ov5640_framerates[ov5640_15_fps])
-			frame_rate = ov5640_15_fps;
-		else if (tgt_fps == ov5640_framerates[ov5640_30_fps])
-			frame_rate = ov5640_30_fps;
-		else {
+		ret = ov5640_find_frame_rate(tgt_fps, &frame_rate);
+		if (ret < 0) {
 			pr_err("The camera frame rate is not supported!\n");
 			return -EINVAL;
 		}
@@ -3210,7 +3421,7 @@ unlock:
  * @sd: V4L2 sub-device that represents the OV5640 sensor.
  * @mf: Media bus frame format to validate and adjust.
  *
- * Unsupported media bus codes are adjusted to the verified RGB565 path.  The
+ * Unsupported media bus codes are adjusted to the default RGB565 path.  The
  * requested size is snapped to the nearest frame size that is valid for the current
  * frame-rate cache; this callback never writes sensor registers.
  *
@@ -3246,7 +3457,7 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
  * @mf: Requested media bus frame format, updated with the active frame size.
  *
  * This callback applies the same adjustment as ov5640_try_fmt(), then programs
- * the selected frame size and the verified RGB565 output registers when the sensor is
+ * the selected frame size and output format registers when the sensor is
  * powered.  If called while powered off, it only updates the cached request;
  * init_device(sensor) will apply that cache on the next power-on.
  *
@@ -3368,7 +3579,7 @@ static int ov5640_enum_framesizes(struct v4l2_subdev *sd,
 	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
 		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
 
-		if (!ov5640_mode_info_valid(mode_info))
+		if (!ov5640_mode_has_available_reg_table(mode_info))
 			continue;
 
 		if (count++ != fse->index)
@@ -3464,12 +3675,9 @@ static int init_device(struct ov5640 *sensor)
 	tgt_fps = sensor->state.streamcap.timeperframe.denominator /
 		  sensor->state.streamcap.timeperframe.numerator;
 
-	if (tgt_fps == 15)
-		frame_rate = ov5640_15_fps;
-	else if (tgt_fps == 30)
-		frame_rate = ov5640_30_fps;
-	else
-		return -EINVAL; /* Only support 15fps or 30fps now. */
+	ret = ov5640_find_frame_rate(tgt_fps, &frame_rate);
+	if (ret < 0)
+		return ret;
 
 	mode_info = ov5640_get_mode_info(target_frame_size);
 	if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {

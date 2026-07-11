@@ -1397,7 +1397,7 @@ static void mx6s_stop_streaming(struct vb2_queue *vq)
 
 	/* size、CPU 地址和 DMA 地址必须与 dma_alloc_coherent() 时匹配。 */
 	dma_free_coherent(csi_dev->v4l2_dev.dev,
-				csi_dev->discard_size, b,
+				PAGE_ALIGN(csi_dev->discard_size), b,
 				csi_dev->discard_buffer_dma);
 }
 
