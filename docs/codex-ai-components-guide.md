@@ -1,624 +1,147 @@
 # VSCode + Codex AI 组件使用指南
 
-扫描日期：2026-05-20
+扫描日期：2026-07-11
 
-本文档基于当前项目目录和用户级 `~/.codex` 目录的实际扫描结果，说明在 VSCode + Codex 插件中如何使用这些组件辅助本 i.MX6ULL BSP 与 Linux 驱动开发。项目文档只记录脱敏后的结构、用途和操作方法，不写入真实 token、认证文件、私有 MCP 路径、SSH/NFS/TFTP 路径、板卡 IP 或个人数据库内容。
+本文记录本仓库当前真实存在的 Codex/AI 辅助组件，以及它们在 i.MX6ULL BSP、Buildroot 集成和 Linux 驱动学习中的使用边界。项目文档只写可复现规则和脱敏示例，不写真实 SSH、NFS/TFTP、板卡 IP、token、provider endpoint、私有笔记库路径或用户级运行状态。
 
-## 本次扫描到的组件
+## 当前组件清单
 
-| 层级 | 组件 | 路径 | 作用 |
-| --- | --- | --- | --- |
-| 项目级 | instruction | `AGENTS.md` | 本仓库长期工程规则：i.MX6ULL BSP 定位、仓库边界、验证入口、隐私边界、默认 skill 路由 |
-| 项目级 | prompts | `.agents/prompts/*.md` | VSCode 聊天框可复制的标准任务模板 |
-| 项目级 | skills | `.agents/skills/*/SKILL.md` | 可复用工作流：内核 API 解释、BSP 工程、开发学习闭环、调试卡片、学习总结、Git 提交 |
-| 项目级 | context | `.agents/context/*.md` | 给 skill 按需读取的稳定事实：项目地图、构建部署命令、学习输出契约、调试卡片模板 |
-| 项目级 | MCP 模板 | `.agents/mcp/*` | 只保存示例和占位符，真实 MCP 配置留在用户级 |
-| 用户级 | instruction | `~/.codex/AGENTS.md` | 个人级规则：AI 系统设计任务使用 `$ai-system-architect` |
-| 用户级 | config | `~/.codex/config.toml` | 模型、provider、网络、项目 trust 等本机配置，文档中只做脱敏说明 |
-| 用户级 | command rules | `~/.codex/rules/default.rules` | 当前已批准的命令前缀规则，例如 `sort` |
-| 用户级 | skills | `~/.codex/skills/` | 系统 skill 和个人 skill，包括 `$ai-system-architect` |
-| 用户级 | runtime state | `~/.codex/auth.json`、SQLite、session、logs、shell snapshots | 认证和运行状态，不进入项目文档 |
+| 层级 | 组件 | 路径 | 当前状态 | 作用 |
+| --- | --- | --- | --- | --- |
+| 项目级 | instruction | `AGENTS.md` | 已启用 | 仓库边界、隐私规则、默认工作流、验证入口和 skill 路由 |
+| 项目级 | skill | `.agents/skills/kernel-api-explainer/SKILL.md` | 已启用 | Linux kernel API、宏、枚举、结构体字段和 driver helper 解释 |
+| 项目级 | skill | `.agents/skills/driver-callback-walkthrough/SKILL.md` | 已启用 | driver callback、V4L2 ioctl/subdev/VB2、file ops 等回调链路讲解 |
+| 项目级 | skill | `.agents/skills/cite-project-docs/SKILL.md` | 已启用 | 从项目 docs、package docs 和 PDF/manual 查找依据、页码和项目笔记证据 |
+| 用户级 | skill | `~/.codex/skills/ai-system-architect/SKILL.md` | 用户级 | 设计或维护 Codex/VSCode+Codex AI 组件体系 |
 
-OpenAI 官方说明中，Codex 可在 IDE 中使用打开文件和选中代码作为上下文，支持本地读写、运行命令和云端任务衔接；公开的 AGENTS.md 格式用于给 agent 提供仓库内工作规则；OpenAI 的 Codex skills 说明把 skill 定义为由说明、资源和脚本组成的可复用能力。本文把这些能力映射到本项目的 BSP/驱动开发工作流。
+当前没有项目级 `.agents/prompts/`、`.agents/context/`、`.agents/mcp/`、hook 或 subagent 配置。不要在任务中把这些规划型组件当成已经可用；只有实际创建后再补充本文档。
 
-## VSCode + Codex 聊天框怎么用
+旧的 driver summary notes skill 已删除。驱动学习总结不再走单独 skill：普通学习总结直接由当前回答完成；如果问题聚焦 API，则用 `$kernel-api-explainer`；如果问题聚焦回调触发链路，则用 `$driver-callback-walkthrough`；如果问题要求依据、页码或 manual/RM 证明，则用 `$cite-project-docs`。
 
-### 打开正确的工作区
+## 打开工作区
 
-在 VSCode 中打开仓库根目录：
-
-```text
-/home/<user>/imx6_driver_friedegg
-```
-
-不要只打开 `src/ap3216c/`、`src/<pkg>/` 或 `bsp/` 子目录。打开根目录后，Codex 才能同时读取：
+在 VSCode 中打开仓库根目录，而不是只打开某个 `src/<pkg>/` 子目录。根目录上下文能让 Codex 同时看到：
 
 - `AGENTS.md` 的项目规则。
-- `.agents/prompts/` 的任务模板。
-- `.agents/skills/` 的工作流。
-- `.agents/context/` 的稳定项目事实。
-- `buildscripts/`、`bsp/`、`src/`、`docs/` 的实际工程文件。
+- `.agents/skills/` 的项目级工作流。
+- `buildscripts/` 的构建部署入口。
+- `bsp/` 的 Buildroot external、rootfs overlay、package 和配置。
+- `src/<pkg>/` 的外置驱动包和用户态测试程序。
+- `src/linux-friedegg/`、`src/uboot-friedegg/` 这类大源码树或嵌套源码仓库。
 
-### 选择 Chat 还是 Agent
+## 默认使用方式
 
-推荐选择方式：
+只解释、评审或整理方案时，可以明确写“不要改文件”。允许修改和验证时，直接给目标、症状、相关文件和期望结果。
 
-- 只解释、只评审、只整理方案：用 Chat 或在请求中明确“不要改文件”。
-- 允许 Codex 编辑文件、运行验证命令：用 Agent。
-- 需要访问网络、真实部署目录或工作区外路径：只在确认无隐私风险后使用更高权限。
-
-聊天框可直接写：
+常用请求示例：
 
 ```text
-先检查仓库归属和当前状态，再决定是否编辑。不要修改 buildroot/、src/linux-friedegg/ 或 src/uboot-friedegg/，除非任务明确需要。
+先根据 AGENTS.md 判断这次问题属于 BSP 集成、Buildroot/rootfs、内核 DTS、内核源码、外置驱动包还是用户态测试程序。只选择能证明改动的最窄验证命令，不要默认 full rebuild。
 ```
 
-### 调用项目 prompt
+涉及板端命令时，如果 Codex 无法实际运行，应要求输出 exact board-side commands 和 expected result。
 
-prompt 文件是“任务输入模板”。在聊天框第一行写：
-
-```text
-Use .agents/prompts/learning-loop-task.md
-```
-
-然后粘贴并填写模板字段。Codex 会按该 prompt 的结构收集目标、症状、硬件路径、验证条件和学习输出要求。
-
-### 调用 skill
-
-skill 是“工作流”。在聊天框第一行写：
-
-```text
-Use $imx6-bsp-engineer.
-```
-
-或：
-
-```text
-Use $imx6-dev-learning-loop.
-```
-
-效果是让 Codex 按对应 `SKILL.md` 的步骤工作，例如先判断仓库归属、读取 context、选择最窄验证命令、输出学习材料。
-
-### 使用当前文件和选区
-
-当你在 VSCode 里打开或选中某段代码时，可以直接写：
-
-```text
-Use $imx6-bsp-engineer.
-基于当前打开文件和选中代码，解释这个 probe 函数的资源申请、错误回滚、IRQ 注册和 device node 创建路径。先不要改代码。
-```
-
-适合：
-
-- 解释 Linux driver 函数。
-- 局部 review。
-- 小范围修复。
-- 把当前日志或代码片段整理成学习材料。
-
-## Instruction：`AGENTS.md`
-
-### 项目级 `AGENTS.md`
-
-路径：
-
-```text
-AGENTS.md
-```
-
-效果：
-
-- 把本仓库定位为 i.MX6ULL embedded Linux BSP 和驱动工程。
-- 要求优先保 bootability、reproducibility、仓库边界和隐私边界。
-- 明确 `buildscripts/`、`bsp/`、`src/<pkg>/`、`docs/`、`.agents/` 属于 super-project。
-- 明确 `buildroot/`、`src/linux-friedegg/`、`src/uboot-friedegg/` 是大源码树或子模块，不能随便改。
-- 规定验证入口是 `bash buildscripts/build_and_deploy.sh <mode>`。
-- 内核 API 问题默认路由到 `$kernel-api-explainer`，先用 `rg` 找定义，再给中文 kernel-doc 风格解释。
-- 要求开发后给学习总结，调试后给知识卡或建议。
-
-聊天框具体操作：
-
-```text
-根据 AGENTS.md 的规则，帮我判断这个 OV5640 修改应该落在 BSP 层、内核 DTS、外置驱动包还是用户态测试程序。先给仓库归属和验证命令，不要直接改文件。
-```
-
-什么时候更新：
-
-- 反复发生仓库边界误判。
-- 反复遗漏最窄验证命令。
-- 反复遗漏隐私占位符。
-- 反复遗漏内核 API 定义链接、参数取值或当前上下文分析。
-- 新增全项目都应遵守的构建、部署或学习输出规则。
-
-### 用户级 `~/.codex/AGENTS.md`
-
-当前扫描到的用户级规则是：AI 辅助开发系统设计、Codex 组件选择、用户级/项目级边界、长期工作流迭代任务使用 `$ai-system-architect`。
-
-效果：
-
-- 这是跨项目个人规则。
-- 不应该直接复制进本仓库，除非它变成协作者也必须遵守的项目规则。
-
-聊天框具体操作：
-
-```text
-Use $ai-system-architect.
-请评审本仓库的 AGENTS.md、prompt、skill、MCP 模板和 docs，判断哪些规则应该放项目级，哪些应该放用户级。
-```
-
-## Prompts：`.agents/prompts/`
-
-prompt 的价值是让需求输入稳定，不靠每次临场发挥。使用时可以打开对应 prompt 文件，也可以直接在聊天框写 `Use .agents/prompts/<name>.md`。
-
-| Prompt | 用途 | 主要效果 |
-| --- | --- | --- |
-| `learning-loop-task.md` | 端到端开发学习闭环 | 路由到 `$imx6-dev-learning-loop`，覆盖归属、验证、学习总结、调试卡片、AI 组件复盘 |
-| `driver-development.md` | Linux 驱动开发 | 判断 char/IIO/V4L2/input/platform/I2C/SPI 等子系统模型，解释 subsystem contract |
-| `linux-port.md` | Linux/DTS/驱动绑定调试 | 定位 DTS、Kconfig/config、driver、Buildroot integration |
-| `uboot-port.md` | U-Boot 移植或启动问题 | 检查 SPL/DDR、pinmux、environment、boot command、DTB handoff |
-| `buildroot-config.md` | Buildroot/BusyBox/rootfs 配置 | 判断改动属于 defconfig、BusyBox config、rootfs overlay 还是 local package |
-| `debug-note.md` | 调试过程转知识卡 | 路由到 `$embedded-dev-notes`，输出 Obsidian-friendly Markdown |
-| `learning-summary.md` | 完成任务后的学习总结 | 路由到 `$driver-learning-coach`，输出总结、简历、架构、权衡、面试题 |
-| `ai-system-retro.md` | AI 工作流复盘 | 判断应改 instruction、prompt、skill、hook、MCP、subagent 还是 memory |
-
-### 最推荐入口：`learning-loop-task.md`
-
-聊天框复制：
-
-```text
-Use .agents/prompts/learning-loop-task.md
-
-Run an end-to-end development learning loop for <roadmap item or issue>.
-
-Goal:
-Current behavior or symptom:
-Target hardware path:
-- board/peripheral:
-- bus/subsystem:
-- pins/clocks/resets/regulators/interrupts if known:
-Relevant files or logs:
-Expected user-space behavior:
-Verification available:
-- build command:
-- board-side command:
-Learning output needed:
-- docs note:
-- Obsidian/private note:
-- resume/interview summary:
-AI component friction to watch for:
-```
-
-实际效果：
-
-- Codex 先判断任务属于 BSP、Buildroot、AP3216C、OV5640、U-Boot、Linux、rootfs 还是 AI 组件维护。
-- 技术实现交给 `$imx6-bsp-engineer`。
-- 验证命令会收敛到 `dtb`、`zimage`、`rootfs`、`drv <pkg>` 之一。
-- 完成后生成学习总结。
-- 如果有症状、日志、假设和根因，会生成或建议调试知识卡。
-
-### 驱动开发入口：`driver-development.md`
-
-聊天框复制：
-
-```text
-Use .agents/prompts/driver-development.md
-
-Develop or modify a Linux driver for AP3216C.
-Device facts:
-- bus/subsystem: I2C + GPIO IRQ
-- datasheet/registers: AP3216C ALS/PS/IR registers
-- DTS binding: 请检查当前 DTS
-- user-space API: /sys/bus/iio/devices/iio:deviceX + /dev/iio:deviceX + ap3216c_test
-- interrupt/polling requirements: 支持轮询和中断模式
-- current code path: src/ap3216c/ap3216c.c
-```
-
-实际效果：
-
-- Codex 会先判断应该使用字符设备、IIO、V4L2、input、platform、I2C、SPI 或其他模型。
-- 会解释为什么选择该 subsystem contract。
-- 会检查源码、Makefile、DTS、Buildroot package、rootfs 和用户态测试是否匹配。
-
-### Linux/DTS 入口：`linux-port.md`
-
-聊天框复制：
-
-```text
-Use .agents/prompts/linux-port.md
-
-Port or debug Linux support for OV5640 camera.
-Hardware facts:
-- bus/interface: I2C control + CSI/parallel data path
-- pins: 请从 DTS 检查
-- clock/reset/regulator: 请从 DTS 检查
-- interrupt: unknown
-- expected userspace node or subsystem: /dev/video0 and V4L2 controls
-- current symptom: v4l2-ctl 无法枚举摄像头
-```
-
-实际效果：
-
-- Codex 会判断问题属于硬件描述、内核配置、驱动 binding、runtime device management 还是用户态验证。
-- 会优先定位 DTS、Kconfig/config、driver、Buildroot 集成点。
-
-### Buildroot/rootfs 入口：`buildroot-config.md`
-
-聊天框复制：
-
-```text
-Use .agents/prompts/buildroot-config.md
-
-Change Buildroot/BusyBox/rootfs behavior for AP3216C test app install and mdev startup.
-Current behavior: rootfs 中需要手动处理设备节点。
-Desired behavior: 启动后具备稳定的 IIO 设备节点，并能运行 /usr/bin/ap3216c_test。
-Target packages/config symbols if known: BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV
-Runtime validation: ap3216c_test scan, ls /sys/bus/iio/devices, ps, mount
-```
-
-实际效果：
-
-- Codex 会检查 `bsp/configs/imx6ull_friedegg_emmc_defconfig`、`bsp/configs/busybox.config`、`bsp/rootfs_overlay` 和相关 `bsp/package/*`。
-- 会说明 persisted config 是否需要更新。
-- 会选择 `config status`、`rootfs`、`drv <pkg>` 或更窄命令验证。
-
-### 调试卡片入口：`debug-note.md`
-
-聊天框复制：
-
-```text
-Use .agents/prompts/debug-note.md
-
-Turn this development/debug process into an Obsidian-friendly knowledge card.
-Topic:
-Raw timeline/logs:
-Final root cause if known:
-Files changed:
-Commands that proved the result:
-```
-
-实际效果：
-
-- Codex 会按 `.agents/context/debug-note-template.md` 的结构输出。
-- 长日志会被压缩为能证明结论的关键证据。
-- 如果你要求写入仓库，会放到 `docs/`，并使用占位符脱敏。
-
-## Skills：项目级和用户级工作流
+## Skill 路由
 
 ### `$kernel-api-explainer`
 
-路径：
+使用场景：
 
-```text
-.agents/skills/kernel-api-explainer/SKILL.md
-```
+- Linux kernel API、内核函数、宏、枚举、结构体字段。
+- driver helper 的参数、返回值、调用约束。
+- “当前这个 API 为什么这样用”。
 
-用途：
-
-- 解释 Linux kernel API、宏、枚举、结构体字段、driver helper 或当前调用点的 API 使用。
-- 先用 `rg` 找定义和相关 flag/enum，再给可跳转定义链接。
-- 不贴源码，用中文按 Linux kernel-doc 风格说明作用、参数、返回值、原理和当前上下文为何这样用。
-- 常规 API 问答优先快速响应，可使用轻量模型或低推理强度。
-
-聊天框具体操作：
+示例：
 
 ```text
 Use $kernel-api-explainer.
 解释当前 platform_get_resource(pdev, IORESOURCE_MEM, 0) 的作用、参数含义、可选值，以及这里为什么这样用。
 ```
 
-效果：
+期望行为：
 
-- 输出定义位置链接，例如 `drivers/base/platform.c` 或 `include/linux/platform_device.h`。
-- 对每个参数说明它代表什么、当前实参的含义、可选值或常见取值。
-- 结合当前驱动上下文解释为什么使用该 API，而不是泛泛讲内核概念。
+- 先用 `rg` 在 `src/linux-friedegg/` 和相关 `src/<pkg>/` 中找定义、声明、flag/enum 和调用点。
+- 给可点击本地定义链接，不粘贴函数体源码。
+- 用中文 kernel-doc 风格说明作用、参数、返回值、原理和当前上下文。
 
-### `$imx6-bsp-engineer`
+### `$driver-callback-walkthrough`
 
-路径：
+使用场景：
 
-```text
-.agents/skills/imx6-bsp-engineer/SKILL.md
-```
+- 讲解 driver callback、ioctl callback、`file_operations`、IRQ/workqueue/PM callback。
+- 讲解 V4L2 `vidioc_*`、sensor subdev op、VB2 queue op。
+- 梳理 userspace 命令如何分发到当前驱动实现。
 
-用途：
-
-- U-Boot、Linux、DTS、Buildroot、BusyBox、rootfs、本地外置驱动包。
-
-聊天框具体操作：
+示例：
 
 ```text
-Use $imx6-bsp-engineer.
-帮我修复 AP3216C IIO 设备无法枚举的问题。先检查 src/ap3216c、bsp/package/ap3216c、bsp/rootfs_overlay 和 BusyBox/mdev 配置。确认归属后再改文件。
+Use $driver-callback-walkthrough.
+讲解 src/ov5640/mx6s_capture.c 里的 streamon/streamoff 路径，分清 userspace ioctl、host video-node callback、sensor subdev .s_stream 和 VB2 start_streaming。
 ```
 
-效果：
+期望行为：
 
-- 先判断修改归属。
-- 优先检查 DTS/config/package/rootfs。
-- 只在硬件描述和集成路径一致后改驱动逻辑。
-- 输出最窄验证命令和板端命令。
+- 先建立层级映射：userspace 操作、ops 表成员、具体实现函数、subsystem 层级。
+- 对 V4L2 尤其要区分 `/dev/videoX` 的 ioctl、host `v4l2_ioctl_ops`、sensor `v4l2_subdev_ops` 和 VB2 `vb2_ops`。
+- 输出当前实现的执行顺序、状态变化、硬件配置、错误路径和验证命令。
 
-### `$imx6-dev-learning-loop`
+### `$cite-project-docs`
 
-路径：
+使用场景：
+
+- 用户询问“依据”“官方依据”“datasheet/manual/RM 证明”“页码”。
+- 需要从 `docs/`、`src/*/docs/` 或 PDF/manual 核对某个技术结论。
+- 需要区分官方手册、项目笔记和当前代码实现证据。
+
+示例：
 
 ```text
-.agents/skills/imx6-dev-learning-loop/SKILL.md
+Use $cite-project-docs.
+OV5640 的 DVP/YUV 输出能力有没有 datasheet 依据？请给 PDF 页码，并说明当前驱动是否已经实现。
 ```
 
-用途：
+期望行为：
 
-- 完整开发闭环：实现、验证、学习总结、调试卡片、AI 组件迭代。
-
-聊天框具体操作：
-
-```text
-Use $imx6-dev-learning-loop.
-推进 README 中 OV5640 V4L2 bring-up 的下一步。请完成：仓库归属判断、最小修改建议、最窄验证命令、板端 v4l2-ctl 命令、学习总结和是否需要更新 prompt。
-```
-
-效果：
-
-- 技术任务会路由到 `$imx6-bsp-engineer`。
-- 完成后会用 `$driver-learning-coach` 风格输出学习内容。
-- 调试证据充足时会用 `$embedded-dev-notes` 风格输出知识卡。
-- 如果发现流程摩擦，会建议改 prompt、skill、AGENTS、MCP 模板或 memory。
-
-### `$driver-learning-coach`
-
-路径：
-
-```text
-.agents/skills/driver-learning-coach/SKILL.md
-```
-
-聊天框具体操作：
-
-```text
-Use $driver-learning-coach.
-基于刚才 AP3216C mdev/rootfs 修复，生成当前工作总结、简历描述、架构学习说明、技术权衡和面试官深挖。
-```
-
-效果：
-
-- 输出五段：当前工作总结、简历描述、架构学习说明、技术权衡、面试官深挖。
-- 用硬件总线、DTS、内核子系统、Buildroot/rootfs、用户态验证的顺序解释。
-
-### `$embedded-dev-notes`
-
-路径：
-
-```text
-.agents/skills/embedded-dev-notes/SKILL.md
-```
-
-聊天框具体操作：
-
-```text
-Use $embedded-dev-notes.
-把下面 AP3216C 中断调试过程整理到 src/ap3216c/README.md 的调试记录章节。日志只保留能证明结论的关键行，真实路径和 board IP 用占位符。
-<粘贴日志>
-```
-
-效果：
-
-- 输出 Obsidian-friendly Markdown。
-- 保留现象、假设、验证、根因、修改、可复用经验、关联。
-- 使用 `[[Device Tree]]`、`[[I2C]]`、`[[Buildroot]]`、`[[mdev]]` 等稳定链接词。
-
-### `$git-commit-assistant`
-
-路径：
-
-```text
-.agents/skills/git-commit-assistant/SKILL.md
-```
-
-聊天框具体操作：
-
-```text
-Use $git-commit-assistant.
-检查当前 Git 变更，按意图拆分提交组并草拟 commit message。不要直接 commit，先给计划。
-```
-
-效果：
-
-- 检查 super-project 和嵌套仓库状态。
-- 识别 submodule pointer、kernel tree、U-Boot tree、BSP 和 docs 的边界。
-- 避免把无关修改混在一个提交里。
+- 优先查当前 package 的 `docs/`，再查项目级 `docs/` 和其他 `src/*/docs/`。
+- PDF 依据给 1-based PDF viewer 页码；Markdown 依据给可点击本地行号。
+- 如果手册能力和当前驱动实现不一致，分别说明“manual capability”和“current driver behavior”。
 
 ### `$ai-system-architect`
 
-路径：
+使用场景：
 
-```text
-~/.codex/skills/ai-system-architect/SKILL.md
-```
+- 设计或调整 `AGENTS.md`、skill、prompt、hook、MCP、subagent、memory。
+- 判断规则应该放项目级还是用户级。
+- 复盘 Codex 工作流摩擦并决定改哪个 AI 组件。
 
-聊天框具体操作：
-
-```text
-Use $ai-system-architect.
-请评审当前项目的 Codex AI 组件，指出哪些该留在项目层，哪些该放到用户层，并给出下一轮 prompt/skill/hook/MCP 改进计划。
-```
-
-效果：
-
-- 设计或改进 VSCode+Codex AI 辅助开发系统。
-- 选择 instruction、prompt、skill、hook、MCP、subagent、memory。
-- 判断项目级和用户级边界。
-- 输出目标、成功标准、当前状态、组件计划、验证 prompt 和隐私假设。
-
-## Context：`.agents/context/`
-
-| 文件 | 作用 | Codex 使用效果 |
-| --- | --- | --- |
-| `project.md` | 目标板、工具链、仓库地图、ownership rules | 先判断文件属于 super-project、Buildroot、kernel tree 还是 U-Boot tree |
-| `build-deploy.md` | `buildscripts/build_and_deploy.sh` 模式和环境变量 | 选择 `dtb`、`zimage`、`rootfs`、`drv <pkg>` 等最窄命令 |
-| `learning-output.md` | 学习输出契约 | 开发后输出总结、简历 bullet、架构解释、权衡、面试题 |
-| `debug-note-template.md` | 调试卡片形状 | 输出短知识卡，而不是长流水账 |
-
-聊天框具体操作：
-
-```text
-Use $imx6-bsp-engineer.
-请按 .agents/context/project.md 和 .agents/context/build-deploy.md 的规则，判断这次 rootfs 修改应该怎么验证。
-```
-
-## MCP：`.agents/mcp/`
-
-已发现：
-
-- `.agents/mcp/README.md`
-- `.agents/mcp/codex.example.toml`
-
-效果：
-
-- 说明如何给 Codex 增加文件系统或笔记库上下文。
-- 项目只保存模板，真实路径留在 `~/.codex/config.toml` 或通过 `codex mcp add` 添加。
-
-项目工作区示例：
-
-```bash
-codex mcp add imx6-workspace -- npx -y @modelcontextprotocol/server-filesystem /home/<user>/imx6_driver_friedegg
-```
-
-私人笔记库示例：
-
-```bash
-codex mcp add imx6-notes -- npx -y @modelcontextprotocol/server-filesystem /home/<user>/imx6_driver_friedegg /home/<user>/<obsidian-vault>
-```
-
-检查：
-
-```bash
-codex mcp list
-```
-
-聊天框具体操作：
-
-```text
-Use $embedded-dev-notes.
-如果 MCP 中有 imx6-notes，只读取与 AP3216C/mdev 相关的笔记作为参考；输出到本项目 docs/ 时必须脱敏，不写真实 vault 路径。
-```
-
-## Hooks、Subagents、Memory
-
-### Hooks
-
-当前项目没有提交可执行 hook。建议先设计只读提醒，不自动改文件：
+示例：
 
 ```text
 Use $ai-system-architect.
-为本项目设计只读 hook 检查，不要自动修改文件。目标是提醒缺少验证命令、学习总结、调试卡片和隐私占位符。
+请评审当前项目的 Codex AI 组件，指出哪些该留在项目层，哪些该放到用户层，并给出下一轮改进计划。
 ```
 
-适合检查：
+该 skill 在用户级，不应复制到项目目录。项目里只记录协作者也需要的可复现规则。
 
-- 开发任务是否缺最窄验证命令。
-- 调试任务是否缺知识卡。
-- 学习闭环是否缺总结。
-- 文档是否出现真实 SSH、token、NFS/TFTP、board IP、Obsidian vault 绝对路径。
+## 当前工程入口
 
-### Subagents
+本仓库同时包含 BSP 集成、Buildroot external、外置驱动包、用户态测试程序和大源码树。常见归属判断：
 
-当前项目没有专门提交 subagent 配置。只有大范围搜索或并行 review 明显有价值时再请求：
-
-```text
-请使用一个只读 explorer 子代理检查 OV5640 相关 DTS、Kconfig、驱动和 Buildroot 包路径。主会话继续整理验证方案；子代理不要修改文件。
-```
-
-效果：
-
-- 子代理负责并行探索或复核。
-- 主会话负责最终工程判断、编辑和整合。
-
-### Memory
-
-适合放 memory：
-
-- 默认用中文解释 Linux driver 概念。
-- 学习总结要包含简历 bullet。
-- 面试问题要给 expected discussion points。
-
-不适合放 memory：
-
-- 项目构建规则。
-- 真实 board IP。
-- 私有 vault 路径。
-- SSH 用户、host、token。
-- 必须随仓库复现的 BSP 规则。
-
-聊天框具体操作：
-
-```text
-请把“驱动学习总结默认用中文，并包含简历 bullet 和面试深挖问题”作为我的个人偏好记住。不要把任何项目路径、board IP 或 SSH 信息写入 memory。
-```
-
-## 典型任务一键输入
-
-### AP3216C 中断调试
-
-```text
-Use $imx6-dev-learning-loop.
-
-Run an end-to-end development learning loop for AP3216C interrupt debug.
-
-Goal: modprobe 后 AP3216C IIO 设备存在，并确认中断触发路径。
-Current behavior or symptom: 驱动 probe 成功，但用户态中断测试无输出。
-Target hardware path:
-- board/peripheral: i.MX6ULL + AP3216C
-- bus/subsystem: I2C + GPIO IRQ + IIO
-- pins/clocks/resets/regulators/interrupts if known: 请从 DTS 检查
-Relevant files or logs: 我会粘贴 dmesg、/proc/interrupts、测试程序输出
-Expected user-space behavior: ap3216c_test 可读 IIO 数据，中断模式有事件
-Verification available:
-- build command: bash buildscripts/build_and_deploy.sh drv ap3216c
-- board-side command: 请给出
-Learning output needed:
-- docs note: yes
-- Obsidian/private note: yes
-- resume/interview summary: yes
-AI component friction to watch for: 是否需要 prompt 默认要求 /proc/interrupts
-```
-
-### OV5640 V4L2 bring-up
-
-```text
-Use .agents/prompts/linux-port.md
-
-Port or debug Linux support for OV5640 camera.
-Hardware facts:
-- bus/interface: I2C control + CSI/parallel data path
-- pins: 请从 DTS 检查
-- clock/reset/regulator: 请从 DTS 检查
-- interrupt: unknown
-- expected userspace node or subsystem: /dev/video0 and V4L2 controls
-- current symptom: v4l2-ctl 无法枚举摄像头
-```
-
-### 提交前整理
-
-```text
-Use $git-commit-assistant.
-检查当前 super-project 和子仓库状态，按意图拆分提交组并草拟 commit message。不要直接提交，先给计划。
-```
-
-## 组件选择规则
-
-| 需求 | 优先组件 | 原因 |
+| 问题类型 | 优先检查路径 | 典型验证 |
 | --- | --- | --- |
-| 长期项目规则 | `AGENTS.md` | 自动生效，适合协作者和未来机器 |
-| 标准化任务输入 | `.agents/prompts/` | 减少聊天框遗漏字段 |
-| 多步可复用流程 | `.agents/skills/` | 让 Codex 按固定步骤读取上下文、执行和输出 |
-| 稳定项目事实 | `.agents/context/` | 避免把大段事实复制到每个 prompt |
-| 外部资料或私有笔记 | MCP | 连接外部上下文，真实路径留用户级 |
-| 自动提醒 | hook/check | 适合缺验证、缺总结、隐私泄露检查 |
-| 并行搜索/复核 | subagent | 适合大任务，主会话负责整合 |
-| 个人偏好 | memory 或 `~/.codex/AGENTS.md` | 不污染项目级规则 |
+| 外置驱动包代码 | `src/<pkg>/` | `bash buildscripts/build_and_deploy.sh drv <pkg>` |
+| Buildroot package 安装 | `bsp/package/<pkg>/` | `bash buildscripts/build_and_deploy.sh drv <pkg>` 或 `rootfs` |
+| rootfs overlay 或启动脚本 | `bsp/rootfs_overlay/` | `bash buildscripts/build_and_deploy.sh rootfs` |
+| BusyBox/Buildroot 配置 | `bsp/configs/` | `bash buildscripts/build_and_deploy.sh config status` 后按需 `rootfs` |
+| 内核 DTS 或内核驱动 | `src/linux-friedegg/` | `dtb` 或 `zimage` |
+| U-Boot | `src/uboot-friedegg/` | 按具体启动链路选择，不默认改 |
+| 文档和学习材料 | `docs/`、`src/<pkg>/README.md`、`src/<pkg>/docs/` | Markdown 检查或人工阅读 |
 
-## 验证命令选择
+当前可见外置包包括 `ap3216c`、`gt9147`、`ov5640`、`imx6_monitor`、`imx6_qt5_demo` 和 `print_chasing_led`。不要假设只有当前打开的 `ov5640` 存在。
 
-按变更范围选择最窄命令：
+## 验证命令
+
+优先选择能证明本次改动的最窄命令：
 
 ```bash
 bash buildscripts/build_and_deploy.sh dtb
@@ -628,34 +151,20 @@ bash buildscripts/build_and_deploy.sh drv <pkg>
 bash buildscripts/build_and_deploy.sh config status
 ```
 
-聊天框可直接要求：
+驱动或 BSP 调试回答应同时给出板端命令，例如 `modprobe`、`dmesg`、`lsmod`、`v4l2-ctl`、`media-ctl`、`cat /proc/interrupts` 或具体测试程序命令，并写清 expected result。
 
-```text
-请只选择能证明这次改动的最窄验证命令。不要默认 full rebuild。如果需要板端验证但无法运行，请给 exact board-side commands 和 expected result。
-```
+## 组件维护规则
 
-## 用户级配置边界
-
-本次扫描到 `~/.codex/config.toml` 中包含模型、review 模型、reasoning effort、网络访问、provider 和项目 trust 配置。它们会影响 Codex 默认使用的模型、权限和本项目是否被视为可信工作区。
-
-项目文档只记录这些配置的“类别和影响”，不记录：
-
-- 真实 provider endpoint。
-- `~/.codex/auth.json`。
-- session/log SQLite。
-- shell snapshots。
-- installation id。
-
-聊天框可这样要求脱敏分析：
-
-```text
-Use $ai-system-architect.
-请只基于脱敏信息解释我的用户级 Codex config 对本项目开发体验的影响。不要把真实 provider endpoint、auth、session 或 logs 写入仓库。
-```
+- `AGENTS.md` 放长期项目规则、仓库边界、隐私边界、验证入口和默认路由。
+- `.agents/skills/` 放稳定、可复用、多步骤工作流。
+- 一次性学习总结、任务复盘、简历整理和面试问答优先在普通回答中完成，不再单独维护 summary-notes skill。
+- prompt、context、MCP 模板、hook、subagent 只有创建后才写入“当前组件清单”。
+- 删除或重命名 skill 后，必须同步更新 `AGENTS.md` 和本文档，并用 `rg` 检查旧名称残留。
+- 用户级配置保留个人偏好、真实路径、provider、token、MCP 实例和运行状态；项目级配置只保留可共享、可复现、脱敏后的规则。
 
 ## 隐私占位符
 
-项目文档、prompt、skill 和 MCP 示例统一使用：
+项目文档、prompt、skill 和示例配置统一使用：
 
 ```text
 <vm-host>
@@ -669,11 +178,13 @@ Use $ai-system-architect.
 
 不要提交真实 SSH 主机、用户名、私钥、密码、token、API key、cookie、真实 NFS/TFTP 路径、真实 board IP、Obsidian vault 绝对路径、私有 provider endpoint 或用户级运行状态文件。
 
-## 官方参考
+## 维护自检
 
-- OpenAI Codex 产品页：https://openai.com/codex
-- OpenAI Codex IDE extension 更新说明：https://openai.com/index/introducing-upgrades-to-codex/
-- OpenAI Help Center Codex 使用概览：https://help.openai.com/en/articles/11369540/
-- OpenAI Codex skills 说明：https://openai.com/index/introducing-the-codex-app/
-- OpenAI Docs MCP 说明：https://platform.openai.com/docs/docs-mcp
-- AGENTS.md 开放格式说明：https://agents.md/
+调整 AI 指导文档后至少运行：
+
+```bash
+rg --files .agents
+rg -n "<old-skill-or-component-name>" AGENTS.md docs .agents
+```
+
+第一条用于核对项目级 AI 组件实际文件；第二条把占位符替换为被删除或重命名的旧组件名，用于确认旧名称没有残留在路由和当前清单中。
