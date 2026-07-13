@@ -15,7 +15,7 @@ MODE=smoke
 # Requested V4L2 fourcc list. These are requests; the ACT_* columns printed by
 # the script are the authoritative values returned by the driver after S_FMT and
 # S_PARM negotiation.
-FORMATS="RGBP UYVY YUYV BA81"
+FORMATS="RGBP UYVY YUYV GREY"
 
 # Requested size presets. Unsupported request sizes may be snapped by the driver
 # to a supported discrete mode; such cases are reported as PASS_ADJUST.
@@ -24,7 +24,7 @@ FULL_SIZES="176x144 320x240 640x480 720x480 720x576 800x480 1024x768 1280x720 12
 
 # Requested frame-rate presets. Unsupported fps for the active size fails at
 # S_PARM unless S_FMT has already snapped the size to one that supports it.
-SMOKE_FPS="15 30 45 60 90 120"
+SMOKE_FPS="15 30 45 60"
 FULL_FPS="15 30 45 60 90 120"
 
 # Optional user overrides for the requested size/fps lists. Empty means derive
@@ -63,7 +63,7 @@ Usage: $0 [options]
 Options:
   -d, --device DEV       video device, default: /dev/video1
   -c, --count N          stream frame count per case, default: 30
-      --formats LIST     quoted fourcc list, default: "RGBP UYVY YUYV BA81"
+      --formats LIST     quoted fourcc list, default: "RGBP UYVY YUYV GREY"
       --sizes LIST       quoted WxH list, overrides smoke/full sizes
       --fps LIST         quoted fps list, overrides smoke/full fps
       --full             test wider mode/fps matrix including PDF target rates

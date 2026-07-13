@@ -332,9 +332,9 @@ static struct mx6s_fmt formats[] = {
 		.mbus_code	= MEDIA_BUS_FMT_AYUV8_1X32,
 		.bpp		= 4,
 	}, {
-		.name		= "RAWRGB8 (SBGGR8)",
-		.pixelformat	= V4L2_PIX_FMT_SBGGR8,
-		.mbus_code	= MEDIA_BUS_FMT_SBGGR8_1X8,
+		.name		= "GREY-8",
+		.pixelformat	= V4L2_PIX_FMT_GREY,
+		.mbus_code	= MEDIA_BUS_FMT_Y8_1X8,
 		.bpp		= 1,
 	}, {
 		.name		= "RGB565_LE",
@@ -511,6 +511,30 @@ static inline void csi_write(struct mx6s_csi_dev *csi, unsigned int value,
 {
 	__raw_writel(value, csi->regbase + offset);
 }
+
+#ifdef DEBUG
+static void mx6s_dump_csi_regs(struct mx6s_csi_dev *csi_dev,
+			       const char *reason)
+{
+	struct v4l2_pix_format *pix = &csi_dev->pix;
+
+	dev_err(csi_dev->dev,
+		"%s: fmt=%4.4s %ux%u field=%u mbus=0x%08x "
+		"cr1=0x%08x cr2=0x%08x cr3=0x%08x cr18=0x%08x "
+		"csisr=0x%08x imag=0x%08x fb1=0x%08x fb2=0x%08x\n",
+		reason, (char *)&pix->pixelformat, pix->width, pix->height,
+		pix->field, csi_dev->mbus_code,
+		csi_read(csi_dev, CSI_CSICR1),
+		csi_read(csi_dev, CSI_CSICR2),
+		csi_read(csi_dev, CSI_CSICR3),
+		csi_read(csi_dev, CSI_CSICR18),
+		csi_read(csi_dev, CSI_CSISR),
+		csi_read(csi_dev, CSI_CSIIMAG_PARA),
+		csi_read(csi_dev, CSI_CSIDMASA_FB1),
+		csi_read(csi_dev, CSI_CSIDMASA_FB2));
+}
+
+#endif
 
 /**
  * notifier_to_mx6s_dev() - 由 async notifier 指针取回 CSI 私有对象
@@ -1121,6 +1145,10 @@ static int mx6s_csi_enable(struct mx6s_csi_dev *csi_dev)
 			}
 			if (timeout2 <= 0) {
 				pr_err("timeout when wait for reflash done.\n");
+#ifdef DEBUG
+				mx6s_dump_csi_regs(csi_dev,
+						   "wait DMA reflash timeout");
+#endif
 				local_irq_restore(flags);
 				return -ETIME;
 			}
@@ -1137,6 +1165,9 @@ static int mx6s_csi_enable(struct mx6s_csi_dev *csi_dev)
 	}
 	if (timeout <= 0) {
 		pr_err("timeout when wait for SOF\n");
+#ifdef DEBUG
+		mx6s_dump_csi_regs(csi_dev, "wait SOF timeout");
+#endif
 		local_irq_restore(flags);
 		return -ETIME;
 	}
@@ -1196,7 +1227,7 @@ static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 
 	switch (csi_dev->fmt->pixelformat) {
 	case V4L2_PIX_FMT_YUV32:
-	case V4L2_PIX_FMT_SBGGR8:
+	case V4L2_PIX_FMT_GREY:
 		width = pix->width;
 		break;
 	case V4L2_PIX_FMT_UYVY:
@@ -1228,7 +1259,7 @@ static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 		case V4L2_PIX_FMT_YUYV:
 			cr18 |= BIT_MIPI_DATA_FORMAT_YUV422_8B;
 			break;
-		case V4L2_PIX_FMT_SBGGR8:
+		case V4L2_PIX_FMT_GREY:
 			cr18 |= BIT_MIPI_DATA_FORMAT_RAW8;
 			break;
 		default:
@@ -1272,6 +1303,10 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 	 * discard frames when no buffer is available.
 	 * Feel free to work on this ;)
 	 */
+#ifdef DEBUG
+	csi_dev->frame_count = 0;
+#endif
+
 	csi_dev->discard_size = csi_dev->pix.sizeimage;
 	/*
 	 * dma_alloc_coherent() 同时返回 CPU 可访问虚拟地址和硬件可用 DMA
@@ -1331,14 +1366,14 @@ static int mx6s_start_streaming(struct vb2_queue *vq, unsigned int count)
 					&csi_dev->active_bufs, internal.queue) {
 			list_del_init(&buf->internal.queue);
 			if (buf->vb.state == VB2_BUF_STATE_ACTIVE)
-				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
+				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_QUEUED);
 		}
 
 		list_for_each_entry_safe(buf, tmp,
 					&csi_dev->capture, internal.queue) {
 			list_del_init(&buf->internal.queue);
 			if (buf->vb.state == VB2_BUF_STATE_ACTIVE)
-				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
+				vb2_buffer_done(&buf->vb, VB2_BUF_STATE_QUEUED);
 		}
 
 		spin_unlock_irqrestore(&csi_dev->slock, flags);
@@ -1366,6 +1401,11 @@ static void mx6s_stop_streaming(struct vb2_queue *vq)
 	unsigned long flags;
 	struct mx6s_buffer *buf, *tmp;
 	void *b;
+
+#ifdef DEBUG
+	if (csi_dev->frame_count == 0)
+		mx6s_dump_csi_regs(csi_dev, "stop before first frame");
+#endif
 
 	mx6s_csi_disable(csi_dev);
 

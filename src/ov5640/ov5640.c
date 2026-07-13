@@ -63,8 +63,6 @@
 #define OV5640_REG_PAD_OUTPUT00         0x302c
 #define OV5640_REG_FREX_CTRL            0x3022
 #define OV5640_REG_SYS_ROOT_DIVIDER     0x3108
-#define OV5640_REG_TIMING_HTS_H         0x380c
-#define OV5640_REG_TIMING_VTS_H         0x380e
 #define OV5640_REG_AEC_PK_EXPOSURE_H    0x3500
 #define OV5640_REG_AEC_PK_EXPOSURE_M    0x3501
 #define OV5640_REG_AEC_PK_EXPOSURE_L    0x3502
@@ -92,17 +90,30 @@
 #define OV5640_REG_BANDING_FILTER_MAN   0x3c00
 #define OV5640_REG_BANDING_FILTER_CTRL  0x3c01
 #define OV5640_REG_BANDING_FILTER_AUTO  0x3c0c
+#define OV5640_REG_LIGHT_METER_CTRL07   0x3c07
+#define OV5640_REG_TIMING_HORIZ_START_H 0x3800
+#define OV5640_REG_TIMING_VERT_START_H  0x3802
+#define OV5640_REG_TIMING_HORIZ_END_H   0x3804
+#define OV5640_REG_TIMING_VERT_END_H    0x3806
+#define OV5640_REG_TIMING_DVPHO_H       0x3808
+#define OV5640_REG_TIMING_DVPVO_H       0x380a
+#define OV5640_REG_TIMING_HTS_H         0x380c
+#define OV5640_REG_TIMING_VTS_H         0x380e
 #define OV5640_REG_TIMING_TC_REG20      0x3820
 #define OV5640_REG_TIMING_TC_REG21      0x3821
+#define OV5640_REG_TIMING_VOFFSET       0x3813
 #define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
+#define OV5640_REG_PCLK_PERIOD           0x4837
+#define OV5640_REG_DVP_PCLK_DIVIDER      0x3824
 #define OV5640_FORMAT_MUX_YUV422        0x00
 #define OV5640_FORMAT_MUX_RGB           0x01
 #define OV5640_FORMAT_MUX_RAW_DPC       0x03
 #define OV5640_FORMAT_CTRL_YUYV         0x30
 #define OV5640_FORMAT_CTRL_UYVY         0x3f
 #define OV5640_FORMAT_CTRL_RGB565       0x6f
+#define OV5640_FORMAT_CTRL_Y8           0x10
 #define OV5640_FORMAT_CTRL_RAW_BGGR     0x00
 #define OV5640_REG_AVG_READOUT          0x56a1
 
@@ -202,11 +213,6 @@ static int ov5640_framerates[] = {
 	[ov5640_120_fps] = 120,
 };
 
-static bool expose_pdf_modes;
-module_param(expose_pdf_modes, bool, 0644);
-MODULE_PARM_DESC(expose_pdf_modes,
-		 "Expose experimental OV5640 PDF target modes with verified register tables");
-
 struct ov5640_datafmt {
 	u32 code; /* MEDIA_BUS_FMT_*，描述 subdev 到 host 的总线像素编码 */
 	enum v4l2_colorspace colorspace; /* V4L2_COLORSPACE_*，描述像素值的色彩空间 */
@@ -228,7 +234,6 @@ struct ov5640_mode_reg_table {
 	enum ov5640_frame_rate frame_rate;
 	const struct reg_value *regs;
 	u32 num_regs;
-	bool experimental;
 };
 
 struct ov5640_mode_info {
@@ -506,23 +511,25 @@ static const struct reg_value ov5640_setting_30fps_QVGA_320_240[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
 };
 
+#ifdef DEBUG
 static const struct reg_value ov5640_setting_120fps_QVGA_320_240[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x01, 0, 0}, {0x3809, 0x40, 0, 0},
-	{0x380a, 0x00, 0, 0}, {0x380b, 0xf0, 0, 0}, {0x380c, 0x01, 0, 0},
-	{0x380d, 0x44, 0, 0}, {0x380e, 0x00, 0, 0}, {0x380f, 0xf2, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x00, 0, 0},
-	{0x3a03, 0xee, 0, 0}, {0x3a14, 0x00, 0, 0}, {0x3a15, 0xee, 0, 0},
+	{0x3c07, 0x07, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x03, 0, 0}, {0x3801, 0xe0, 0, 0}, {0x3802, 0x02, 0, 0}, {0x3803, 0xe0, 0, 0},
+	{0x3804, 0x06, 0, 0}, {0x3805, 0x5f, 0, 0}, {0x3806, 0x04, 0, 0},
+	{0x3807, 0xbf, 0, 0}, {0x3808, 0x01, 0, 0}, {0x3809, 0x40, 0, 0},
+	{0x380a, 0x00, 0, 0}, {0x380b, 0xf0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x64, 0, 0}, {0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0},
+	{0x3813, 0x04, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0},
+	{0x3a03, 0xd4, 0, 0}, {0x3a14, 0x02, 0, 0}, {0x3a15, 0xd4, 0, 0},
 	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x61, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0},
+	{0x5001, 0x83, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
+	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0},
 };
+
+#endif
 
 static const struct reg_value ov5640_setting_15fps_VGA_640_480[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
@@ -560,23 +567,25 @@ static const struct reg_value ov5640_setting_30fps_VGA_640_480[] = {
 	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
 };
 
+#ifdef DEBUG
 static const struct reg_value ov5640_setting_90fps_VGA_640_480[] = {
-	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
-	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0},
-	{0x3801, 0x00, 0, 0}, {0x3802, 0x00, 0, 0}, {0x3803, 0x04, 0, 0},
-	{0x3804, 0x0a, 0, 0}, {0x3805, 0x3f, 0, 0}, {0x3806, 0x07, 0, 0},
-	{0x3807, 0x9b, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
-	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x02, 0, 0},
-	{0x380d, 0x88, 0, 0}, {0x380e, 0x01, 0, 0}, {0x380f, 0xe4, 0, 0},
-	{0x3813, 0x06, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
-	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x01, 0, 0},
-	{0x3a03, 0xe0, 0, 0}, {0x3a14, 0x01, 0, 0}, {0x3a15, 0xe0, 0, 0},
+	{0x3c07, 0x07, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0}, {0x3815, 0x31, 0, 0}, {0x3800, 0x02, 0, 0}, {0x3801, 0xa0, 0, 0}, {0x3802, 0x01, 0, 0}, {0x3803, 0xf0, 0, 0},
+	{0x3804, 0x07, 0, 0}, {0x3805, 0x9f, 0, 0}, {0x3806, 0x05, 0, 0},
+	{0x3807, 0xaf, 0, 0}, {0x3808, 0x02, 0, 0}, {0x3809, 0x80, 0, 0},
+	{0x380a, 0x01, 0, 0}, {0x380b, 0xe0, 0, 0}, {0x380c, 0x07, 0, 0},
+	{0x380d, 0x64, 0, 0}, {0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0},
+	{0x3813, 0x04, 0, 0}, {0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0},
+	{0x3709, 0x52, 0, 0}, {0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0},
+	{0x3a03, 0xd4, 0, 0}, {0x3a14, 0x02, 0, 0}, {0x3a15, 0xd4, 0, 0},
 	{0x4004, 0x02, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0},
-	{0x460c, 0x22, 0, 0}, {0x4837, 0x22, 0, 0}, {0x3824, 0x02, 0, 0},
-	{0x5001, 0xa3, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x21, 0, 0},
-	{0x3036, 0x46, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
+	{0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0},
+	{0x460c, 0x20, 0, 0}, {0x4837, 0x16, 0, 0}, {0x3824, 0x04, 0, 0},
+	{0x5001, 0x83, 0, 0}, {0x3034, 0x1a, 0, 0}, {0x3035, 0x11, 0, 0},
+	{0x3036, 0x69, 0, 0}, {0x3037, 0x13, 0, 0}, {0x3503, 0x00, 0, 0},
 };
+
+#endif
 
 static const struct reg_value ov5640_setting_15fps_NTSC_720_480[] = {
 	{0x3c07, 0x08, 0, 0}, {0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0},
@@ -742,14 +751,14 @@ static const struct reg_value ov5640_setting_30fps_720P_1280_720[] = {
 };
 
 static const struct reg_value ov5640_setting_60fps_720P_1280_720[] = {
-	{0x3035, 0x11, 0, 0}, {0x3036, 0x46, 0, 0}, {0x3c07, 0x07, 0, 0},
+	{0x3035, 0x11, 0, 0}, {0x3036, 0x69, 0, 0}, {0x3c07, 0x07, 0, 0},
 	{0x3820, 0x41, 0, 0}, {0x3821, 0x07, 0, 0}, {0x3814, 0x31, 0, 0},
 	{0x3815, 0x31, 0, 0}, {0x3800, 0x00, 0, 0}, {0x3801, 0x00, 0, 0},
 	{0x3802, 0x00, 0, 0}, {0x3803, 0xfa, 0, 0}, {0x3804, 0x0a, 0, 0},
 	{0x3805, 0x3f, 0, 0}, {0x3806, 0x06, 0, 0}, {0x3807, 0xa9, 0, 0},
 	{0x3808, 0x05, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x02, 0, 0},
-	{0x380b, 0xd0, 0, 0}, {0x380c, 0x05, 0, 0}, {0x380d, 0x10, 0, 0},
-	{0x380e, 0x02, 0, 0}, {0x380f, 0xd8, 0, 0}, {0x3813, 0x04, 0, 0},
+	{0x380b, 0xd0, 0, 0}, {0x380c, 0x07, 0, 0}, {0x380d, 0x64, 0, 0},
+	{0x380e, 0x02, 0, 0}, {0x380f, 0xe4, 0, 0}, {0x3813, 0x04, 0, 0},
 	{0x3618, 0x00, 0, 0}, {0x3612, 0x29, 0, 0}, {0x3709, 0x52, 0, 0},
 	{0x370c, 0x03, 0, 0}, {0x3a02, 0x02, 0, 0}, {0x3a03, 0xd4, 0, 0},
 	{0x3a14, 0x02, 0, 0}, {0x3a15, 0xd4, 0, 0}, {0x4004, 0x02, 0, 0},
@@ -843,8 +852,10 @@ static const struct ov5640_mode_reg_table ov5640_qvga_reg_tables[] = {
 	ARRAY_SIZE(ov5640_setting_15fps_QVGA_320_240)},
 	{ov5640_30_fps, ov5640_setting_30fps_QVGA_320_240,
 	ARRAY_SIZE(ov5640_setting_30fps_QVGA_320_240)},
+#ifdef DEBUG
 	{ov5640_120_fps, ov5640_setting_120fps_QVGA_320_240,
-	ARRAY_SIZE(ov5640_setting_120fps_QVGA_320_240), true},
+	ARRAY_SIZE(ov5640_setting_120fps_QVGA_320_240)},
+#endif
 };
 
 static const struct ov5640_mode_reg_table ov5640_vga_reg_tables[] = {
@@ -852,8 +863,10 @@ static const struct ov5640_mode_reg_table ov5640_vga_reg_tables[] = {
 	ARRAY_SIZE(ov5640_setting_15fps_VGA_640_480)},
 	{ov5640_30_fps, ov5640_setting_30fps_VGA_640_480,
 	ARRAY_SIZE(ov5640_setting_30fps_VGA_640_480)},
+#ifdef DEBUG
 	{ov5640_90_fps, ov5640_setting_90fps_VGA_640_480,
-	ARRAY_SIZE(ov5640_setting_90fps_VGA_640_480), true},
+	ARRAY_SIZE(ov5640_setting_90fps_VGA_640_480)},
+#endif
 };
 
 static const struct ov5640_mode_reg_table ov5640_ntsc_reg_tables[] = {
@@ -888,19 +901,19 @@ static const struct ov5640_mode_reg_table ov5640_720p_reg_tables[] = {
 	{ov5640_30_fps, ov5640_setting_30fps_720P_1280_720,
 	ARRAY_SIZE(ov5640_setting_30fps_720P_1280_720)},
 	{ov5640_60_fps, ov5640_setting_60fps_720P_1280_720,
-	ARRAY_SIZE(ov5640_setting_60fps_720P_1280_720), true},
+	ARRAY_SIZE(ov5640_setting_60fps_720P_1280_720)},
 };
 
 static const struct ov5640_mode_reg_table ov5640_960p_reg_tables[] = {
 	{ov5640_45_fps, ov5640_setting_45fps_960P_1280_960,
-	ARRAY_SIZE(ov5640_setting_45fps_960P_1280_960), true},
+	ARRAY_SIZE(ov5640_setting_45fps_960P_1280_960)},
 };
 
 static const struct ov5640_mode_reg_table ov5640_1080p_reg_tables[] = {
 	{ov5640_15_fps, ov5640_setting_15fps_1080P_1920_1080,
 	ARRAY_SIZE(ov5640_setting_15fps_1080P_1920_1080)},
 	{ov5640_30_fps, ov5640_setting_30fps_1080P_1920_1080,
-	ARRAY_SIZE(ov5640_setting_30fps_1080P_1920_1080), true},
+	ARRAY_SIZE(ov5640_setting_30fps_1080P_1920_1080)},
 };
 
 static const struct ov5640_mode_reg_table ov5640_qsxga_reg_tables[] = {
@@ -1103,6 +1116,57 @@ static int ov5640_read_reg16(struct ov5640 *sensor, u16 reg, u16 *val)
 	return 0;
 }
 
+#ifdef DEBUG
+static void ov5640_dump_stream_regs(struct ov5640 *sensor, const char *reason)
+{
+	u8 stream = 0, pll_ctrl1 = 0, pll_mult = 0, pclk_period = 0;
+	u8 pclk_div = 0, fmt_mux = 0, fmt_ctrl = 0, timing20 = 0;
+	u8 timing21 = 0, light_meter = 0, v_offset = 0;
+	u16 hts = 0, vts = 0, x_start = 0, y_start = 0;
+	u16 x_end = 0, y_end = 0, out_w = 0, out_h = 0;
+	unsigned int fps = 0;
+
+	if (sensor->state.frame_rate >= ov5640_15_fps &&
+	    sensor->state.frame_rate < ov5640_num_framerates)
+		fps = ov5640_framerates[sensor->state.frame_rate];
+
+	ov5640_read_reg(sensor, OV5640_REG_STREAM_CTRL, &stream);
+	ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_CTRL1, &pll_ctrl1);
+	ov5640_read_reg(sensor, OV5640_REG_SYSCLK_PLL_MULT, &pll_mult);
+	ov5640_read_reg(sensor, OV5640_REG_LIGHT_METER_CTRL07, &light_meter);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_HORIZ_START_H, &x_start);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_VERT_START_H, &y_start);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_HORIZ_END_H, &x_end);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_VERT_END_H, &y_end);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_DVPHO_H, &out_w);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_DVPVO_H, &out_h);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_HTS_H, &hts);
+	ov5640_read_reg16(sensor, OV5640_REG_TIMING_VTS_H, &vts);
+	ov5640_read_reg(sensor, OV5640_REG_PCLK_PERIOD, &pclk_period);
+	ov5640_read_reg(sensor, OV5640_REG_DVP_PCLK_DIVIDER, &pclk_div);
+	ov5640_read_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL, &fmt_mux);
+	ov5640_read_reg(sensor, OV5640_REG_FORMAT_CONTROL00, &fmt_ctrl);
+	ov5640_read_reg(sensor, OV5640_REG_TIMING_TC_REG20, &timing20);
+	ov5640_read_reg(sensor, OV5640_REG_TIMING_TC_REG21, &timing21);
+	ov5640_read_reg(sensor, OV5640_REG_TIMING_VOFFSET, &v_offset);
+
+	dev_info(sensor->dev,
+		"%s: state=%ux%u@%u code=0x%04x stream=0x%02x "
+		"3035=0x%02x 3036=0x%02x 3c07=0x%02x "
+		"hts=0x%04x vts=0x%04x win_x=0x%04x-0x%04x "
+		"win_y=0x%04x-0x%04x "
+		"out=%ux%u 4837=0x%02x 3824=0x%02x "
+		"501f=0x%02x 4300=0x%02x 3820=0x%02x 3821=0x%02x "
+		"3813=0x%02x\n",
+		reason, sensor->state.mbus_fmt.width,
+		sensor->state.mbus_fmt.height, fps, sensor->state.mbus_fmt.code,
+		stream, pll_ctrl1, pll_mult, light_meter, hts, vts,
+		x_start, x_end, y_start, y_end, out_w, out_h, pclk_period, pclk_div,
+		fmt_mux, fmt_ctrl, timing20, timing21, v_offset);
+}
+
+#endif
+
 static int ov5640_write_reg16(struct ov5640 *sensor, u16 reg, u16 val)
 {
 	int ret;
@@ -1143,7 +1207,7 @@ static const struct ov5640_datafmt ov5640_colour_fmts[] = {
 	{MEDIA_BUS_FMT_RGB565_2X8_LE, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_UYVY8_2X8, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_YUYV8_2X8, V4L2_COLORSPACE_SRGB},
-	{MEDIA_BUS_FMT_SBGGR8_1X8, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_Y8_1X8, V4L2_COLORSPACE_SRGB},
 };
 
 static inline struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
@@ -1234,9 +1298,6 @@ ov5640_get_mode_reg_table(const struct ov5640_mode_info *mode_info,
 		const struct ov5640_mode_reg_table *reg_table =
 			&mode_info->reg_tables[i];
 
-		if (reg_table->experimental && !expose_pdf_modes)
-			continue;
-
 		if (reg_table->frame_rate == frame_rate &&
 		    reg_table->regs && reg_table->num_regs)
 			return reg_table;
@@ -1256,9 +1317,6 @@ static bool ov5640_mode_has_available_reg_table(
 	for (i = 0; i < mode_info->num_reg_tables; i++) {
 		const struct ov5640_mode_reg_table *reg_table =
 			&mode_info->reg_tables[i];
-
-		if (reg_table->experimental && !expose_pdf_modes)
-			continue;
 
 		if (reg_table->regs && reg_table->num_regs)
 			return true;
@@ -1299,24 +1357,6 @@ ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 	}
 
 	return best;
-}
-
-static const struct ov5640_mode_info *
-ov5640_find_mode_by_size(enum ov5640_frame_rate frame_rate, u32 width, u32 height)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
-		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
-
-		if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
-			continue;
-
-		if (mode_info->width == width && mode_info->height == height)
-			return mode_info;
-	}
-
-	return NULL;
 }
 
 static const struct ov5640_mode_info *
@@ -1421,14 +1461,14 @@ static int ov5640_apply_format(struct ov5640 *sensor,
 
 		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
 					OV5640_FORMAT_CTRL_RGB565);
-	case MEDIA_BUS_FMT_SBGGR8_1X8:
+	case MEDIA_BUS_FMT_Y8_1X8:
 		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
-					OV5640_FORMAT_MUX_RAW_DPC);
+					OV5640_FORMAT_MUX_YUV422);
 		if (ret < 0)
 			return ret;
 
 		return ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
-					OV5640_FORMAT_CTRL_RAW_BGGR);
+					OV5640_FORMAT_CTRL_Y8);
 	default:
 		return -EINVAL;
 	}
@@ -1513,6 +1553,10 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 	ret = ov5640_hw_set_stream(sensor, enable);
 	if (ret < 0)
 		return ret;
+
+#ifdef DEBUG
+	ov5640_dump_stream_regs(sensor, enable ? "stream-on" : "stream-off");
+#endif
 
 	sensor->state.streaming = enable;
 	if (enable) {
@@ -3422,23 +3466,21 @@ unlock:
  * @mf: Media bus frame format to validate and adjust.
  *
  * Unsupported media bus codes are adjusted to the default RGB565 path.  The
- * requested size is snapped to the nearest frame size that is valid for the current
- * frame-rate cache; this callback never writes sensor registers.
+ * requested size is snapped to the nearest supported frame size; this callback
+ * never writes sensor registers.
  *
  * Return: 0 on success, or -EINVAL if no valid frame size exists.
  */
 static int ov5640_try_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_mbus_framefmt *mf)
 {
-	struct ov5640 *sensor = sd_to_ov5640(sd);
 	const struct ov5640_datafmt *fmt = ov5640_find_datafmt(mf->code);
 	const struct ov5640_mode_info *mode_info;
 
 	if (!fmt)
 		fmt = &ov5640_colour_fmts[0];
 
-	mode_info = ov5640_find_nearest_mode(sensor->state.frame_rate,
-						mf->width, mf->height);
+	mode_info = ov5640_find_mode(mf->width, mf->height, true);
 	if (!mode_info)
 		return -EINVAL;
 
@@ -3469,6 +3511,7 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 	struct ov5640 *sensor = sd_to_ov5640(sd);
 	const struct ov5640_datafmt *fmt;
 	const struct ov5640_mode_info *mode_info;
+	enum ov5640_frame_rate frame_rate;
 	int retval;
 
 	retval = ov5640_try_fmt(sd, mf);
@@ -3476,9 +3519,14 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 		return retval;
 
 	fmt = ov5640_find_datafmt(mf->code);
-	mode_info = ov5640_find_mode_by_size(sensor->state.frame_rate,
-						mf->width, mf->height);
+	mode_info = ov5640_find_mode(mf->width, mf->height, false);
 	if (!fmt || !mode_info)
+		return -EINVAL;
+
+	frame_rate = sensor->state.frame_rate;
+	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+		frame_rate = mode_info->default_fps;
+	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
 		return -EINVAL;
 
 	mutex_lock(&sensor->lock);
@@ -3488,7 +3536,7 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 	}
 
 	if (sensor->state.powered) {
-		retval = ov5640_change_mode(sensor, sensor->state.frame_rate, mode_info->frame_size);
+		retval = ov5640_change_mode(sensor, frame_rate, mode_info->frame_size);
 		if (retval < 0)
 			goto out;
 
@@ -3507,6 +3555,10 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 
 	sensor->state.frame_size = mode_info->frame_size;
 	sensor->state.mbus_fmt = *mf;
+	sensor->state.frame_rate = frame_rate;
+	sensor->state.streamcap.timeperframe.numerator = 1;
+	sensor->state.streamcap.timeperframe.denominator =
+		ov5640_framerates[frame_rate];
 	if (!sensor->state.powered) {
 		retval = ov5640_af_note_mode_change(sensor);
 		if (retval < 0)
