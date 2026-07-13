@@ -1,0 +1,17 @@
+config BR2_PACKAGE_IMX6_SMART_MONITOR
+	bool "imx6 smart monitor Qt launcher and module test apps"
+	depends on BR2_PACKAGE_QT5
+	select BR2_PACKAGE_QT5BASE_GUI
+	select BR2_PACKAGE_QT5BASE_WIDGETS
+	select BR2_PACKAGE_QT5BASE_LINUXFB
+	select BR2_PACKAGE_QT5BASE_FONTCONFIG
+	select BR2_PACKAGE_QT5BASE_TSLIB
+	select BR2_PACKAGE_DEJAVU
+	help
+	  Qt5 Widgets launcher and module test apps for the smart monitor
+	  skeleton. The launcher provides a phone-style home screen that opens
+	  touch, AP3216C, LD2410C, OV5640/V4L2, storage and MonitorCore test
+	  pages inside one foreground Qt application.
+
+comment "imx6 smart monitor needs Qt5"
+	depends on !BR2_PACKAGE_QT5
