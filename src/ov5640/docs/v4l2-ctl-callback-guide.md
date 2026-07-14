@@ -728,26 +728,28 @@ test_v4l2_matrix.sh -d "$DEV" --list-only
 test_v4l2_matrix.sh -d "$DEV" \
   --formats "RGBP UYVY YUYV GREY" \
   --sizes "800x480 640x480 320x240 1280x720" \
-  --fps "15 30" \
-  -c 10
+  --fps "15 30"
 ```
 
 更宽矩阵：
 
 ```bash
-test_v4l2_matrix.sh -d "$DEV" --full -c 10
+test_v4l2_matrix.sh -d "$DEV" --full
 ```
 
-脚本执行顺序见 [`test_v4l2_matrix.sh`](../test_v4l2_matrix.sh#L133)：
+默认每个组合使用 `stream-count = REQFPS * 2`；需要快扫时可追加 `-c 10` 覆盖。
+
+脚本执行顺序见 [`test_v4l2_matrix.sh`](../test_v4l2_matrix.sh#L401)：
 
 ```text
---list-formats-ext
+--list-only:
+  --list-formats-ext
 for fmt/size/fps:
   --set-fmt-video
   --get-fmt-video
   --set-parm
   --get-parm
-  --stream-mmap --stream-count=N
+  --set-fmt-video --set-parm --get-fmt-video --get-parm --stream-mmap --stream-count=REQFPS*2
 ```
 
 失败阶段和回调定位：
@@ -758,7 +760,7 @@ for fmt/size/fps:
 | `FAIL_PARM` | fps 不在离散表、当前尺寸没有该 fps 寄存器表、streaming 中改 fps | `mx6s_vidioc_s_parm()`、`ov5640_s_parm()` |
 | `FAIL_STREAM` | buffer 不足、sensor 出流失败、CSI 等 SOF 超时、DMA/IRQ 问题 | `mx6s_vidioc_streamon()`、`ov5640_s_stream()`、`mx6s_start_streaming()` |
 
-日志目录默认在 `/tmp/ov5640-v4l2-matrix-<time>`，每个组合一个 log。先看失败 log 里的最后一个 `v4l2-ctl` 命令，再回到上表定位回调。
+脚本不再生成矩阵日志文件；失败定位优先看表格中的 `RESULT`、`ACT_FMT`、`ACT_SIZE`、`DRV_FPS`、`ACT_FPS` 列，再按上表回到对应回调路径。
 
 ## 推荐验证序列
 

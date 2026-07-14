@@ -5,16 +5,17 @@ set -u
 # V4L2 capture node under test.
 DEV=/dev/video1
 
-# Number of frames captured by each matrix case.
-COUNT=30
+# Number of frames captured by each matrix case. Empty means auto:
+# stream-count = requested fps * 2.
+COUNT=""
 
 # Matrix preset. "smoke" is a short stable subset; "full" includes wider
 # PDF-target sizes/fps and can take much longer.
 MODE=smoke
 
 # Requested V4L2 fourcc list. These are requests; the ACT_* columns printed by
-# the script are the authoritative values returned by the driver after S_FMT and
-# S_PARM negotiation.
+# the script are split into driver-reported values after S_FMT/S_PARM and
+# stream-measured fps parsed from v4l2-ctl streaming timestamps.
 FORMATS="RGBP UYVY YUYV GREY"
 
 # Requested size presets. Unsupported request sizes may be snapped by the driver
@@ -32,8 +33,6 @@ FULL_FPS="15 30 45 60 90 120"
 SIZES=""
 FPS_LIST=""
 
-# Empty LOG_DIR creates /tmp/ov5640-v4l2-matrix-<time> on the target.
-LOG_DIR=""
 LIST_ONLY=0
 
 # Warm-up runs a known stable stream before the matrix to absorb cold-start
@@ -62,12 +61,11 @@ Usage: $0 [options]
 
 Options:
   -d, --device DEV       video device, default: /dev/video1
-  -c, --count N          stream frame count per case, default: 30
+  -c, --count N          override stream frame count per case, default: requested fps * 2
       --formats LIST     quoted fourcc list, default: "RGBP UYVY YUYV GREY"
       --sizes LIST       quoted WxH list, overrides smoke/full sizes
       --fps LIST         quoted fps list, overrides smoke/full fps
       --full             test wider mode/fps matrix including PDF target rates
-      --log-dir DIR      output log directory, default: /tmp/ov5640-v4l2-matrix-<time>
       --list-only        only dump --list-formats-ext and exit
       --no-warmup        skip the pre-matrix warm-up stream
       --warmup-format F  warm-up fourcc, default: RGBP
@@ -82,7 +80,7 @@ Options:
 
 Examples:
   $0 -d /dev/video1
-  $0 --full -c 10
+  $0 --full
   $0 --sizes "640x480 1280x720" --fps "15 30 60" --formats "UYVY YUYV"
 EOF_USAGE
 }
@@ -105,23 +103,43 @@ first_word()
 	return 1
 }
 
-run_stream_capture()
+run_v4l2_stream_command()
 {
 	stream_count=$1
+	stream_fmt=${2:-}
+	stream_width=${3:-}
+	stream_height=${4:-}
+	stream_fps=${5:-}
 
+	if [ -n "$stream_fmt" ]; then
+		v4l2-ctl --verbose -d "$DEV" \
+			--set-fmt-video=width="$stream_width",height="$stream_height",pixelformat="$stream_fmt" \
+			--set-parm="$stream_fps" \
+			--get-fmt-video \
+			--get-parm \
+			--stream-mmap \
+			--stream-count="$stream_count"
+	else
+		v4l2-ctl --verbose -d "$DEV" \
+			--stream-mmap \
+			--stream-count="$stream_count"
+	fi
+}
+
+run_stream_capture()
+{
 	if [ "$STREAM_TIMEOUT" -le 0 ] 2>/dev/null; then
-		v4l2-ctl -d "$DEV" --stream-mmap --stream-count="$stream_count"
+		run_v4l2_stream_command "$@"
 		return $?
 	fi
 
-	v4l2-ctl -d "$DEV" --stream-mmap --stream-count="$stream_count" &
+	run_v4l2_stream_command "$@" &
 	stream_pid=$!
 
 	(
 		sleep "$STREAM_TIMEOUT"
-		echo "stream timeout after ${STREAM_TIMEOUT}s; killing v4l2-ctl"
 		kill "$stream_pid" 2>/dev/null
-	) &
+	) >/dev/null 2>&1 &
 	timer_pid=$!
 
 	wait "$stream_pid"
@@ -130,6 +148,58 @@ run_stream_capture()
 	wait "$timer_pid" 2>/dev/null
 
 	return "$stream_rc"
+}
+
+extract_driver_fps()
+{
+	sed -n "s/.*Frames per second[[:space:]]*: \([0-9.][0-9.]*\).*/\1/p" | tail -n 1
+}
+
+extract_stream_fps()
+{
+	sed -n \
+		-e "s/.*fps: \([0-9.][0-9.]*\).*/\1/p" \
+		-e "s/.*[[:space:]]\([0-9.][0-9.]*\)[[:space:]]fps.*/\1/p" |
+		head -n 1
+}
+
+stream_count_for_fps()
+{
+	requested_fps=$1
+
+	awk -v fps="$requested_fps" '
+		BEGIN {
+			if (fps <= 0)
+				exit 1;
+			count = int(fps * 2 + 0.5);
+			if (count < 1)
+				count = 1;
+			print count;
+		}
+	'
+}
+
+fps_matches_request()
+{
+	actual=$1
+	requested=$2
+
+	if [ -z "$actual" ] || [ "$actual" = "-" ]; then
+		return 1
+	fi
+
+	awk -v actual="$actual" -v requested="$requested" "
+		BEGIN {
+			if (actual <= 0 || requested <= 0)
+				exit 1;
+			diff = actual - requested;
+			if (diff < 0)
+				diff = -diff;
+			tol = requested * 0.05;
+			if (tol < 1)
+				tol = 1;
+			exit(diff <= tol ? 0 : 1);
+		}"
 }
 
 run_warmup()
@@ -151,45 +221,28 @@ run_warmup()
 
 	warm_attempt=1
 	while [ "$warm_attempt" -le 2 ]; do
-		warm_log="$LOG_DIR/warmup_attempt${warm_attempt}.log"
-		{
-			echo "warmup attempt=$warm_attempt fmt=$warm_fmt size=$warm_size fps=$warm_fps"
-			echo
-			echo "[set-fmt]"
-			echo "v4l2-ctl -d $DEV --set-fmt-video=width=$warm_width,height=$warm_height,pixelformat=$warm_fmt"
-		} >"$warm_log"
-
 		v4l2-ctl -d "$DEV" \
 			--set-fmt-video=width="$warm_width",height="$warm_height",pixelformat="$warm_fmt" \
-			>>"$warm_log" 2>&1
+			>/dev/null 2>&1
 		rc_fmt=$?
 
-		{
-			echo
-			echo "[set-parm]"
-			echo "v4l2-ctl -d $DEV --set-parm=$warm_fps"
-		} >>"$warm_log"
-		v4l2-ctl -d "$DEV" --set-parm="$warm_fps" >>"$warm_log" 2>&1
+		v4l2-ctl -d "$DEV" --set-parm="$warm_fps" >/dev/null 2>&1
 		rc_parm=$?
 
-		{
-			echo
-			echo "[stream]"
-			echo "v4l2-ctl -d $DEV --stream-mmap --stream-count=$WARMUP_COUNT"
-		} >>"$warm_log"
 		if [ "$rc_fmt" -eq 0 ] && [ "$rc_parm" -eq 0 ]; then
-			run_stream_capture "$WARMUP_COUNT" >>"$warm_log" 2>&1
+			stream_out=$(run_stream_capture "$WARMUP_COUNT" "$warm_fmt" "$warm_width" "$warm_height" "$warm_fps" 2>&1)
 			rc_stream=$?
 		else
+			stream_out=""
 			rc_stream=1
 		fi
 
 		if [ "$rc_fmt" -eq 0 ] && [ "$rc_parm" -eq 0 ] && [ "$rc_stream" -eq 0 ]; then
-			echo "warmup: PASS attempt=$warm_attempt log=$warm_log"
+			echo "warmup: PASS attempt=$warm_attempt"
 			return 0
 		fi
 
-		echo "warmup: FAIL attempt=$warm_attempt log=$warm_log"
+		echo "warmup: FAIL attempt=$warm_attempt rc_fmt=$rc_fmt rc_parm=$rc_parm rc_stream=$rc_stream"
 		warm_attempt=$((warm_attempt + 1))
 		if [ "$warm_attempt" -le 2 ]; then
 			sleep "$WARMUP_SLEEP"
@@ -230,11 +283,6 @@ while [ "$#" -gt 0 ]; do
 	--full)
 		MODE=full
 		shift
-		;;
-	--log-dir)
-		need_arg "$@"
-		LOG_DIR=$2
-		shift 2
 		;;
 	--list-only)
 		LIST_ONLY=1
@@ -322,32 +370,26 @@ if [ ! -e "$DEV" ]; then
 	exit 1
 fi
 
-if [ -z "$LOG_DIR" ]; then
-	LOG_DIR="/tmp/ov5640-v4l2-matrix-$(date +%Y%m%d-%H%M%S)"
-fi
-
-mkdir -p "$LOG_DIR" || exit 1
-
-LIST_LOG="$LOG_DIR/list-formats-ext.log"
-v4l2-ctl -d "$DEV" --list-formats-ext >"$LIST_LOG" 2>&1
-
 echo "device: $DEV"
 echo "mode: $MODE"
 echo "formats: $FORMATS"
 echo "sizes: $SIZES"
 echo "fps: $FPS_LIST"
-echo "stream-count: $COUNT"
+if [ -n "$COUNT" ]; then
+	echo "stream-count: $COUNT"
+else
+	echo "stream-count: auto (requested fps * 2)"
+fi
 echo "warmup: $WARMUP"
 echo "warmup-combo: $WARMUP_FORMAT $WARMUP_SIZE ${WARMUP_FPS}fps"
 echo "warmup-count: $WARMUP_COUNT"
 echo "stream-retries: $STREAM_RETRIES"
 echo "stream-timeout: $STREAM_TIMEOUT"
-echo "log-dir: $LOG_DIR"
 echo
 
 if [ "$LIST_ONLY" -eq 1 ]; then
-	cat "$LIST_LOG"
-	exit 0
+	v4l2-ctl -d "$DEV" --list-formats-ext
+	exit $?
 fi
 
 if [ "$WARMUP" -eq 1 ]; then
@@ -355,8 +397,8 @@ if [ "$WARMUP" -eq 1 ]; then
 	echo
 fi
 
-printf '%-11s %-9s %-10s %-6s %-9s %-10s %-9s %s\n' \
-	"RESULT" "REQ_FMT" "REQ_SIZE" "REQFPS" "ACT_FMT" "ACT_SIZE" "ACT_FPS" "LOG"
+printf '%-11s %-9s %-10s %-6s %-9s %-10s %-9s %-9s\n' \
+	"RESULT" "REQ_FMT" "REQ_SIZE" "REQFPS" "ACT_FMT" "ACT_SIZE" "DRV_FPS" "ACT_FPS"
 
 total=0
 pass=0
@@ -377,58 +419,41 @@ for fmt in $FORMATS; do
 
 		for fps in $FPS_LIST; do
 			total=$((total + 1))
-			base="${fmt}_${size}_${fps}fps"
-			log="$LOG_DIR/$base.log"
 			result=PASS
+			fmt_out=""
+			get_fmt_out=""
+			parm_out=""
+			get_parm_out=""
+			stream_out=""
+			if [ -n "$COUNT" ]; then
+				case_count=$COUNT
+			else
+				case_count=$(stream_count_for_fps "$fps")
+				[ -n "$case_count" ] || case_count=1
+			fi
 
-			{
-				echo "case: fmt=$fmt size=$size fps=$fps"
-				echo
-				echo "[set-fmt]"
-				echo "v4l2-ctl -d $DEV --set-fmt-video=width=$width,height=$height,pixelformat=$fmt"
-			} >"$log"
-
-			v4l2-ctl -d "$DEV" \
-				--set-fmt-video=width="$width",height="$height",pixelformat="$fmt" \
-				>>"$log" 2>&1
+			fmt_out=$(v4l2-ctl -d "$DEV" \
+				--set-fmt-video=width="$width",height="$height",pixelformat="$fmt" 2>&1)
 			rc_fmt=$?
-
-			{
-				echo
-				echo "[get-fmt after set-fmt]"
-			} >>"$log"
-			v4l2-ctl -d "$DEV" --get-fmt-video >>"$log" 2>&1
+			get_fmt_out=$(v4l2-ctl -d "$DEV" --get-fmt-video 2>&1)
 
 			if [ "$rc_fmt" -ne 0 ]; then
 				result=FAIL_FMT
 			else
-				{
-					echo
-					echo "[set-parm]"
-					echo "v4l2-ctl -d $DEV --set-parm=$fps"
-				} >>"$log"
-				v4l2-ctl -d "$DEV" --set-parm="$fps" >>"$log" 2>&1
+				parm_out=$(v4l2-ctl -d "$DEV" --set-parm="$fps" 2>&1)
 				rc_parm=$?
-
-				{
-					echo
-					echo "[get-parm after set-parm]"
-				} >>"$log"
-				v4l2-ctl -d "$DEV" --get-parm >>"$log" 2>&1
+				get_parm_out=$(v4l2-ctl -d "$DEV" --get-parm 2>&1)
 
 				if [ "$rc_parm" -ne 0 ]; then
 					result=FAIL_PARM
 				else
-					{
-						echo
-						echo "[stream]"
-						echo "v4l2-ctl -d $DEV --stream-mmap --stream-count=$COUNT"
-					} >>"$log"
 					stream_attempt=0
 					while :; do
 						stream_attempt=$((stream_attempt + 1))
-						run_stream_capture "$COUNT" >>"$log" 2>&1
+						current_stream_out=$(run_stream_capture "$case_count" "$fmt" "$width" "$height" "$fps" 2>&1)
 						rc_stream=$?
+						stream_out="${stream_out}
+${current_stream_out}"
 						if [ "$rc_stream" -eq 0 ]; then
 							if [ "$stream_attempt" -gt 1 ]; then
 								result=PASS_RETRY
@@ -441,31 +466,37 @@ for fmt in $FORMATS; do
 							break
 						fi
 
-						{
-							echo
-							echo "[stream retry after failure attempt=$stream_attempt]"
-							echo "sleep $RETRY_SLEEP"
-						} >>"$log"
 						sleep "$RETRY_SLEEP"
 					done
 				fi
 			fi
 
-			act_fmt=$(sed -n "s/.*Pixel Format[[:space:]]*: '\([^']*\)'.*/\1/p" "$log" | tail -n 1)
-			act_size=$(sed -n 's/.*Width\/Height[[:space:]]*: \([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1x\2/p' "$log" | tail -n 1)
-			act_fps=$(sed -n 's/.*Frames per second[[:space:]]*: \([0-9.][0-9.]*\).*/\1/p' "$log" | tail -n 1)
+			case_out=$(printf '%s\n%s\n%s\n%s\n%s\n' \
+				"$fmt_out" "$get_fmt_out" "$parm_out" "$get_parm_out" "$stream_out")
+			act_fmt=$(printf '%s\n' "$case_out" | sed -n "s/.*Pixel Format[[:space:]]*: '\([^']*\)'.*/\1/p" | tail -n 1)
+			act_size=$(printf '%s\n' "$case_out" | sed -n 's/.*Width\/Height[[:space:]]*: \([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1x\2/p' | tail -n 1)
+			drv_fps=$(printf '%s\n' "$case_out" | extract_driver_fps)
+			act_fps=$(printf '%s\n' "$stream_out" | extract_stream_fps)
 
 			[ -n "$act_fmt" ] || act_fmt="-"
 			[ -n "$act_size" ] || act_size="-"
+			[ -n "$drv_fps" ] || drv_fps="-"
 			[ -n "$act_fps" ] || act_fps="-"
 
 			if [ "$result" = "PASS" ] || [ "$result" = "PASS_RETRY" ]; then
 				adjusted=0
-				act_fps_int=${act_fps%%.*}
+				no_fps=0
 				[ "$act_fmt" = "$fmt" ] || adjusted=1
 				[ "$act_size" = "$size" ] || adjusted=1
-				[ "$act_fps_int" = "$fps" ] || adjusted=1
-				if [ "$adjusted" -eq 1 ]; then
+				if [ "$act_fps" = "-" ]; then
+					no_fps=1
+					adjusted=1
+				else
+					fps_matches_request "$act_fps" "$fps" || adjusted=1
+				fi
+				if [ "$no_fps" -eq 1 ]; then
+					result=PASS_NOFPS
+				elif [ "$adjusted" -eq 1 ]; then
 					result=PASS_ADJUST
 				fi
 				pass=$((pass + 1))
@@ -473,15 +504,14 @@ for fmt in $FORMATS; do
 				fail=$((fail + 1))
 			fi
 
-			printf '%-11s %-9s %-10s %-6s %-9s %-10s %-9s %s\n' \
-				"$result" "$fmt" "$size" "$fps" "$act_fmt" "$act_size" "$act_fps" "$log"
+			printf '%-11s %-9s %-10s %-6s %-9s %-10s %-9s %-9s\n' \
+				"$result" "$fmt" "$size" "$fps" "$act_fmt" "$act_size" "$drv_fps" "$act_fps"
 		done
 	done
 done
 
 echo
 echo "summary: total=$total pass=$pass fail=$fail"
-echo "format enumeration: $LIST_LOG"
 
 if [ "$fail" -ne 0 ]; then
 	exit 1

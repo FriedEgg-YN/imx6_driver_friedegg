@@ -2,6 +2,7 @@
 #define IMX6SMARTMONITOR_TYPES_H
 
 #include <QtGlobal>
+#include <QMetaType>
 #include <QString>
 
 namespace imx6sm {
@@ -89,6 +90,10 @@ QString toString(StorageState state);
 QString toString(StrobeMode mode);
 
 } // namespace imx6sm
+
+Q_DECLARE_METATYPE(imx6sm::CameraMode)
+Q_DECLARE_METATYPE(imx6sm::CameraState)
+Q_DECLARE_METATYPE(imx6sm::StrobeMode)
 
 #endif
 

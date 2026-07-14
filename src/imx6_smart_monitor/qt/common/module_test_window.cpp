@@ -16,7 +16,9 @@ ModuleTestWindow::ModuleTestWindow(const QString &title, QWidget *parent)
     , statusLabel(new QLabel(QStringLiteral("Idle"), this))
     , headerButtonLayout(new QHBoxLayout)
     , formLayout(new QFormLayout)
+    , formWidget(new QWidget(this))
     , buttonLayout(new QHBoxLayout)
+    , buttonWidget(new QWidget(this))
     , logEdit(new QTextEdit(this))
     , mainContentLayout(new QVBoxLayout)
 {
@@ -28,6 +30,8 @@ ModuleTestWindow::ModuleTestWindow(const QString &title, QWidget *parent)
         "QLabel#status{font-size:14px;color:#b8c7cf;}"
         "QLabel#field{font-size:15px;color:#edf3f5;}"
         "QLineEdit{font-size:15px;padding:8px;border:1px solid #344550;border-radius:4px;background:#17232b;color:#edf3f5;}"
+        "QComboBox{font-size:15px;padding:8px;border:1px solid #344550;border-radius:4px;background:#17232b;color:#edf3f5;}"
+        "QComboBox QAbstractItemView{background:#17232b;color:#edf3f5;selection-background-color:#1f6f8b;}"
         "QPushButton{font-size:15px;padding:10px 12px;border:0;border-radius:4px;background:#1f6f8b;color:white;}"
         "QPushButton:pressed{background:#2d88aa;}"
         "QPushButton:disabled{background:#31414a;color:#7c8990;}"
@@ -54,8 +58,11 @@ ModuleTestWindow::ModuleTestWindow(const QString &title, QWidget *parent)
     formLayout->setHorizontalSpacing(12);
     formLayout->setVerticalSpacing(8);
 
+    formWidget->setLayout(formLayout);
+
     buttonLayout->setSpacing(8);
     buttonLayout->addStretch();
+    buttonWidget->setLayout(buttonLayout);
 
     logEdit->setReadOnly(true);
     logEdit->setMinimumHeight(78);
@@ -63,8 +70,8 @@ ModuleTestWindow::ModuleTestWindow(const QString &title, QWidget *parent)
     mainContentLayout->setContentsMargins(14, 12, 14, 12);
     mainContentLayout->setSpacing(10);
     mainContentLayout->addLayout(headerLayout);
-    mainContentLayout->addLayout(formLayout);
-    mainContentLayout->addLayout(buttonLayout);
+    mainContentLayout->addWidget(formWidget);
+    mainContentLayout->addWidget(buttonWidget);
     mainContentLayout->addWidget(logEdit, 1);
 
     setLayout(mainContentLayout);
@@ -85,6 +92,11 @@ QLabel *ModuleTestWindow::addRow(const QString &name, const QString &initial)
     value->setTextInteractionFlags(Qt::TextSelectableByMouse);
     formLayout->addRow(name, value);
     return value;
+}
+
+void ModuleTestWindow::addRowWidget(const QString &name, QWidget *widget)
+{
+    formLayout->addRow(name, widget);
 }
 
 QLineEdit *ModuleTestWindow::addPathEdit(const QString &name, const QString &initial)
@@ -110,6 +122,27 @@ void ModuleTestWindow::appendLog(const QString &line)
 void ModuleTestWindow::setStatus(const QString &status)
 {
     statusLabel->setText(status);
+}
+
+void ModuleTestWindow::setStandardBodyVisible(bool visible)
+{
+    formWidget->setVisible(visible);
+    buttonWidget->setVisible(visible);
+}
+
+void ModuleTestWindow::setLogVisible(bool visible)
+{
+    logEdit->setVisible(visible);
+}
+
+bool ModuleTestWindow::isLogVisible() const
+{
+    return logEdit->isVisible();
+}
+
+QTextEdit *ModuleTestWindow::logWidget() const
+{
+    return logEdit;
 }
 
 QVBoxLayout *ModuleTestWindow::contentLayout() const

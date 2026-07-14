@@ -2207,6 +2207,9 @@ static int ov5640_set_strobe_mode(struct ov5640 *sensor)
 
 	switch (sensor->ctrls.strobe_mode->val) {
 	case V4L2_FLASH_LED_MODE_NONE:
+		ret = ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL, 0x00);
+		if (ret < 0)
+			return ret;
 		return ov5640_write_reg(sensor, OV5640_REG_PAD_OUTPUT_ENABLE00,
 					0x00);
 	case V4L2_FLASH_LED_MODE_FLASH:
@@ -2256,17 +2259,14 @@ static int ov5640_set_strobe_request(struct ov5640 *sensor)
 {
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return ov5640_mod_reg(sensor, OV5640_REG_STROBE_CTRL,
-				     OV5640_STROBE_REQUEST_ON,
-				     OV5640_STROBE_REQUEST_ON);
+	return 0;
 }
 
 static int ov5640_set_strobe_stop(struct ov5640 *sensor)
 {
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return ov5640_mod_reg(sensor, OV5640_REG_STROBE_CTRL,
-				     OV5640_STROBE_REQUEST_ON, 0);
+	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL, 0x00);
 }
 
 static int ov5640_apply_controls(struct ov5640 *sensor)

@@ -10,6 +10,7 @@ class QLineEdit;
 class QPushButton;
 class QTextEdit;
 class QVBoxLayout;
+class QWidget;
 
 namespace imx6sm {
 
@@ -20,17 +21,24 @@ public:
 
 protected:
     QLabel *addRow(const QString &name, const QString &initial = QStringLiteral("--"));
+    void addRowWidget(const QString &name, QWidget *widget);
     QLineEdit *addPathEdit(const QString &name, const QString &initial);
     QPushButton *addButton(const QString &text);
     void appendLog(const QString &line);
     void setStatus(const QString &status);
+    void setStandardBodyVisible(bool visible);
+    void setLogVisible(bool visible);
+    bool isLogVisible() const;
+    QTextEdit *logWidget() const;
     QVBoxLayout *contentLayout() const;
 
 private:
     QLabel *statusLabel;
     QHBoxLayout *headerButtonLayout;
     QFormLayout *formLayout;
+    QWidget *formWidget;
     QHBoxLayout *buttonLayout;
+    QWidget *buttonWidget;
     QTextEdit *logEdit;
     QVBoxLayout *mainContentLayout;
 };
