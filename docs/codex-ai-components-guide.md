@@ -103,6 +103,7 @@ OV5640 的 DVP/YUV 输出能力有没有 datasheet 依据？请给 PDF 页码，
 期望行为：
 
 - 优先查当前 package 的 `docs/`，再查项目级 `docs/` 和其他 `src/*/docs/`。
+- 用户点名 PDF/manual 路径或文件名时，如果普通 `rg --files` 没找到，必须用 `rg --files -uuu` 或精确路径配合 `file`/`pdftotext` 兜底确认，避免 ignore 规则隐藏资料。
 - PDF 依据给 1-based PDF viewer 页码；Markdown 依据给可点击本地行号。
 - 如果手册能力和当前驱动实现不一致，分别说明“manual capability”和“current driver behavior”。
 

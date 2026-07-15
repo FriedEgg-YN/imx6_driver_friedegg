@@ -1,4 +1,5 @@
 source "$BR2_EXTERNAL_BSP_PATH/package/ap3216c/Config.in"
+source "$BR2_EXTERNAL_BSP_PATH/package/ld2410c/Config.in"
 source "$BR2_EXTERNAL_BSP_PATH/package/ov5640/Config.in"
 source "$BR2_EXTERNAL_BSP_PATH/package/imx6-monitor/Config.in"
 source "$BR2_EXTERNAL_BSP_PATH/package/imx6-qt5-demo/Config.in"

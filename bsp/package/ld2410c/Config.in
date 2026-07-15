@@ -1,0 +1,6 @@
+config BR2_PACKAGE_LD2410C
+    bool "LD2410C radar driver + attach tool"
+    depends on BR2_LINUX_KERNEL
+    help
+      LD2410C presence radar kernel module with OUT GPIO input,
+      UART line discipline parser, misc ioctl UAPI and attach tool.

@@ -3,6 +3,9 @@ CONFIG += c++11 warn_on
 
 DESTDIR = $$ROOT/bin
 INCLUDEPATH += $$ROOT $$ROOT/include $$ROOT/qt/common
+exists($$ROOT/../ld2410c/include/friedegg/ld2410c.h) {
+    INCLUDEPATH += $$ROOT/../ld2410c/include
+}
 
 SOURCES += \
     $$ROOT/common/types.cpp \

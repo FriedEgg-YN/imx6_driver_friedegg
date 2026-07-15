@@ -1,6 +1,7 @@
 config BR2_PACKAGE_IMX6_SMART_MONITOR
 	bool "imx6 smart monitor Qt launcher and module test apps"
 	depends on BR2_PACKAGE_QT5
+	select BR2_PACKAGE_LD2410C
 	select BR2_PACKAGE_QT5BASE_GUI
 	select BR2_PACKAGE_QT5BASE_WIDGETS
 	select BR2_PACKAGE_QT5BASE_LINUXFB
