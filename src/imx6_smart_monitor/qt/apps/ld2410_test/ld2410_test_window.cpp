@@ -3,7 +3,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
+#include <QScrollArea>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -12,9 +14,57 @@
 #include <QPushButton>
 #include <QPair>
 #include <QSpinBox>
+#include <QTextEdit>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+
+namespace {
+
+const int kPageMargin = 10;
+const int kLayoutSpacing = 10;
+const int kColumnSpacing = 12;
+const int kGridRowSpacing = 8;
+
+void configurePageLayout(QVBoxLayout *layout)
+{
+    layout->setContentsMargins(kPageMargin, kPageMargin, kPageMargin, kPageMargin);
+    layout->setSpacing(kLayoutSpacing);
+}
+
+void configureFormLayout(QFormLayout *form)
+{
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setFormAlignment(Qt::AlignTop);
+    form->setHorizontalSpacing(kColumnSpacing);
+    form->setVerticalSpacing(kLayoutSpacing);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+}
+
+void configureGridLayout(QGridLayout *grid)
+{
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setHorizontalSpacing(kColumnSpacing);
+    grid->setVerticalSpacing(kGridRowSpacing);
+}
+
+void configureButtonLayout(QHBoxLayout *buttons)
+{
+    buttons->setContentsMargins(0, 0, 0, 0);
+    buttons->setSpacing(8);
+}
+
+QWidget *scrollableTabPage(QWidget *content, QWidget *parent)
+{
+    QScrollArea *scroll = new QScrollArea(parent);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(content);
+    return scroll;
+}
+
+} // namespace
 
 namespace imx6sm {
 
@@ -62,13 +112,27 @@ Ld2410TestWindow::Ld2410TestWindow(QWidget *parent)
     , noiseDurationSpin(nullptr)
 {
     setStandardBodyVisible(false);
-    contentLayout()->insertWidget(1, tabs);
+    setLogVisible(false);
+    logWidget()->setMinimumHeight(78);
+    logWidget()->setMaximumHeight(104);
 
-    tabs->addTab(buildProbePage(), QStringLiteral("Probe"));
-    tabs->addTab(buildRealtimePage(), QStringLiteral("Realtime"));
-    tabs->addTab(buildEngineeringPage(), QStringLiteral("Engineering"));
-    tabs->addTab(buildConfigPage(), QStringLiteral("Config"));
-    tabs->addTab(buildMaintenancePage(), QStringLiteral("Maintenance"));
+    QPushButton *logButton = addHeaderButton(QStringLiteral("Log"));
+    logButton->setCheckable(true);
+    logButton->setChecked(isLogVisible());
+    connect(logButton, &QPushButton::clicked, this, [this, logButton]() {
+        setLogVisible(!isLogVisible());
+        logButton->setChecked(isLogVisible());
+        logButton->setText(isLogVisible() ? QStringLiteral("Hide Log") : QStringLiteral("Log"));
+    });
+
+    tabs->setUsesScrollButtons(true);
+    contentLayout()->insertWidget(1, tabs, 1);
+
+    tabs->addTab(scrollableTabPage(buildProbePage(), tabs), QStringLiteral("Probe"));
+    tabs->addTab(scrollableTabPage(buildRealtimePage(), tabs), QStringLiteral("Realtime"));
+    tabs->addTab(scrollableTabPage(buildEngineeringPage(), tabs), QStringLiteral("Engineering"));
+    tabs->addTab(scrollableTabPage(buildConfigPage(), tabs), QStringLiteral("Config"));
+    tabs->addTab(scrollableTabPage(buildMaintenancePage(), tabs), QStringLiteral("Maintenance"));
 
     connect(refreshTimer, &QTimer::timeout, this, [this]() { refreshState(); });
 
@@ -84,6 +148,9 @@ QWidget *Ld2410TestWindow::buildProbePage()
     QVBoxLayout *layout = new QVBoxLayout(page);
     QFormLayout *form = new QFormLayout;
     QHBoxLayout *buttons = new QHBoxLayout;
+    configurePageLayout(layout);
+    configureFormLayout(form);
+    configureButtonLayout(buttons);
 
     miscEdit = new QLineEdit(QStringLiteral("auto"), page);
     outEdit = new QLineEdit(QStringLiteral("auto"), page);
@@ -144,6 +211,9 @@ QWidget *Ld2410TestWindow::buildRealtimePage()
     QVBoxLayout *layout = new QVBoxLayout(page);
     QFormLayout *form = new QFormLayout;
     QHBoxLayout *buttons = new QHBoxLayout;
+    configurePageLayout(layout);
+    configureFormLayout(form);
+    configureButtonLayout(buttons);
 
     stateStatus = new QLabel(QStringLiteral("Idle"), page);
     presenceLabel = new QLabel(QStringLiteral("--"), page);
@@ -210,6 +280,9 @@ QWidget *Ld2410TestWindow::buildEngineeringPage()
     QVBoxLayout *layout = new QVBoxLayout(page);
     QFormLayout *form = new QFormLayout;
     QGridLayout *grid = new QGridLayout;
+    configurePageLayout(layout);
+    configureFormLayout(form);
+    configureGridLayout(grid);
 
     engineeringMaxLabel = new QLabel(QStringLiteral("--"), page);
     engineeringLightLabel = new QLabel(QStringLiteral("--"), page);
@@ -249,6 +322,10 @@ QWidget *Ld2410TestWindow::buildConfigPage()
     QFormLayout *form = new QFormLayout;
     QGridLayout *grid = new QGridLayout;
     QHBoxLayout *buttons = new QHBoxLayout;
+    configurePageLayout(layout);
+    configureFormLayout(form);
+    configureGridLayout(grid);
+    configureButtonLayout(buttons);
 
     configStatus = new QLabel(QStringLiteral("Idle"), page);
     maxGateSpin = new QSpinBox(page);
@@ -362,6 +439,9 @@ QWidget *Ld2410TestWindow::buildMaintenancePage()
     QVBoxLayout *layout = new QVBoxLayout(page);
     QFormLayout *form = new QFormLayout;
     QHBoxLayout *buttons = new QHBoxLayout;
+    configurePageLayout(layout);
+    configureFormLayout(form);
+    configureButtonLayout(buttons);
 
     versionLabel = new QLabel(QStringLiteral("--"), page);
     noiseStatusLabel = new QLabel(QStringLiteral("--"), page);
