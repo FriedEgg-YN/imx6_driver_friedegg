@@ -29,3 +29,4 @@ Module.symvers
 .agents/
 AGENTS.md
 *.pdf
+.notrace/

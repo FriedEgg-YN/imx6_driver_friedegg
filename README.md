@@ -12,9 +12,20 @@
 | `src/linux-friedegg/` | Linux 4.1.15 移植源码和 DTS，大源码树，默认只读，任务明确需要时才改 |
 | `src/uboot-friedegg/` | U-Boot 移植源码，大源码树，默认只读 |
 | `buildroot/` | Buildroot 构建系统和输出目录，大源码树/子工程，默认只读 |
-| `docs/` | 只放项目级说明，例如编译命令、Git 工作流、AI 协作规则 |
+| `docs/` | 项目级、跨模块说明，例如编译命令、Git 工作流、AI 协作规则 |
+| `.notrace/` | 本地草稿和未整理笔记，默认不作为项目公开文档来源 |
 
 真实的 NFS/TFTP 路径、板卡 IP、用户名和主机目录不写入项目文件；文档统一使用 `<nfs-dir>`、`<tftp-dir>`、`<board-ip>`、`<workspace>` 这类占位符。
+
+## 文档职责
+
+本仓库文档按“门面索引 + 细节说明”分层：
+
+- `README.md` 是项目级入口，只放项目目标、系统画像、目录边界、构建入口、本地包索引和项目级 docs 索引。
+- `docs/` 放项目级或跨模块说明；包级调试过程、运行命令和模块细节不放在这里。
+- `src/<pkg>/README.md` 是模块入口，只放模块职责、当前能力、构建部署、板端验证和模块 docs 索引。
+- `src/<pkg>/docs/` 放模块细节、数据流、调试复盘、验证记录和学习笔记。
+- `.notrace/` 放个人草稿或不希望提交的材料；除非明确要求，整理文档时不修改这里。
 
 ## 当前系统画像
 
@@ -73,10 +84,12 @@ bash buildscripts/config.sh status
 | Buildroot 包名 | 源码目录 | 主要产物 | 包内说明 |
 | --- | --- | --- | --- |
 | `ap3216c` | `src/ap3216c/` | `ap3216c.ko`、`/usr/bin/ap3216c_test` | [src/ap3216c/README.md](src/ap3216c/README.md) |
-| `ov5640_drv` | `src/ov5640_drv/` | `ov5640.ko`、`mx6s_capture.ko`、`/usr/bin/ov5640_test` | [src/ov5640_drv/README.md](src/ov5640_drv/README.md) |
+| `ov5640` | `src/ov5640/` | `ov5640.ko`、`mx6s_capture.ko`、`/usr/bin/ov5640_test`、`/usr/bin/ov5640_interface_demo` | [src/ov5640/README.md](src/ov5640/README.md) |
 | `gt9147` | `src/gt9147/` | `gt9147.ko` | [src/gt9147/README.md](src/gt9147/README.md) |
 | `imx6-monitor` | `src/imx6_monitor/` | `/usr/bin/imx6-monitor`、禁用态 init 脚本 | [src/imx6_monitor/README.md](src/imx6_monitor/README.md) |
 | `imx6-qt5-demo` | `src/imx6_qt5_demo/` | `/usr/bin/imx6-qt5-demo` | [src/imx6_qt5_demo/README.md](src/imx6_qt5_demo/README.md) |
+| `imx6-smart-monitor` | `src/imx6_smart_monitor/` | `/usr/bin/imx6-smart-monitor`、`/usr/bin/imx6-sm-*-test` | [src/imx6_smart_monitor/README.md](src/imx6_smart_monitor/README.md) |
+| `print_chasing_led` | `src/print_chasing_LED/` | `print_chasing_LED.ko`、`/usr/bin/print_chasing_LED_test` | 暂无包内 README |
 
 包源码通过 `bsp/local.mk` 和各自 `bsp/package/<pkg>/<pkg>.mk` 接入 Buildroot。Buildroot 会把 `src/<pkg>` rsync 到 `buildroot/output/build/<pkg>-...`，再根据 `kernel-module`、`generic-package` 或 `qmake-package` 规则编译并安装到 `buildroot/output/target`。
 
@@ -105,5 +118,6 @@ bash buildscripts/config.sh reset all
 - [docs/编译命令总结.md](docs/编译命令总结.md)：脚本选择、Buildroot 中间目录、NFS/TFTP 部署和残留清理规则。
 - [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md)：主仓与大源码树边界、提交信息约定。
 - [docs/codex-ai-components-guide.md](docs/codex-ai-components-guide.md)：VSCode + Codex 协作组件说明。
+- [docs/alias与mdev自动加载ko.md](docs/alias与mdev自动加载ko.md)：modalias、mdev 和内核模块自动加载机制说明。
 
 包级调试记录、运行命令和板端验证步骤不再放在 `docs/`，而是放在对应 `src/<pkg>/README.md` 中。
