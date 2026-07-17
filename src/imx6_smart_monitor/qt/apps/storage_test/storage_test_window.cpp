@@ -8,7 +8,7 @@ namespace imx6sm {
 
 StorageTestWindow::StorageTestWindow(QWidget *parent)
     : ModuleTestWindow(QStringLiteral("Storage Test"), parent)
-    , rootEdit(addPathEdit(QStringLiteral("Root"), QStringLiteral("/tmp/smart-monitor")))
+    , rootEdit(addPathEdit(QStringLiteral("Root"), QStringLiteral("/smart-monitor")))
     , resultLabel(addRow(QStringLiteral("Result")))
     , sessionLabel(addRow(QStringLiteral("Session")))
 {

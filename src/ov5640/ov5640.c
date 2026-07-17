@@ -34,6 +34,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/v4l2-mediabus.h>
+#include <linux/workqueue.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
 
@@ -283,6 +284,13 @@ struct ov5640_af_state {
 	u32 touch_x_q16;
 	u32 touch_y_q16;
 	u8 zone_result;
+	struct work_struct work;
+	spinlock_t lock;
+	bool worker_active;
+	bool start_requested;
+	bool stop_requested;
+	int cached_status;
+	u8 cached_zone_result;
 };
 
 struct ov5640_ctrls {
@@ -325,6 +333,8 @@ struct ov5640 {
 };
 
 static void ov5640_af_invalidate(struct ov5640 *sensor);
+static int ov5640_af_request_stop(struct ov5640 *sensor);
+static void ov5640_af_work(struct work_struct *work);
 
 static const struct reg_value ov5640_global_init_setting[] = {
 	{0x3008, 0x42, 0, 0},
@@ -1485,12 +1495,19 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->state.frame_size = ov5640_frame_size_800_480;
 	sensor->state.powered = false;
 	sensor->state.streaming = false;
+	spin_lock_init(&sensor->af.lock);
+	INIT_WORK(&sensor->af.work, ov5640_af_work);
 	sensor->af.firmware_loaded = false;
 	sensor->af.zone_pending = true;
 	sensor->af.zone_mode = OV5640_AF_ZONE_MODE_DEFAULT;
 	sensor->af.touch_x_q16 = 0;
 	sensor->af.touch_y_q16 = 0;
 	sensor->af.zone_result = 0;
+	sensor->af.worker_active = false;
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
 	sensor->state.prev_sysclk = 0;
 	sensor->state.prev_hts = 0;
 	sensor->state.ae_target = 52;
@@ -1559,6 +1576,8 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 #endif
 
 	sensor->state.streaming = enable;
+	if (!enable)
+		ov5640_af_request_stop(sensor);
 	if (enable) {
 		fps = DEFAULT_FPS;
 		if (ov5640_frame_rate_valid(sensor->state.frame_rate))
@@ -1736,11 +1755,96 @@ static bool ov5640_af_status_is_focusing(u8 status)
 	return status <= 0x0f || (status >= 0x80 && status <= 0x8f);
 }
 
+static void ov5640_af_set_cached(struct ov5640 *sensor, int status, u8 zone_result)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.cached_status = status;
+	sensor->af.cached_zone_result = zone_result;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+}
+
 static void ov5640_af_invalidate(struct ov5640 *sensor)
 {
+	unsigned long flags;
+
 	sensor->af.firmware_loaded = false;
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+}
+
+static void ov5640_af_schedule_if_idle(struct ov5640 *sensor, bool *schedule)
+{
+	if (!sensor->af.worker_active) {
+		sensor->af.worker_active = true;
+		*schedule = true;
+	}
+}
+
+static int ov5640_af_request_start_locked(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool schedule = false;
+
+	if (!sensor->state.powered || !sensor->state.streaming)
+		return -EPIPE;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	if (sensor->af.cached_status & V4L2_AUTO_FOCUS_STATUS_BUSY) {
+		spin_unlock_irqrestore(&sensor->af.lock, flags);
+		return 0;
+	}
+
+	sensor->af.start_requested = true;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+	sensor->af.cached_zone_result = 0;
+	ov5640_af_schedule_if_idle(sensor, &schedule);
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	if (schedule)
+		schedule_work(&sensor->af.work);
+	return 0;
+}
+
+static int ov5640_af_request_stop(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool schedule = false;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = true;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
+	ov5640_af_schedule_if_idle(sensor, &schedule);
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	if (schedule)
+		schedule_work(&sensor->af.work);
+	return 0;
+}
+
+static bool ov5640_af_consume_stop(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool stop;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	stop = sensor->af.stop_requested;
+	if (stop)
+		sensor->af.stop_requested = false;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	return stop;
 }
 
 static int ov5640_af_wait_status(struct ov5640 *sensor, u8 expected,
@@ -1972,28 +2076,16 @@ static int ov5640_af_note_zone_change(struct ov5640 *sensor)
 {
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
-
-	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
-		return 0;
-
-	return ov5640_af_apply_zone(sensor);
+	ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+	return 0;
 }
 
 static int ov5640_af_note_mode_change(struct ov5640 *sensor)
 {
-	int ret;
-
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
-
-	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
-		return 0;
-
-	ret = ov5640_af_command(sensor, OV5640_AF_CMD_RELAUNCH_ZONE, NULL, 0);
-	if (ret < 0)
-		return ret;
-
-	return ov5640_af_apply_zone(sensor);
+	ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+	return 0;
 }
 
 static int ov5640_af_get_focus_result(struct ov5640 *sensor)
@@ -2065,7 +2157,7 @@ static int ov5640_af_stop(struct ov5640 *sensor)
 	return 0;
 }
 
-static int ov5640_af_get_status(struct ov5640 *sensor, int *status)
+static int ov5640_af_poll_status(struct ov5640 *sensor, int *status)
 {
 	u8 fw_status;
 	int ret;
@@ -2105,13 +2197,125 @@ static int ov5640_af_get_status(struct ov5640 *sensor, int *status)
 	return 0;
 }
 
+static int ov5640_af_get_cached_status(struct ov5640 *sensor, int *status)
+{
+	unsigned long flags;
+
+	if (!status)
+		return -EINVAL;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	*status = sensor->af.cached_status;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+	return 0;
+}
+
 static int ov5640_af_get_zone_result(struct ov5640 *sensor, int *result)
 {
+	unsigned long flags;
+
 	if (!result)
 		return -EINVAL;
 
-	*result = sensor->af.zone_result;
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	*result = sensor->af.cached_zone_result;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
 	return 0;
+}
+
+static void ov5640_af_work(struct work_struct *work)
+{
+	struct ov5640 *sensor = container_of(work, struct ov5640, af.work);
+	bool start;
+	bool stop;
+	unsigned long flags;
+
+	for (;;) {
+		spin_lock_irqsave(&sensor->af.lock, flags);
+		start = sensor->af.start_requested;
+		stop = sensor->af.stop_requested;
+		sensor->af.start_requested = false;
+		sensor->af.stop_requested = false;
+		if (!start && !stop) {
+			sensor->af.worker_active = false;
+			spin_unlock_irqrestore(&sensor->af.lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+		if (stop) {
+			int ret;
+
+			mutex_lock(&sensor->lock);
+			ret = ov5640_af_stop(sensor);
+			mutex_unlock(&sensor->lock);
+			if (ret < 0)
+				dev_warn(sensor->dev, "AF stop failed: %d\n", ret);
+			ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+			continue;
+		}
+
+		if (start) {
+			unsigned long deadline;
+			int status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+			u8 zone_result = 0;
+			int ret;
+
+			mutex_lock(&sensor->lock);
+			if (!sensor->state.powered || !sensor->state.streaming)
+				ret = -EPIPE;
+			else
+				ret = ov5640_af_start(sensor);
+			mutex_unlock(&sensor->lock);
+			if (ret < 0) {
+				dev_warn(sensor->dev, "AF start failed: %d\n", ret);
+				ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+				continue;
+			}
+
+			deadline = jiffies + msecs_to_jiffies(5000);
+			ov5640_af_set_cached(sensor, status, zone_result);
+			for (;;) {
+				if (ov5640_af_consume_stop(sensor)) {
+					mutex_lock(&sensor->lock);
+					ret = ov5640_af_stop(sensor);
+					mutex_unlock(&sensor->lock);
+					if (ret < 0)
+						dev_warn(sensor->dev, "AF stop failed: %d\n", ret);
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+					break;
+				}
+
+				msleep(100);
+				mutex_lock(&sensor->lock);
+				ret = ov5640_af_poll_status(sensor, &status);
+				zone_result = sensor->af.zone_result;
+				mutex_unlock(&sensor->lock);
+				if (ret < 0) {
+					dev_warn(sensor->dev, "AF status failed: %d\n", ret);
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+					break;
+				}
+
+				ov5640_af_set_cached(sensor, status, zone_result);
+				if (status & (V4L2_AUTO_FOCUS_STATUS_REACHED |
+					      V4L2_AUTO_FOCUS_STATUS_FAILED))
+					break;
+
+				if (time_after_eq(jiffies, deadline)) {
+					mutex_lock(&sensor->lock);
+					ret = ov5640_af_stop(sensor);
+					mutex_unlock(&sensor->lock);
+					if (ret < 0)
+						dev_warn(sensor->dev, "AF timeout stop failed: %d\n", ret);
+					else
+						dev_warn(sensor->dev, "AF timeout\n");
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+					break;
+				}
+			}
+		}
+	}
 }
 
 static void ov5640_af_update_touch_x(struct ov5640 *sensor, u32 x)
@@ -2257,16 +2461,34 @@ static int ov5640_set_strobe_mode(struct ov5640 *sensor)
 
 static int ov5640_set_strobe_request(struct ov5640 *sensor)
 {
+	u8 ctrl;
+	int ret;
+
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return 0;
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+				      ctrl | OV5640_STROBE_REQUEST_ON);
 }
 
 static int ov5640_set_strobe_stop(struct ov5640 *sensor)
 {
+	u8 ctrl;
+	int ret;
+
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL, 0x00);
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+				      ctrl & ~OV5640_STROBE_REQUEST_ON);
 }
 
 static int ov5640_apply_controls(struct ov5640 *sensor)
@@ -2300,6 +2522,9 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 		container_of(ctrl->handler, struct ov5640, ctrls.ctrl_handler);
 	int ret = 0;
 
+	if (ctrl->id == V4L2_CID_AUTO_FOCUS_STOP)
+		return ov5640_af_request_stop(sensor);
+
 	mutex_lock(&sensor->lock);
 
 	switch (ctrl->id) {
@@ -2316,14 +2541,10 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 		ret = ov5640_af_note_zone_change(sensor);
 		goto out;
 	case V4L2_CID_AUTO_FOCUS_STOP:
-		ret = ov5640_af_stop(sensor);
+		ret = ov5640_af_request_stop(sensor);
 		goto out;
 	case V4L2_CID_AUTO_FOCUS_START:
-		if (!sensor->state.powered) {
-			ret = -EPIPE;
-			goto out;
-		}
-		ret = ov5640_af_start(sensor);
+		ret = ov5640_af_request_start_locked(sensor);
 		goto out;
 	default:
 		break;
@@ -2371,10 +2592,9 @@ static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	int value = 0;
 	int ret = 0;
 
-	mutex_lock(&sensor->lock);
 	switch (ctrl->id) {
 	case V4L2_CID_AUTO_FOCUS_STATUS:
-		ret = ov5640_af_get_status(sensor, &value);
+		ret = ov5640_af_get_cached_status(sensor, &value);
 		if (ret == 0)
 			ctrl->val = value;
 		break;
@@ -2387,7 +2607,6 @@ static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 		ret = -EINVAL;
 		break;
 	}
-	mutex_unlock(&sensor->lock);
 	return ret;
 }
 
@@ -3967,6 +4186,7 @@ static int ov5640_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ov5640 *sensor = i2c_to_ov5640(client);
 
+	cancel_work_sync(&sensor->af.work);
 	pm_runtime_disable(&client->dev);
 
 	v4l2_async_unregister_subdev(sd);

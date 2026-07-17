@@ -1,11 +1,16 @@
 #include "camera/camera_device.h"
 
+#include <QBuffer>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
+#include <QImageWriter>
 #include <QMetaObject>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QThread>
+#include <QTimer>
 #include <QWaitCondition>
 
 #include <algorithm>
@@ -312,6 +317,7 @@ static void appendControls(int fd, QList<CameraControl> *controls)
         V4L2_CID_FLASH_STROBE,
         V4L2_CID_FLASH_STROBE_STOP,
         V4L2_CID_AUTO_FOCUS_START,
+        V4L2_CID_AUTO_FOCUS_STOP,
         V4L2_CID_AUTO_FOCUS_STATUS,
         Ov5640CidAfZoneMode,
         Ov5640CidAfTouchX,
@@ -375,6 +381,458 @@ int CameraCaps::controlIndexByName(const QString &name) const
     return -1;
 }
 
+
+static bool ensureParentDirForFile(const QString &path, QString *error)
+{
+    const QFileInfo info(path);
+    const QDir dir = info.dir();
+    if (dir.exists() || dir.mkpath(QStringLiteral(".")))
+        return true;
+    if (error)
+        *error = QStringLiteral("cannot create %1").arg(dir.absolutePath());
+    return false;
+}
+
+static bool writeJpegFile(const QString &path, const QImage &image, int quality, QString *error)
+{
+    if (path.trimmed().isEmpty()) {
+        if (error)
+            *error = QStringLiteral("empty output path");
+        return false;
+    }
+    if (image.isNull()) {
+        if (error)
+            *error = QStringLiteral("no preview frame captured yet");
+        return false;
+    }
+    if (!ensureParentDirForFile(path, error))
+        return false;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error)
+            *error = file.errorString();
+        return false;
+    }
+
+    QImageWriter writer(&file, "JPEG");
+    writer.setQuality(quality);
+    if (!writer.write(image)) {
+        if (error)
+            *error = writer.errorString();
+        return false;
+    }
+    return true;
+}
+
+static QImage scaledRecordingFrame(const QImage &image)
+{
+    if (image.isNull() || image.width() <= 400)
+        return image;
+
+    return image.scaledToWidth(400, Qt::FastTransformation);
+}
+
+static bool encodeJpegBytes(const QImage &image, int quality, QByteArray *bytes, QString *error)
+{
+    if (!bytes) {
+        if (error)
+            *error = QStringLiteral("missing JPEG buffer");
+        return false;
+    }
+    if (image.isNull()) {
+        if (error)
+            *error = QStringLiteral("no frame to encode");
+        return false;
+    }
+
+    bytes->clear();
+    QBuffer buffer(bytes);
+    if (!buffer.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = buffer.errorString();
+        return false;
+    }
+
+    QImageWriter writer(&buffer, "JPEG");
+    writer.setQuality(quality);
+    if (!writer.write(image)) {
+        if (error)
+            *error = writer.errorString();
+        return false;
+    }
+    return true;
+}
+
+class CameraSaveWorker : public QThread {
+private:
+    struct SnapshotJob {
+        QString path;
+        QImage image;
+        int quality = 80;
+    };
+
+public:
+    explicit CameraSaveWorker(CameraDevice *facade)
+        : QThread(facade)
+        , facade(facade)
+    {
+    }
+
+    ~CameraSaveWorker() override
+    {
+        requestAbort();
+        wait();
+    }
+
+    bool beginRecording(const QString &path, int quality, QString *error)
+    {
+        QMutexLocker locker(&mutex);
+        if (!isRunning()) {
+            if (error)
+                *error = QStringLiteral("save worker is not running");
+            return false;
+        }
+        if (abortRequested) {
+            if (error)
+                *error = QStringLiteral("save worker is stopping");
+            return false;
+        }
+        if (recordingActive || startPending) {
+            if (error)
+                *error = QStringLiteral("recording already active");
+            return false;
+        }
+        if (path.trimmed().isEmpty()) {
+            if (error)
+                *error = QStringLiteral("empty recording path");
+            return false;
+        }
+
+        startPath = path.trimmed();
+        recordingQuality = quality;
+        startPending = true;
+        stopPending = false;
+        lastError.clear();
+        frameQueue.clear();
+        skippedFrames = 0;
+        commandCond.wakeAll();
+
+        while (startPending && !abortRequested)
+            stateCond.wait(&mutex);
+
+        if (!recordingActive) {
+            if (error)
+                *error = lastError.isEmpty() ? QStringLiteral("recording start failed") : lastError;
+            return false;
+        }
+        return true;
+    }
+
+    bool queueSnapshot(const QString &path, const QImage &image, int quality, QString *error)
+    {
+        QMutexLocker locker(&mutex);
+        if (!isRunning()) {
+            if (error)
+                *error = QStringLiteral("save worker is not running");
+            return false;
+        }
+        if (abortRequested) {
+            if (error)
+                *error = QStringLiteral("save worker is stopping");
+            return false;
+        }
+        if (path.trimmed().isEmpty()) {
+            if (error)
+                *error = QStringLiteral("empty snapshot path");
+            return false;
+        }
+        if (image.isNull()) {
+            if (error)
+                *error = QStringLiteral("no preview frame captured yet");
+            return false;
+        }
+
+        SnapshotJob job;
+        job.path = path.trimmed();
+        job.image = image.copy();
+        job.quality = quality;
+        snapshotQueue.append(job);
+        commandCond.wakeAll();
+        return true;
+    }
+
+    bool enqueueRecordingFrame(const QImage &image)
+    {
+        QMutexLocker locker(&mutex);
+        if (!recordingActive || stopPending || abortRequested || image.isNull())
+            return false;
+
+        const qint64 elapsedMs = recordingTimer.isValid() ? recordingTimer.elapsed() : 0;
+        if (lastQueuedFrameMs >= 0 && elapsedMs - lastQueuedFrameMs < RecordingFrameIntervalMs) {
+            ++skippedFrames;
+            return false;
+        }
+
+        if (frameQueue.size() >= MaxQueuedFrames) {
+            ++droppedFrames;
+            return false;
+        }
+
+        frameQueue.append(scaledRecordingFrame(image));
+        lastQueuedFrameMs = elapsedMs;
+        commandCond.wakeAll();
+        return true;
+    }
+
+    bool requestFinishRecording(QString *error)
+    {
+        QMutexLocker locker(&mutex);
+        if (!recordingActive && !startPending) {
+            if (error)
+                error->clear();
+            return true;
+        }
+
+        stopPending = true;
+        frameQueue.clear();
+        commandCond.wakeAll();
+        if (error)
+            error->clear();
+        return true;
+    }
+
+    void requestAbort()
+    {
+        QMutexLocker locker(&mutex);
+        abortRequested = true;
+        commandCond.wakeAll();
+        stateCond.wakeAll();
+    }
+
+protected:
+    void run() override
+    {
+        for (;;) {
+            QImage frame;
+            SnapshotJob snapshot;
+            bool hasSnapshot = false;
+            int quality = 80;
+
+            mutex.lock();
+            while (!abortRequested && !startPending && !stopPending &&
+                   frameQueue.isEmpty() && snapshotQueue.isEmpty())
+                commandCond.wait(&mutex);
+
+            if (abortRequested) {
+                closeRecordingLocked(QStringLiteral("aborted"));
+                stateCond.wakeAll();
+                mutex.unlock();
+                break;
+            }
+
+            if (startPending) {
+                openRecordingLocked();
+                stateCond.wakeAll();
+                mutex.unlock();
+                continue;
+            }
+
+            if (stopPending) {
+                closeRecordingLocked(QString());
+                stateCond.wakeAll();
+                mutex.unlock();
+                continue;
+            }
+
+            if (!snapshotQueue.isEmpty()) {
+                snapshot = snapshotQueue.takeFirst();
+                hasSnapshot = true;
+            } else if (!frameQueue.isEmpty()) {
+                frame = frameQueue.takeFirst();
+                quality = recordingQuality;
+            }
+            mutex.unlock();
+
+            if (hasSnapshot)
+                writeSnapshot(snapshot);
+            else if (!frame.isNull())
+                writeRecordingFrame(frame, quality);
+        }
+    }
+
+private:
+    void writeSnapshot(const SnapshotJob &snapshot)
+    {
+        QString error;
+        if (writeJpegFile(snapshot.path, snapshot.image, snapshot.quality, &error)) {
+            postSnapshotStatus(QStringLiteral("saved: %1").arg(snapshot.path));
+            postLog(QStringLiteral("snapshot saved %1").arg(snapshot.path));
+        } else {
+            postSnapshotStatus(QStringLiteral("failed: %1").arg(error));
+            postLog(QStringLiteral("snapshot failed: %1").arg(error));
+        }
+    }
+
+    void openRecordingLocked()
+    {
+        startPending = false;
+        lastError.clear();
+        frameCount = 0;
+        droppedFrames = 0;
+        skippedFrames = 0;
+        lastQueuedFrameMs = -1;
+        recordingTimer.restart();
+        currentRecordingPath = startPath;
+        startPath.clear();
+
+        QString error;
+        if (!ensureParentDirForFile(currentRecordingPath, &error)) {
+            lastError = error;
+            currentRecordingPath.clear();
+            postRecordingStatus(QStringLiteral("failed: %1").arg(lastError));
+            postLog(QStringLiteral("recording failed: %1").arg(lastError));
+            return;
+        }
+
+        recordingFile = new QFile(currentRecordingPath);
+        if (!recordingFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            lastError = recordingFile->errorString();
+            delete recordingFile;
+            recordingFile = nullptr;
+            currentRecordingPath.clear();
+            postRecordingStatus(QStringLiteral("failed: %1").arg(lastError));
+            postLog(QStringLiteral("recording failed: %1").arg(lastError));
+            return;
+        }
+
+        recordingActive = true;
+        postRecordingStatus(QStringLiteral("recording: %1").arg(currentRecordingPath));
+        postLog(QStringLiteral("recording started %1").arg(currentRecordingPath));
+    }
+
+    void closeRecordingLocked(const QString &forcedStatus)
+    {
+        const bool wasActive = recordingActive || recordingFile;
+        const QString path = currentRecordingPath;
+        if (recordingFile) {
+            recordingFile->flush();
+            recordingFile->close();
+            delete recordingFile;
+            recordingFile = nullptr;
+        }
+
+        recordingActive = false;
+        startPending = false;
+        stopPending = false;
+        currentRecordingPath.clear();
+        frameQueue.clear();
+
+        if (!wasActive)
+            return;
+
+        if (!forcedStatus.isEmpty()) {
+            lastError = forcedStatus;
+            postRecordingStatus(QStringLiteral("stopped: %1").arg(forcedStatus));
+            postLog(QStringLiteral("recording stopped: %1").arg(forcedStatus));
+            return;
+        }
+
+        if (lastError.isEmpty() && frameCount <= 0)
+            lastError = QStringLiteral("no frames recorded");
+
+        if (lastError.isEmpty()) {
+            const qint64 durationMs = recordingTimer.isValid() ? recordingTimer.elapsed() : 0;
+            QString status = QStringLiteral("saved: %1 (%2 frames, %3 ms)").arg(path).arg(frameCount).arg(durationMs);
+            if (droppedFrames > 0)
+                status += QStringLiteral(", dropped %1").arg(droppedFrames);
+            if (skippedFrames > 0)
+                status += QStringLiteral(", skipped %1").arg(skippedFrames);
+            postRecordingStatus(status);
+            postLog(status);
+        } else {
+            postRecordingStatus(QStringLiteral("failed: %1").arg(lastError));
+            postLog(QStringLiteral("recording failed: %1").arg(lastError));
+        }
+    }
+
+    void writeRecordingFrame(const QImage &frame, int quality)
+    {
+        QByteArray jpeg;
+        QString error;
+        if (!encodeJpegBytes(frame, quality, &jpeg, &error)) {
+            QMutexLocker locker(&mutex);
+            lastError = error;
+            stopPending = true;
+            frameQueue.clear();
+            commandCond.wakeAll();
+            return;
+        }
+
+        QMutexLocker locker(&mutex);
+        if (!recordingActive || !recordingFile || !recordingFile->isOpen())
+            return;
+
+        const qint64 written = recordingFile->write(jpeg);
+        if (written != jpeg.size()) {
+            lastError = recordingFile->errorString().isEmpty()
+                ? QStringLiteral("short write")
+                : recordingFile->errorString();
+            stopPending = true;
+            frameQueue.clear();
+        } else {
+            ++frameCount;
+        }
+
+        if (stopPending && frameQueue.isEmpty()) {
+            closeRecordingLocked(QString());
+            stateCond.wakeAll();
+        }
+    }
+
+    void postRecordingStatus(const QString &status)
+    {
+        QMetaObject::invokeMethod(facade, "deliverRecordingStatus", Qt::QueuedConnection,
+                                  Q_ARG(QString, status));
+    }
+
+    void postSnapshotStatus(const QString &status)
+    {
+        QMetaObject::invokeMethod(facade, "deliverSnapshotStatus", Qt::QueuedConnection,
+                                  Q_ARG(QString, status));
+    }
+
+    void postLog(const QString &line)
+    {
+        QMetaObject::invokeMethod(facade, "deliverLog", Qt::QueuedConnection,
+                                  Q_ARG(QString, line));
+    }
+
+    static const int MaxQueuedFrames = 3;
+    static const int RecordingFrameIntervalMs = 200;
+
+    CameraDevice *facade;
+    QMutex mutex;
+    QWaitCondition commandCond;
+    QWaitCondition stateCond;
+    QList<SnapshotJob> snapshotQueue;
+    QList<QImage> frameQueue;
+    QFile *recordingFile = nullptr;
+    QString startPath;
+    QString currentRecordingPath;
+    QString lastError;
+    QElapsedTimer recordingTimer;
+    qint64 lastQueuedFrameMs = -1;
+    int recordingQuality = 65;
+    int frameCount = 0;
+    int droppedFrames = 0;
+    int skippedFrames = 0;
+    bool startPending = false;
+    bool stopPending = false;
+    bool recordingActive = false;
+    bool abortRequested = false;
+};
+
 class CameraCaptureThread : public QThread {
 public:
     CameraCaptureThread(CameraDevice *facade, const QString &devicePath, const CameraMode &mode)
@@ -414,10 +872,18 @@ public:
         return enqueue(command);
     }
 
+    bool requestFlashStop()
+    {
+        Command command;
+        command.type = Command::StopFlash;
+        return enqueue(command);
+    }
+
     bool requestAutoFocus()
     {
         Command command;
         command.type = Command::AutoFocus;
+        command.defaultAfZone = true;
         return enqueue(command);
     }
 
@@ -445,6 +911,8 @@ protected:
         lastFpsMs = 0;
         fpsTimer.start();
         afPollTimer.invalidate();
+        afActive = false;
+        afStartedMs = -1;
 
         postState(CameraState::Opened);
         if (!openFd()) {
@@ -517,6 +985,7 @@ private:
             SetMode,
             SetStrobe,
             TriggerFlash,
+            StopFlash,
             AutoFocus,
             TouchFocus,
         } type = SetMode;
@@ -525,6 +994,7 @@ private:
         StrobeMode strobeMode = StrobeMode::None;
         int x = 0;
         int y = 0;
+        bool defaultAfZone = false;
     };
 
     bool enqueue(const Command &command)
@@ -579,8 +1049,11 @@ private:
             case Command::TriggerFlash:
                 triggerFlashPulse();
                 break;
+            case Command::StopFlash:
+                stopFlashPulse();
+                break;
             case Command::AutoFocus:
-                runAutoFocus();
+                runAutoFocus(command.defaultAfZone);
                 break;
             case Command::TouchFocus:
                 runTouchFocus(command.x, command.y);
@@ -759,6 +1232,8 @@ private:
                 postLog(errnoString("VIDIOC_STREAMOFF"));
             streaming = false;
         }
+        afActive = false;
+        afStartedMs = -1;
 
         for (const MappedBuffer &buffer : buffers) {
             if (buffer.start && buffer.length > 0)
@@ -854,6 +1329,7 @@ private:
         hasFlashStrobe = queryControl(V4L2_CID_FLASH_STROBE);
         hasFlashStop = queryControl(V4L2_CID_FLASH_STROBE_STOP);
         hasAutoFocusStart = queryControl(V4L2_CID_AUTO_FOCUS_START);
+        hasAutoFocusStop = queryControl(V4L2_CID_AUTO_FOCUS_STOP);
         hasAutoFocusStatus = queryControl(V4L2_CID_AUTO_FOCUS_STATUS);
         hasAfZoneMode = queryControl(Ov5640CidAfZoneMode);
         hasAfTouchX = queryControl(Ov5640CidAfTouchX);
@@ -894,30 +1370,51 @@ private:
             return;
         }
 
-        const int value = mode == StrobeMode::Torch ? V4L2_FLASH_LED_MODE_TORCH : V4L2_FLASH_LED_MODE_NONE;
+        int value = V4L2_FLASH_LED_MODE_NONE;
+        QString status = QStringLiteral("off");
+        if (mode == StrobeMode::Torch) {
+            value = V4L2_FLASH_LED_MODE_TORCH;
+            status = QStringLiteral("torch");
+        } else if (mode == StrobeMode::Flash) {
+            value = V4L2_FLASH_LED_MODE_FLASH;
+            status = QStringLiteral("flash armed");
+        }
+
         if (!setCtrl(V4L2_CID_FLASH_LED_MODE, value))
             return;
 
-        const QString status = mode == StrobeMode::Torch ? QStringLiteral("torch") : QStringLiteral("off");
         postStrobeStatus(status);
         postLog(QStringLiteral("strobe %1").arg(status));
     }
 
     void triggerFlashPulse()
     {
-        if (!hasFlashLedMode) {
-            postError(QStringLiteral("V4L2_CID_FLASH_LED_MODE is not available"));
+        if (!hasFlashLedMode || !hasFlashStrobe) {
+            postError(QStringLiteral("flash strobe controls are not available"));
             return;
         }
 
-        if (!setCtrl(V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE))
+        if (!setCtrl(V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_FLASH))
+            return;
+        if (!setCtrl(V4L2_CID_FLASH_STROBE, 0))
             return;
 
-        postStrobeStatus(QStringLiteral("flash skipped"));
-        postLog(QStringLiteral("flash pulse skipped to keep OV5640 LED strobe off"));
+        postStrobeStatus(QStringLiteral("flash triggered"));
+        postLog(QStringLiteral("flash strobe requested"));
     }
 
-    void runAutoFocus()
+    void stopFlashPulse()
+    {
+        if (hasFlashStop && !setCtrl(V4L2_CID_FLASH_STROBE_STOP, 0))
+            return;
+        if (hasFlashLedMode && !setCtrl(V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE))
+            return;
+
+        postStrobeStatus(QStringLiteral("off"));
+        postLog(QStringLiteral("flash strobe stopped"));
+    }
+
+    void runAutoFocus(bool defaultZone)
     {
         if (!streaming) {
             postError(QStringLiteral("auto focus requires active streaming"));
@@ -927,12 +1424,21 @@ private:
             postError(QStringLiteral("V4L2_CID_AUTO_FOCUS_START is not available"));
             return;
         }
+        if (afActive) {
+            postLog(QStringLiteral("auto focus already active"));
+            return;
+        }
+
+        if (defaultZone && hasAfZoneMode && !setCtrl(Ov5640CidAfZoneMode, Ov5640AfZoneModeDefault))
+            return;
 
         if (!setCtrl(V4L2_CID_AUTO_FOCUS_START, 0))
             return;
+        afActive = true;
+        afStartedMs = fpsTimer.elapsed();
+        afPollTimer.restart();
+        lastAfStatusText = QStringLiteral("STARTED");
         postAfStatus(QStringLiteral("STARTED"));
-        lastAfStatusText.clear();
-        afPollTimer.start();
         postLog(QStringLiteral("auto focus started"));
     }
 
@@ -952,18 +1458,29 @@ private:
         }
 
         postLog(QStringLiteral("touch AF zone center=(%1,%2)").arg(clampedX).arg(clampedY));
-        runAutoFocus();
+        runAutoFocus(false);
     }
 
     void pollAutoFocusStatus()
     {
-        if (!hasAutoFocusStatus)
+        if (!afActive || !hasAutoFocusStatus)
             return;
         if (!afPollTimer.isValid())
             afPollTimer.start();
-        if (afPollTimer.elapsed() < 250)
+        if (afPollTimer.elapsed() < 100)
             return;
         afPollTimer.restart();
+
+        const qint64 elapsedMs = fpsTimer.elapsed() - afStartedMs;
+        if (elapsedMs >= 5000) {
+            if (hasAutoFocusStop && !setCtrl(V4L2_CID_AUTO_FOCUS_STOP, 0))
+                postLog(QStringLiteral("auto focus stop after timeout failed"));
+            afActive = false;
+            lastAfStatusText = QStringLiteral("TIMEOUT");
+            postAfStatus(QStringLiteral("TIMEOUT"));
+            postLog(QStringLiteral("auto focus timeout"));
+            return;
+        }
 
         int status = V4L2_AUTO_FOCUS_STATUS_IDLE;
         if (!getCtrl(V4L2_CID_AUTO_FOCUS_STATUS, &status))
@@ -979,7 +1496,11 @@ private:
         if (text != lastAfStatusText) {
             lastAfStatusText = text;
             postAfStatus(text);
+            postLog(QStringLiteral("auto focus status %1").arg(text));
         }
+
+        if (status & (V4L2_AUTO_FOCUS_STATUS_REACHED | V4L2_AUTO_FOCUS_STATUS_FAILED))
+            afActive = false;
     }
 
     void postFrame(const QImage &image)
@@ -1043,11 +1564,14 @@ private:
     qulonglong lastFpsFrameCount = 0;
     QElapsedTimer afPollTimer;
     QString lastAfStatusText;
+    qint64 afStartedMs = -1;
+    bool afActive = false;
 
     bool hasFlashLedMode = false;
     bool hasFlashStrobe = false;
     bool hasFlashStop = false;
     bool hasAutoFocusStart = false;
+    bool hasAutoFocusStop = false;
     bool hasAutoFocusStatus = false;
     bool hasAfZoneMode = false;
     bool hasAfTouchX = false;
@@ -1063,18 +1587,32 @@ private:
 CameraDevice::CameraDevice(QObject *parent)
     : QObject(parent)
     , captureThread(nullptr)
+    , saveWorker(new CameraSaveWorker(this))
     , currentState(CameraState::Closed)
+    , pendingSnapshotFrames(0)
+    , lastPreviewFrameMs(-1)
+    , recordingActive(false)
+    , previewDisplayEnabled(true)
+    , recordingGeneration(0)
 {
     qRegisterMetaType<QImage>("QImage");
     qRegisterMetaType<CameraMode>("CameraMode");
     qRegisterMetaType<CameraMode>("imx6sm::CameraMode");
     qRegisterMetaType<CameraState>("CameraState");
     qRegisterMetaType<CameraState>("imx6sm::CameraState");
+    saveWorker->start();
 }
 
 CameraDevice::~CameraDevice()
 {
+    stopRecording();
     stopPreview();
+    if (saveWorker) {
+        saveWorker->requestAbort();
+        saveWorker->wait();
+        delete saveWorker;
+        saveWorker = nullptr;
+    }
 }
 
 CameraCaps CameraDevice::queryCaps(const QString &devicePath) const
@@ -1169,8 +1707,10 @@ bool CameraDevice::startPreview(const CameraMode &mode)
         captureThread = nullptr;
     }
 
-    if (captureThread && captureThread->isRunning())
+    if (captureThread && captureThread->isRunning()) {
+        setPreviewDisplayEnabled(true);
         return setMode(modeIsValid(mode) ? mode : currentMode);
+    }
 
     if (currentDevicePath.isEmpty()) {
         setLocalError(QStringLiteral("open/query a video device before starting preview"));
@@ -1183,6 +1723,7 @@ bool CameraDevice::startPreview(const CameraMode &mode)
         return false;
     }
 
+    setPreviewDisplayEnabled(true);
     captureThread = new CameraCaptureThread(this, currentDevicePath, startMode);
     setLocalState(CameraState::Reconfiguring);
     captureThread->start();
@@ -1191,6 +1732,13 @@ bool CameraDevice::startPreview(const CameraMode &mode)
 
 void CameraDevice::stopPreview()
 {
+    if (recordingActive)
+        stopRecording();
+
+    pendingSnapshotPath.clear();
+    pendingSnapshotFrames = 0;
+    setPreviewDisplayEnabled(false);
+
     if (!captureThread)
         return;
 
@@ -1238,6 +1786,17 @@ bool CameraDevice::triggerFlash()
     return true;
 }
 
+bool CameraDevice::stopFlash()
+{
+    if (!requirePreviewThread(QStringLiteral("stopFlash")))
+        return false;
+    if (!captureThread->requestFlashStop()) {
+        setLocalError(QStringLiteral("failed to queue flash stop"));
+        return false;
+    }
+    return true;
+}
+
 bool CameraDevice::startAutoFocus()
 {
     if (!requirePreviewThread(QStringLiteral("startAutoFocus")))
@@ -1260,30 +1819,118 @@ bool CameraDevice::focusTouch(int activeFrameX, int activeFrameY)
     return true;
 }
 
-CameraDevice::ActionResult CameraDevice::requestSnapshot(const QString &path)
+CameraDevice::ActionResult CameraDevice::requestSnapshot(const QString &path, int frameDelay)
 {
-    Q_UNUSED(path);
-    const QString status = QStringLiteral("planned: framework only, encoder not implemented");
-    emit snapshotStatusChanged(status);
-    emit logMessage(QStringLiteral("snapshot %1").arg(status));
-    return ActionResult::NotImplemented;
+    if (!requirePreviewThread(QStringLiteral("requestSnapshot")))
+        return ActionResult::Failed;
+
+    const QString output = path.trimmed();
+    if (output.isEmpty()) {
+        const QString status = QStringLiteral("failed: empty snapshot path");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+    if (!saveWorker) {
+        const QString status = QStringLiteral("failed: save worker is unavailable");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    if (frameDelay > 0) {
+        if (!pendingSnapshotPath.isEmpty()) {
+            const QString status = QStringLiteral("failed: snapshot already pending");
+            emit snapshotStatusChanged(status);
+            emit logMessage(QStringLiteral("snapshot %1").arg(status));
+            return ActionResult::Failed;
+        }
+        pendingSnapshotPath = output;
+        pendingSnapshotFrames = frameDelay;
+        const QString status = QStringLiteral("waiting: %1 (%2 frames)").arg(output).arg(frameDelay);
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Ok;
+    }
+
+    if (latestFrame.isNull()) {
+        const QString status = QStringLiteral("failed: no preview frame captured yet");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    return queueSnapshotImage(output, latestFrame);
 }
 
 CameraDevice::ActionResult CameraDevice::startRecording(const QString &path)
 {
-    Q_UNUSED(path);
-    const QString status = QStringLiteral("planned: framework only, encoder not implemented");
-    emit recordingStatusChanged(status);
-    emit logMessage(QStringLiteral("recording %1").arg(status));
-    return ActionResult::NotImplemented;
+    if (!requirePreviewThread(QStringLiteral("startRecording")))
+        return ActionResult::Failed;
+    if (recordingActive) {
+        const QString status = QStringLiteral("failed: recording already active");
+        emit recordingStatusChanged(status);
+        emit logMessage(QStringLiteral("recording %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    const QString output = path.trimmed();
+    if (output.isEmpty()) {
+        const QString status = QStringLiteral("failed: empty recording path");
+        emit recordingStatusChanged(status);
+        emit logMessage(QStringLiteral("recording %1").arg(status));
+        return ActionResult::Failed;
+    }
+    if (!saveWorker) {
+        const QString status = QStringLiteral("failed: save worker is unavailable");
+        emit recordingStatusChanged(status);
+        emit logMessage(QStringLiteral("recording %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    QString error;
+    if (!saveWorker->beginRecording(output, 65, &error)) {
+        const QString status = QStringLiteral("failed: %1").arg(error);
+        emit recordingStatusChanged(status);
+        emit logMessage(QStringLiteral("recording %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    recordingActive = true;
+    recordingPath = output;
+    const int generation = ++recordingGeneration;
+    QTimer::singleShot(5000, this, [this, generation]() {
+        if (recordingActive && recordingGeneration == generation)
+            stopRecording();
+    });
+    emit logMessage(QStringLiteral("recording scheduled 5000 ms %1").arg(output));
+    return ActionResult::Ok;
 }
 
 CameraDevice::ActionResult CameraDevice::stopRecording()
 {
-    const QString status = QStringLiteral("not recording: encoder not implemented");
-    emit recordingStatusChanged(status);
-    emit logMessage(status);
-    return ActionResult::NotImplemented;
+    if (!recordingActive)
+        return ActionResult::Ok;
+
+    recordingActive = false;
+    recordingGeneration++;
+
+    if (!saveWorker) {
+        recordingPath.clear();
+        return ActionResult::Failed;
+    }
+
+    QString error;
+    const bool ok = saveWorker->requestFinishRecording(&error);
+    emit logMessage(QStringLiteral("recording stop requested"));
+    recordingPath.clear();
+    if (!ok) {
+        const QString status = QStringLiteral("failed: %1").arg(error);
+        emit recordingStatusChanged(status);
+        emit logMessage(QStringLiteral("recording %1").arg(status));
+        return ActionResult::Failed;
+    }
+    return ActionResult::Ok;
 }
 
 CameraCaps CameraDevice::capabilities() const
@@ -1309,6 +1956,20 @@ QString CameraDevice::lastError() const
 bool CameraDevice::isStreaming() const
 {
     return currentState == CameraState::Streaming || currentState == CameraState::Reconfiguring;
+}
+
+void CameraDevice::setPreviewDisplayEnabled(bool enabled)
+{
+    previewDisplayEnabled = enabled;
+    if (enabled) {
+        previewFrameTimer.invalidate();
+        lastPreviewFrameMs = -1;
+    }
+}
+
+bool CameraDevice::isPreviewDisplayEnabled() const
+{
+    return previewDisplayEnabled;
 }
 
 bool CameraDevice::supportsStrobeMode() const
@@ -1358,7 +2019,62 @@ CameraMode CameraDevice::preferredMode(const CameraCaps &caps)
 
 void CameraDevice::deliverFrame(const QImage &image)
 {
+    latestFrame = image;
+
+    if (!pendingSnapshotPath.isEmpty()) {
+        if (pendingSnapshotFrames > 0)
+            --pendingSnapshotFrames;
+        if (pendingSnapshotFrames <= 0) {
+            const QString path = pendingSnapshotPath;
+            pendingSnapshotPath.clear();
+            queueSnapshotImage(path, image);
+        }
+    }
+
+    if (recordingActive && saveWorker)
+        saveWorker->enqueueRecordingFrame(image);
+
+    if (!previewDisplayEnabled)
+        return;
+    if (!previewFrameTimer.isValid()) {
+        previewFrameTimer.start();
+        lastPreviewFrameMs = -1;
+    }
+    const qint64 elapsedMs = previewFrameTimer.elapsed();
+    if (lastPreviewFrameMs >= 0 && elapsedMs - lastPreviewFrameMs < 100)
+        return;
+    lastPreviewFrameMs = elapsedMs;
     emit frameReady(image);
+}
+
+CameraDevice::ActionResult CameraDevice::queueSnapshotImage(const QString &path, const QImage &image)
+{
+    if (image.isNull()) {
+        const QString status = QStringLiteral("failed: no preview frame captured yet");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    if (!saveWorker) {
+        const QString status = QStringLiteral("failed: save worker is unavailable");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    QString error;
+    if (!saveWorker->queueSnapshot(path, image, 80, &error)) {
+        const QString status = QStringLiteral("failed: %1").arg(error);
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    const QString status = QStringLiteral("saving: %1").arg(path);
+    emit snapshotStatusChanged(status);
+    emit logMessage(QStringLiteral("snapshot %1").arg(status));
+    return ActionResult::Ok;
 }
 
 void CameraDevice::deliverState(CameraState state)
@@ -1385,6 +2101,22 @@ void CameraDevice::deliverAfStatus(const QString &status)
 void CameraDevice::deliverStrobeStatus(const QString &status)
 {
     emit strobeStatusChanged(status);
+}
+
+void CameraDevice::deliverSnapshotStatus(const QString &status)
+{
+    emit snapshotStatusChanged(status);
+}
+
+void CameraDevice::deliverRecordingStatus(const QString &status)
+{
+    if (status.startsWith(QStringLiteral("saved:")) ||
+        status.startsWith(QStringLiteral("failed:")) ||
+        status.startsWith(QStringLiteral("stopped:"))) {
+        recordingActive = false;
+        recordingPath.clear();
+    }
+    emit recordingStatusChanged(status);
 }
 
 void CameraDevice::deliverError(const QString &error)

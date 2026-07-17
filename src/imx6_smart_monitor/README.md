@@ -65,4 +65,4 @@ QT_QPA_PLATFORM=linuxfb imx6-sm-core-test
 - 综合 launcher 只负责页面入口和返回，不复制 V4L2/IIO/UART/Storage 逻辑。
 - 完整智能监控业务页、回放页和完整 camera streaming 本次不实现。
 - Camera 测试 app 当前只做 V4L2 capability 和 format 枚举；MMAP streaming 后续进入 Camera SDK。
-- Storage 测试 app 默认写 `/tmp/smart-monitor`，板端验证 NFS 时请改成 `<nfs-dir>/smart-monitor`。
+- Storage 测试 app 默认写 `/smart-monitor`，在 NFS root 模式下可从 Ubuntu 的 `<nfs-dir>/smart-monitor` 查看。`/tmp` 是板端 tmpfs，不作为持久共享路径。

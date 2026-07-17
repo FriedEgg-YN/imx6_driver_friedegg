@@ -6,6 +6,7 @@ config BR2_PACKAGE_IMX6_SMART_MONITOR
 	select BR2_PACKAGE_QT5BASE_LINUXFB
 	select BR2_PACKAGE_QT5BASE_FONTCONFIG
 	select BR2_PACKAGE_QT5BASE_TSLIB
+	select BR2_PACKAGE_QT5BASE_JPEG
 	select BR2_PACKAGE_DEJAVU
 	help
 	  Qt5 Widgets launcher and module test apps for the smart monitor
