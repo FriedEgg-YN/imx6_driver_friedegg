@@ -3,6 +3,7 @@
 
 #include "imx6smartmonitor/types.h"
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QList>
@@ -127,6 +128,7 @@ signals:
 
 private slots:
     void deliverFrame(const QImage &image);
+    void deliverJpegFrame(const QByteArray &jpeg);
     void deliverState(CameraState state);
     void deliverActiveMode(const CameraMode &mode);
     void deliverFrameStats(qulonglong frameCount, double fps);
@@ -143,6 +145,7 @@ private:
     bool requirePreviewThread(const QString &operation);
     bool refreshCaps(const QString &devicePath);
     ActionResult queueSnapshotImage(const QString &path, const QImage &image);
+    ActionResult queueSnapshotJpeg(const QString &path, const QByteArray &jpeg);
 
     CameraCaptureThread *captureThread;
     CameraSaveWorker *saveWorker;
@@ -152,6 +155,7 @@ private:
     QString currentDevicePath;
     QString currentLastError;
     QImage latestFrame;
+    QByteArray latestJpegFrame;
     QString pendingSnapshotPath;
     int pendingSnapshotFrames;
     QElapsedTimer previewFrameTimer;

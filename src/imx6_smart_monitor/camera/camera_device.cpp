@@ -111,6 +111,16 @@ static bool isRgb565Fourcc(const QString &fourcc)
     return fourcc == QStringLiteral("RGBP");
 }
 
+static bool isJpegFourcc(const QString &fourcc)
+{
+    return fourcc == QStringLiteral("JPEG") || fourcc == QStringLiteral("MJPG");
+}
+
+static bool isCameraCaptureFourcc(const QString &fourcc)
+{
+    return isRgb565Fourcc(fourcc) || isJpegFourcc(fourcc);
+}
+
 static bool sameMode(const CameraMode &a, const CameraMode &b)
 {
     return a.fourcc == b.fourcc && a.width == b.width && a.height == b.height &&
@@ -425,6 +435,37 @@ static bool writeJpegFile(const QString &path, const QImage &image, int quality,
     return true;
 }
 
+static bool writeBytesFile(const QString &path, const QByteArray &bytes, QString *error)
+{
+    if (path.trimmed().isEmpty()) {
+        if (error)
+            *error = QStringLiteral("empty output path");
+        return false;
+    }
+    if (bytes.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("empty JPEG frame");
+        return false;
+    }
+    if (!ensureParentDirForFile(path, error))
+        return false;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error)
+            *error = file.errorString();
+        return false;
+    }
+
+    const qint64 written = file.write(bytes);
+    if (written != bytes.size()) {
+        if (error)
+            *error = file.errorString().isEmpty() ? QStringLiteral("short write") : file.errorString();
+        return false;
+    }
+    return true;
+}
+
 static QImage scaledRecordingFrame(const QImage &image)
 {
     if (image.isNull() || image.width() <= 400)
@@ -464,12 +505,46 @@ static bool encodeJpegBytes(const QImage &image, int quality, QByteArray *bytes,
     return true;
 }
 
+static QByteArray extractJpegPayload(const uchar *data, size_t size)
+{
+    if (!data || size < 4)
+        return QByteArray();
+
+    size_t start = size;
+    for (size_t i = 0; i + 1 < size; ++i) {
+        if (data[i] == 0xff && data[i + 1] == 0xd8) {
+            start = i;
+            break;
+        }
+    }
+    if (start == size)
+        return QByteArray();
+
+    for (size_t i = start + 2; i + 1 < size; ++i) {
+        if (data[i] == 0xff && data[i + 1] == 0xd9) {
+            const size_t length = i + 2 - start;
+            return QByteArray(reinterpret_cast<const char *>(data + start),
+                              static_cast<int>(length));
+        }
+    }
+
+    return QByteArray();
+}
+
 class CameraSaveWorker : public QThread {
 private:
     struct SnapshotJob {
         QString path;
         QImage image;
+        QByteArray jpeg;
         int quality = 80;
+        bool rawJpeg = false;
+    };
+
+    struct RecordingFrame {
+        QImage image;
+        QByteArray jpeg;
+        bool rawJpeg = false;
     };
 
 public:
@@ -532,21 +607,8 @@ public:
     bool queueSnapshot(const QString &path, const QImage &image, int quality, QString *error)
     {
         QMutexLocker locker(&mutex);
-        if (!isRunning()) {
-            if (error)
-                *error = QStringLiteral("save worker is not running");
+        if (!canQueueSnapshot(path, error))
             return false;
-        }
-        if (abortRequested) {
-            if (error)
-                *error = QStringLiteral("save worker is stopping");
-            return false;
-        }
-        if (path.trimmed().isEmpty()) {
-            if (error)
-                *error = QStringLiteral("empty snapshot path");
-            return false;
-        }
         if (image.isNull()) {
             if (error)
                 *error = QStringLiteral("no preview frame captured yet");
@@ -562,27 +624,45 @@ public:
         return true;
     }
 
-    bool enqueueRecordingFrame(const QImage &image)
+    bool queueSnapshotJpeg(const QString &path, const QByteArray &jpeg, QString *error)
     {
         QMutexLocker locker(&mutex);
-        if (!recordingActive || stopPending || abortRequested || image.isNull())
+        if (!canQueueSnapshot(path, error))
             return false;
-
-        const qint64 elapsedMs = recordingTimer.isValid() ? recordingTimer.elapsed() : 0;
-        if (lastQueuedFrameMs >= 0 && elapsedMs - lastQueuedFrameMs < RecordingFrameIntervalMs) {
-            ++skippedFrames;
-            return false;
-        }
-
-        if (frameQueue.size() >= MaxQueuedFrames) {
-            ++droppedFrames;
+        if (jpeg.isEmpty()) {
+            if (error)
+                *error = QStringLiteral("no JPEG frame captured yet");
             return false;
         }
 
-        frameQueue.append(scaledRecordingFrame(image));
-        lastQueuedFrameMs = elapsedMs;
+        SnapshotJob job;
+        job.path = path.trimmed();
+        job.jpeg = jpeg;
+        job.rawJpeg = true;
+        snapshotQueue.append(job);
         commandCond.wakeAll();
         return true;
+    }
+
+    bool enqueueRecordingFrame(const QImage &image)
+    {
+        if (image.isNull())
+            return false;
+
+        RecordingFrame frame;
+        frame.image = scaledRecordingFrame(image);
+        return enqueueRecordingFrame(frame);
+    }
+
+    bool enqueueRecordingJpeg(const QByteArray &jpeg)
+    {
+        if (jpeg.isEmpty())
+            return false;
+
+        RecordingFrame frame;
+        frame.jpeg = jpeg;
+        frame.rawJpeg = true;
+        return enqueueRecordingFrame(frame);
     }
 
     bool requestFinishRecording(QString *error)
@@ -614,9 +694,10 @@ protected:
     void run() override
     {
         for (;;) {
-            QImage frame;
+            RecordingFrame frame;
             SnapshotJob snapshot;
             bool hasSnapshot = false;
+            bool hasFrame = false;
             int quality = 80;
 
             mutex.lock();
@@ -651,21 +732,71 @@ protected:
             } else if (!frameQueue.isEmpty()) {
                 frame = frameQueue.takeFirst();
                 quality = recordingQuality;
+                hasFrame = true;
             }
             mutex.unlock();
 
             if (hasSnapshot)
                 writeSnapshot(snapshot);
-            else if (!frame.isNull())
+            else if (hasFrame)
                 writeRecordingFrame(frame, quality);
         }
     }
 
 private:
+    bool canQueueSnapshot(const QString &path, QString *error) const
+    {
+        if (!isRunning()) {
+            if (error)
+                *error = QStringLiteral("save worker is not running");
+            return false;
+        }
+        if (abortRequested) {
+            if (error)
+                *error = QStringLiteral("save worker is stopping");
+            return false;
+        }
+        if (path.trimmed().isEmpty()) {
+            if (error)
+                *error = QStringLiteral("empty snapshot path");
+            return false;
+        }
+        return true;
+    }
+
+    bool enqueueRecordingFrame(const RecordingFrame &frame)
+    {
+        QMutexLocker locker(&mutex);
+        if (!recordingActive || stopPending || abortRequested)
+            return false;
+        if ((!frame.rawJpeg && frame.image.isNull()) ||
+            (frame.rawJpeg && frame.jpeg.isEmpty()))
+            return false;
+
+        const qint64 elapsedMs = recordingTimer.isValid() ? recordingTimer.elapsed() : 0;
+        if (lastQueuedFrameMs >= 0 && elapsedMs - lastQueuedFrameMs < RecordingFrameIntervalMs) {
+            ++skippedFrames;
+            return false;
+        }
+
+        if (frameQueue.size() >= MaxQueuedFrames) {
+            ++droppedFrames;
+            return false;
+        }
+
+        frameQueue.append(frame);
+        lastQueuedFrameMs = elapsedMs;
+        commandCond.wakeAll();
+        return true;
+    }
+
     void writeSnapshot(const SnapshotJob &snapshot)
     {
         QString error;
-        if (writeJpegFile(snapshot.path, snapshot.image, snapshot.quality, &error)) {
+        const bool ok = snapshot.rawJpeg
+            ? writeBytesFile(snapshot.path, snapshot.jpeg, &error)
+            : writeJpegFile(snapshot.path, snapshot.image, snapshot.quality, &error);
+        if (ok) {
             postSnapshotStatus(QStringLiteral("saved: %1").arg(snapshot.path));
             postLog(QStringLiteral("snapshot saved %1").arg(snapshot.path));
         } else {
@@ -756,11 +887,19 @@ private:
         }
     }
 
-    void writeRecordingFrame(const QImage &frame, int quality)
+    void writeRecordingFrame(const RecordingFrame &frame, int quality)
     {
         QByteArray jpeg;
         QString error;
-        if (!encodeJpegBytes(frame, quality, &jpeg, &error)) {
+        if (frame.rawJpeg) {
+            jpeg = frame.jpeg;
+            if (jpeg.isEmpty())
+                error = QStringLiteral("empty JPEG frame");
+        } else if (!encodeJpegBytes(frame.image, quality, &jpeg, &error)) {
+            /* error is set by encodeJpegBytes(). */
+        }
+
+        if (!error.isEmpty()) {
             QMutexLocker locker(&mutex);
             lastError = error;
             stopPending = true;
@@ -816,7 +955,7 @@ private:
     QWaitCondition commandCond;
     QWaitCondition stateCond;
     QList<SnapshotJob> snapshotQueue;
-    QList<QImage> frameQueue;
+    QList<RecordingFrame> frameQueue;
     QFile *recordingFile = nullptr;
     QString startPath;
     QString currentRecordingPath;
@@ -910,6 +1049,7 @@ protected:
         lastFpsFrameCount = 0;
         lastFpsMs = 0;
         fpsTimer.start();
+        jpegMarkerWarningLogged = false;
         afPollTimer.invalidate();
         afActive = false;
         afStartedMs = -1;
@@ -1088,8 +1228,8 @@ private:
             postError(QStringLiteral("invalid camera mode"));
             return false;
         }
-        if (!isRgb565Fourcc(mode.fourcc)) {
-            postError(QStringLiteral("preview supports RGB565/RGBP only, got %1").arg(mode.fourcc));
+        if (!isCameraCaptureFourcc(mode.fourcc)) {
+            postError(QStringLiteral("capture supports RGB565/RGBP or JPEG only, got %1").arg(mode.fourcc));
             return false;
         }
 
@@ -1271,19 +1411,35 @@ private:
         }
 
         const MappedBuffer &mapped = buffers.at(static_cast<int>(buffer.index));
-        const int bytesPerLine = activeMode.bytesPerLine > 0 ? activeMode.bytesPerLine : activeMode.width * 2;
-        bool copied = false;
-        QImage image(activeMode.width, activeMode.height, QImage::Format_RGB16);
-        if (!image.isNull()) {
-            const uchar *src = static_cast<const uchar *>(mapped.start);
-            const int copyBytes = qMin(image.bytesPerLine(), bytesPerLine);
-            const size_t needed = static_cast<size_t>(bytesPerLine) * static_cast<size_t>(activeMode.height);
-            if (needed <= mapped.length) {
-                for (int y = 0; y < activeMode.height; ++y)
-                    std::memcpy(image.scanLine(y), src + y * bytesPerLine, static_cast<size_t>(copyBytes));
-                copied = true;
-            } else {
-                postError(QStringLiteral("captured buffer is smaller than expected image size"));
+        const uchar *src = static_cast<const uchar *>(mapped.start);
+        bool delivered = false;
+
+        if (isJpegFourcc(activeMode.fourcc)) {
+            const size_t bytesUsed = buffer.bytesused > 0
+                ? qMin(static_cast<size_t>(buffer.bytesused), mapped.length)
+                : mapped.length;
+            const QByteArray jpeg = extractJpegPayload(src, bytesUsed);
+            if (!jpeg.isEmpty()) {
+                postJpegFrame(jpeg);
+                delivered = true;
+            } else if (!jpegMarkerWarningLogged) {
+                postLog(QStringLiteral("JPEG frame skipped: SOI/EOI marker not found"));
+                jpegMarkerWarningLogged = true;
+            }
+        } else {
+            const int bytesPerLine = activeMode.bytesPerLine > 0 ? activeMode.bytesPerLine : activeMode.width * 2;
+            QImage image(activeMode.width, activeMode.height, QImage::Format_RGB16);
+            if (!image.isNull()) {
+                const int copyBytes = qMin(image.bytesPerLine(), bytesPerLine);
+                const size_t needed = static_cast<size_t>(bytesPerLine) * static_cast<size_t>(activeMode.height);
+                if (needed <= mapped.length) {
+                    for (int y = 0; y < activeMode.height; ++y)
+                        std::memcpy(image.scanLine(y), src + y * bytesPerLine, static_cast<size_t>(copyBytes));
+                    postFrame(image);
+                    delivered = true;
+                } else {
+                    postError(QStringLiteral("captured buffer is smaller than expected image size"));
+                }
             }
         }
 
@@ -1292,9 +1448,7 @@ private:
             return false;
         }
 
-        if (copied)
-            postFrame(image);
-        else
+        if (!delivered && !isJpegFourcc(activeMode.fourcc))
             return false;
 
         ++frameCount;
@@ -1509,6 +1663,12 @@ private:
                                   Q_ARG(QImage, image));
     }
 
+    void postJpegFrame(const QByteArray &jpeg)
+    {
+        QMetaObject::invokeMethod(facade, "deliverJpegFrame", Qt::QueuedConnection,
+                                  Q_ARG(QByteArray, jpeg));
+    }
+
     void postState(CameraState state)
     {
         QMetaObject::invokeMethod(facade, "deliverState", Qt::QueuedConnection,
@@ -1562,6 +1722,7 @@ private:
     QElapsedTimer fpsTimer;
     qint64 lastFpsMs = 0;
     qulonglong lastFpsFrameCount = 0;
+    bool jpegMarkerWarningLogged = false;
     QElapsedTimer afPollTimer;
     QString lastAfStatusText;
     qint64 afStartedMs = -1;
@@ -1596,6 +1757,7 @@ CameraDevice::CameraDevice(QObject *parent)
     , recordingGeneration(0)
 {
     qRegisterMetaType<QImage>("QImage");
+    qRegisterMetaType<QByteArray>("QByteArray");
     qRegisterMetaType<CameraMode>("CameraMode");
     qRegisterMetaType<CameraMode>("imx6sm::CameraMode");
     qRegisterMetaType<CameraState>("CameraState");
@@ -1682,6 +1844,10 @@ bool CameraDevice::openDevice(const QString &devicePath)
 
     currentDevicePath = path;
     currentMode = preferredMode(currentCaps);
+    latestFrame = QImage();
+    latestJpegFrame.clear();
+    pendingSnapshotPath.clear();
+    pendingSnapshotFrames = 0;
     setLocalState(CameraState::Opened);
     emit activeModeChanged(currentMode);
     emit logMessage(QStringLiteral("query %1: %2 mode(s), %3 control(s)")
@@ -1696,6 +1862,10 @@ void CameraDevice::closeDevice()
     stopPreview();
     currentDevicePath.clear();
     currentMode = CameraMode();
+    latestFrame = QImage();
+    latestJpegFrame.clear();
+    pendingSnapshotPath.clear();
+    pendingSnapshotFrames = 0;
     setLocalState(CameraState::Closed);
 }
 
@@ -1719,7 +1889,7 @@ bool CameraDevice::startPreview(const CameraMode &mode)
 
     CameraMode startMode = modeIsValid(mode) ? mode : preferredMode(currentCaps);
     if (!modeIsValid(startMode)) {
-        setLocalError(QStringLiteral("no RGB565/RGBP preview mode is available"));
+        setLocalError(QStringLiteral("no RGB565/RGBP or JPEG capture mode is available"));
         return false;
     }
 
@@ -1737,6 +1907,8 @@ void CameraDevice::stopPreview()
 
     pendingSnapshotPath.clear();
     pendingSnapshotFrames = 0;
+    latestFrame = QImage();
+    latestJpegFrame.clear();
     setPreviewDisplayEnabled(false);
 
     if (!captureThread)
@@ -1761,6 +1933,8 @@ bool CameraDevice::setMode(const CameraMode &mode)
         setLocalError(QStringLiteral("failed to queue mode switch"));
         return false;
     }
+    latestFrame = QImage();
+    latestJpegFrame.clear();
     return true;
 }
 
@@ -1851,6 +2025,16 @@ CameraDevice::ActionResult CameraDevice::requestSnapshot(const QString &path, in
         emit snapshotStatusChanged(status);
         emit logMessage(QStringLiteral("snapshot %1").arg(status));
         return ActionResult::Ok;
+    }
+
+    if (isJpegFourcc(currentMode.fourcc)) {
+        if (latestJpegFrame.isEmpty()) {
+            const QString status = QStringLiteral("failed: no JPEG frame captured yet");
+            emit snapshotStatusChanged(status);
+            emit logMessage(QStringLiteral("snapshot %1").arg(status));
+            return ActionResult::Failed;
+        }
+        return queueSnapshotJpeg(output, latestJpegFrame);
     }
 
     if (latestFrame.isNull()) {
@@ -2014,6 +2198,11 @@ CameraMode CameraDevice::preferredMode(const CameraCaps &caps)
             return mode;
     }
 
+    for (const CameraMode &mode : caps.modes) {
+        if (isCameraCaptureFourcc(mode.fourcc))
+            return mode;
+    }
+
     return CameraMode();
 }
 
@@ -2021,18 +2210,20 @@ void CameraDevice::deliverFrame(const QImage &image)
 {
     latestFrame = image;
 
-    if (!pendingSnapshotPath.isEmpty()) {
-        if (pendingSnapshotFrames > 0)
-            --pendingSnapshotFrames;
-        if (pendingSnapshotFrames <= 0) {
-            const QString path = pendingSnapshotPath;
-            pendingSnapshotPath.clear();
-            queueSnapshotImage(path, image);
+    if (!isJpegFourcc(currentMode.fourcc)) {
+        if (!pendingSnapshotPath.isEmpty()) {
+            if (pendingSnapshotFrames > 0)
+                --pendingSnapshotFrames;
+            if (pendingSnapshotFrames <= 0) {
+                const QString path = pendingSnapshotPath;
+                pendingSnapshotPath.clear();
+                queueSnapshotImage(path, image);
+            }
         }
-    }
 
-    if (recordingActive && saveWorker)
-        saveWorker->enqueueRecordingFrame(image);
+        if (recordingActive && saveWorker)
+            saveWorker->enqueueRecordingFrame(image);
+    }
 
     if (!previewDisplayEnabled)
         return;
@@ -2045,6 +2236,29 @@ void CameraDevice::deliverFrame(const QImage &image)
         return;
     lastPreviewFrameMs = elapsedMs;
     emit frameReady(image);
+}
+
+void CameraDevice::deliverJpegFrame(const QByteArray &jpeg)
+{
+    if (jpeg.isEmpty())
+        return;
+
+    latestJpegFrame = jpeg;
+    if (!isJpegFourcc(currentMode.fourcc))
+        return;
+
+    if (!pendingSnapshotPath.isEmpty()) {
+        if (pendingSnapshotFrames > 0)
+            --pendingSnapshotFrames;
+        if (pendingSnapshotFrames <= 0) {
+            const QString path = pendingSnapshotPath;
+            pendingSnapshotPath.clear();
+            queueSnapshotJpeg(path, jpeg);
+        }
+    }
+
+    if (recordingActive && saveWorker)
+        saveWorker->enqueueRecordingJpeg(jpeg);
 }
 
 CameraDevice::ActionResult CameraDevice::queueSnapshotImage(const QString &path, const QImage &image)
@@ -2077,6 +2291,36 @@ CameraDevice::ActionResult CameraDevice::queueSnapshotImage(const QString &path,
     return ActionResult::Ok;
 }
 
+CameraDevice::ActionResult CameraDevice::queueSnapshotJpeg(const QString &path, const QByteArray &jpeg)
+{
+    if (jpeg.isEmpty()) {
+        const QString status = QStringLiteral("failed: no JPEG frame captured yet");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    if (!saveWorker) {
+        const QString status = QStringLiteral("failed: save worker is unavailable");
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    QString error;
+    if (!saveWorker->queueSnapshotJpeg(path, jpeg, &error)) {
+        const QString status = QStringLiteral("failed: %1").arg(error);
+        emit snapshotStatusChanged(status);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
+        return ActionResult::Failed;
+    }
+
+    const QString status = QStringLiteral("saving: %1").arg(path);
+    emit snapshotStatusChanged(status);
+    emit logMessage(QStringLiteral("snapshot %1").arg(status));
+    return ActionResult::Ok;
+}
+
 void CameraDevice::deliverState(CameraState state)
 {
     setLocalState(state);
@@ -2085,6 +2329,8 @@ void CameraDevice::deliverState(CameraState state)
 void CameraDevice::deliverActiveMode(const CameraMode &mode)
 {
     currentMode = mode;
+    latestFrame = QImage();
+    latestJpegFrame.clear();
     emit activeModeChanged(mode);
 }
 

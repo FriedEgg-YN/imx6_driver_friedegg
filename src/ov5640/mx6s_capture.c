@@ -341,6 +341,11 @@ static struct mx6s_fmt formats[] = {
 		.pixelformat	= V4L2_PIX_FMT_RGB565,
 		.mbus_code	= MEDIA_BUS_FMT_RGB565_2X8_LE,
 		.bpp		= 2,
+	}, {
+		.name		= "JPEG",
+		.pixelformat	= V4L2_PIX_FMT_JPEG,
+		.mbus_code	= MEDIA_BUS_FMT_JPEG_1X8,
+		.bpp		= 1,
 	}
 };
 
@@ -1230,6 +1235,11 @@ static int mx6s_configure_csi(struct mx6s_csi_dev *csi_dev)
 	case V4L2_PIX_FMT_GREY:
 		width = pix->width;
 		break;
+	case V4L2_PIX_FMT_JPEG:
+		if (csi_dev->csi_mux_mipi == true)
+			return -EINVAL;
+		width = pix->width * 2;
+		break;
 	case V4L2_PIX_FMT_UYVY:
 	case V4L2_PIX_FMT_RGB565:
 	case V4L2_PIX_FMT_YUYV:
@@ -1502,6 +1512,8 @@ static void mx6s_csi_frame_done(struct mx6s_csi_dev *csi_dev,
 		/* v4l2_get_timestamp() 填充单调时间戳，sequence 是驱动帧计数。 */
 		v4l2_get_timestamp(&vb->v4l2_buf.timestamp);
 		vb->v4l2_buf.sequence = csi_dev->frame_count;
+		/* JPEG 走固定 CSI/VFIFO 传输外壳，真实 JPEG 长度由用户态按 SOI/EOI 裁剪。 */
+		vb2_set_plane_payload(vb, 0, csi_dev->pix.sizeimage);
 		if (err)
 			vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
 		else
@@ -2080,6 +2092,8 @@ static int mx6s_vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 
 	strlcpy(f->description, fmt->name, sizeof(f->description));
 	f->pixelformat = fmt->pixelformat;
+	f->flags = fmt->pixelformat == V4L2_PIX_FMT_JPEG ?
+		   V4L2_FMT_FLAG_COMPRESSED : 0;
 
 	return 0;
 }
@@ -2123,8 +2137,14 @@ static int mx6s_negotiate_format(struct mx6s_csi_dev *csi_dev,
 	if (pix->field != V4L2_FIELD_INTERLACED)
 		pix->field = V4L2_FIELD_NONE;
 
-	pix->bytesperline = fmt->bpp * pix->width;
-	pix->sizeimage = pix->bytesperline * pix->height;
+	if (fmt->pixelformat == V4L2_PIX_FMT_JPEG) {
+		pix->colorspace = V4L2_COLORSPACE_JPEG;
+		pix->bytesperline = 0;
+		pix->sizeimage = pix->width * pix->height * 2;
+	} else {
+		pix->bytesperline = fmt->bpp * pix->width;
+		pix->sizeimage = pix->bytesperline * pix->height;
+	}
 
 	if (selected_fmt)
 		*selected_fmt = fmt;

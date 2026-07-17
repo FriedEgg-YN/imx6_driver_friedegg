@@ -56,7 +56,9 @@
 #define OV5640_REG_PAD_SELECT00			0x301c
 #define OV5640_REG_SYSTEM_RESET00      0x3000
 #define OV5640_REG_SYSTEM_RESET01      0x3001
+#define OV5640_REG_SYSTEM_RESET02      0x3002
 #define OV5640_REG_CLOCK_ENABLE01      0x3005
+#define OV5640_REG_CLOCK_ENABLE02      0x3006
 #define OV5640_REG_SYSCLK_PLL_CTRL0     0x3034
 #define OV5640_REG_SYSCLK_PLL_CTRL1     0x3035
 #define OV5640_REG_SYSCLK_PLL_MULT      0x3036
@@ -105,6 +107,28 @@
 #define OV5640_REG_TIMING_VOFFSET       0x3813
 #define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
+#define OV5640_REG_JPEG_CTRL00          0x4400
+#define OV5640_REG_JPEG_CTRL01          0x4401
+#define OV5640_REG_JPEG_CTRL02          0x4402
+#define OV5640_REG_JPEG_CTRL03          0x4403
+#define OV5640_REG_JPEG_CTRL04          0x4404
+#define OV5640_REG_JPEG_CTRL05          0x4405
+#define OV5640_REG_JPEG_CTRL06          0x4406
+#define OV5640_REG_JPEG_CTRL07          0x4407
+#define OV5640_REG_JPEG_ISI_CTRL        0x4408
+#define OV5640_REG_JPEG_CTRL09          0x4409
+#define OV5640_REG_JPEG_CTRL0A          0x440a
+#define OV5640_REG_JPEG_CTRL0B          0x440b
+#define OV5640_REG_JPEG_CTRL0C          0x440c
+#define OV5640_REG_JPEG_COMMENT_LEN     0x4430
+#define OV5640_REG_JPEG_COMMENT_MARKER  0x4431
+#define OV5640_REG_VFIFO_CTRL00         0x4600
+#define OV5640_REG_VFIFO_HSIZE_H        0x4602
+#define OV5640_REG_VFIFO_VSIZE_H        0x4604
+#define OV5640_REG_VFIFO_CTRL0C         0x460c
+#define OV5640_REG_VFIFO_CTRL0D         0x460d
+#define OV5640_REG_DVP_JPEG_MODE        0x4713
+#define OV5640_REG_DVP_HREF_CTRL        0x471f
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
 #define OV5640_REG_PCLK_PERIOD           0x4837
 #define OV5640_REG_DVP_PCLK_DIVIDER      0x3824
@@ -119,6 +143,11 @@
 #define OV5640_REG_AVG_READOUT          0x56a1
 
 #define OV5640_TIMING_FLIP_MASK         0x06
+#define OV5640_TIMING_JPEG_ENABLE       0x20
+#define OV5640_RESET_JPEG_PATH_MASK     0x1c
+#define OV5640_CLOCK_JPEG_PATH_MASK     0x28
+#define OV5640_VFIFO_FIXED_HEIGHT       0x20
+#define OV5640_JPEG_MODE_2              0x02
 #define OV5640_BANDING_MANUAL_ENABLE    0x80
 #define OV5640_BANDING_MANUAL_50HZ      0x04
 
@@ -1218,6 +1247,7 @@ static const struct ov5640_datafmt ov5640_colour_fmts[] = {
 	{MEDIA_BUS_FMT_UYVY8_2X8, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_YUYV8_2X8, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_Y8_1X8, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_JPEG_1X8, V4L2_COLORSPACE_JPEG},
 };
 
 static inline struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
@@ -1357,7 +1387,8 @@ ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 		width_delta = mode_info->width > width ?
 			      mode_info->width - width : width - mode_info->width;
 		height_delta = mode_info->height > height ?
-			       mode_info->height - height : height - mode_info->height;
+			       mode_info->height - height :
+			       height - mode_info->height;
 		distance = width_delta + height_delta;
 
 		if (!best || distance < best_distance) {
@@ -1406,6 +1437,33 @@ ov5640_find_mode(u32 width, u32 height, bool nearest)
 	return best;
 }
 
+static bool ov5640_format_is_jpeg(u32 code)
+{
+	return code == MEDIA_BUS_FMT_JPEG_1X8;
+}
+
+static bool ov5640_jpeg_frame_size_supported(enum ov5640_frame_size frame_size)
+{
+	switch (frame_size) {
+	case ov5640_frame_size_VGA_640_480:
+	case ov5640_frame_size_800_480:
+	case ov5640_frame_size_720P_1280_720:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool ov5640_format_supports_frame_size(u32 code,
+					      enum ov5640_frame_size frame_size)
+{
+	if (!ov5640_find_datafmt(code))
+		return false;
+	if (!ov5640_format_is_jpeg(code))
+		return true;
+	return ov5640_jpeg_frame_size_supported(frame_size);
+}
+
 static inline bool ov5640_mode_supports_fps(enum ov5640_frame_size frame_size,
 					    enum ov5640_frame_rate frame_rate)
 {
@@ -1413,7 +1471,65 @@ static inline bool ov5640_mode_supports_fps(enum ov5640_frame_size frame_size,
 					 frame_rate) != NULL;
 }
 
-static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
+static bool ov5640_format_supports_mode_fps(u32 code,
+					   enum ov5640_frame_size frame_size,
+					   enum ov5640_frame_rate frame_rate)
+{
+	if (!ov5640_format_supports_frame_size(code, frame_size))
+		return false;
+	if (ov5640_format_is_jpeg(code) &&
+	    frame_rate != ov5640_15_fps && frame_rate != ov5640_30_fps)
+		return false;
+	return ov5640_mode_supports_fps(frame_size, frame_rate);
+}
+
+static const struct ov5640_mode_info *
+ov5640_find_mode_for_format(u32 code, u32 width, u32 height, bool nearest)
+{
+	const struct ov5640_mode_info *best = NULL;
+	u32 best_distance = ~0U;
+	int i;
+
+	if (!ov5640_find_datafmt(code))
+		return NULL;
+	if (!ov5640_format_is_jpeg(code))
+		return ov5640_find_mode(width, height, nearest);
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
+		u32 width_delta;
+		u32 height_delta;
+		u32 distance;
+
+		if (!ov5640_mode_has_available_reg_table(mode_info))
+			continue;
+		if (!ov5640_format_supports_frame_size(code, mode_info->frame_size))
+			continue;
+
+		if (mode_info->width == width && mode_info->height == height)
+			return mode_info;
+
+		if (!nearest)
+			continue;
+
+		width_delta = mode_info->width > width ?
+			      mode_info->width - width : width - mode_info->width;
+		height_delta = mode_info->height > height ?
+			       mode_info->height - height :
+			       height - mode_info->height;
+		distance = width_delta + height_delta;
+
+		if (!best || distance < best_distance) {
+			best = mode_info;
+			best_distance = distance;
+		}
+	}
+
+	return best;
+}
+
+static int ov5640_enum_frame_rate_for_mode(u32 code,
+					   enum ov5640_frame_size frame_size,
 					   unsigned int index,
 					   enum ov5640_frame_rate *frame_rate)
 {
@@ -1424,7 +1540,7 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 		return -EINVAL;
 
 	for (i = ov5640_15_fps; i < ov5640_num_framerates; i++) {
-		if (!ov5640_mode_supports_fps(frame_size, i))
+		if (!ov5640_format_supports_mode_fps(code, frame_size, i))
 			continue;
 
 		if (count == index) {
@@ -1438,6 +1554,132 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 	return -EINVAL;
 }
 
+static int ov5640_disable_jpeg(struct ov5640 *sensor)
+{
+	int ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
+				     OV5640_TIMING_JPEG_ENABLE, 0);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYSTEM_RESET02,
+				     OV5640_RESET_JPEG_PATH_MASK,
+				     OV5640_RESET_JPEG_PATH_MASK);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_mod_reg(sensor, OV5640_REG_CLOCK_ENABLE02,
+			       OV5640_CLOCK_JPEG_PATH_MASK, 0);
+}
+
+static int ov5640_apply_jpeg_format(struct ov5640 *sensor)
+{
+	u16 width = sensor->state.mbus_fmt.width;
+	u16 height = sensor->state.mbus_fmt.height;
+	u16 vfifo_width;
+	int ret;
+
+	if (!width || !height || width > 0xffff / 2)
+		return -EINVAL;
+
+	vfifo_width = width * 2;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+				 OV5640_FORMAT_MUX_YUV422);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+				 OV5640_FORMAT_CTRL_YUYV);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYSTEM_RESET02,
+				     OV5640_RESET_JPEG_PATH_MASK, 0);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_CLOCK_ENABLE02,
+				     OV5640_CLOCK_JPEG_PATH_MASK,
+				     OV5640_CLOCK_JPEG_PATH_MASK);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
+				     OV5640_TIMING_JPEG_ENABLE,
+				     OV5640_TIMING_JPEG_ENABLE);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL00, 0x81);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL01, 0x01);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL02, 0x10);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL03, 0x33);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL04, 0x24);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL05, 0x40);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL06, 0x40);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL07, 0x04);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_ISI_CTRL, 0x02);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL09, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0A, 0x4e);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0B, 0x16);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0C, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_COMMENT_LEN, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_COMMENT_MARKER, 0xfe);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL00,
+				 0x80 | OV5640_VFIFO_FIXED_HEIGHT);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_HSIZE_H,
+				  vfifo_width);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_VSIZE_H, height);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL0C, 0x20);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL0D, 0x00);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_DVP_JPEG_MODE,
+				 OV5640_JPEG_MODE_2);
+	if (ret < 0)
+		return ret;
+	return ov5640_write_reg(sensor, OV5640_REG_DVP_HREF_CTRL, 0x40);
+}
+
 static int ov5640_apply_format(struct ov5640 *sensor,
 			       const struct ov5640_datafmt *fmt)
 {
@@ -1445,6 +1687,13 @@ static int ov5640_apply_format(struct ov5640 *sensor,
 
 	if (!fmt)
 		return -EINVAL;
+
+	if (ov5640_format_is_jpeg(fmt->code))
+		return ov5640_apply_jpeg_format(sensor);
+
+	ret = ov5640_disable_jpeg(sensor);
+	if (ret < 0)
+		return ret;
 
 	switch (fmt->code) {
 	case MEDIA_BUS_FMT_UYVY8_2X8:
@@ -3577,7 +3826,6 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 	struct ov5640 *sensor = sd_to_ov5640(sd);
 	struct v4l2_captureparm *cparm = &a->parm.capture;
 	struct v4l2_fract *timeperframe = &cparm->timeperframe;
-	const struct ov5640_mode_info *mode_info;
 	const struct ov5640_datafmt *fmt;
 	u32 tgt_fps;
 	enum ov5640_frame_rate frame_rate;
@@ -3616,8 +3864,9 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 
 		mutex_lock(&sensor->lock);
 
-		mode_info = ov5640_get_mode_info(sensor->state.frame_size);
-		if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {
+		if (!ov5640_format_supports_mode_fps(sensor->state.mbus_fmt.code,
+					      sensor->state.frame_size,
+					      frame_rate)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
@@ -3699,7 +3948,8 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
 	if (!fmt)
 		fmt = &ov5640_colour_fmts[0];
 
-	mode_info = ov5640_find_mode(mf->width, mf->height, true);
+	mode_info = ov5640_find_mode_for_format(fmt->code, mf->width,
+					mf->height, true);
 	if (!mode_info)
 		return -EINVAL;
 
@@ -3738,14 +3988,20 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 		return retval;
 
 	fmt = ov5640_find_datafmt(mf->code);
-	mode_info = ov5640_find_mode(mf->width, mf->height, false);
-	if (!fmt || !mode_info)
+	if (!fmt)
+		return -EINVAL;
+
+	mode_info = ov5640_find_mode_for_format(fmt->code, mf->width,
+				mf->height, false);
+	if (!mode_info)
 		return -EINVAL;
 
 	frame_rate = sensor->state.frame_rate;
-	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+	if (!ov5640_format_supports_mode_fps(fmt->code, mode_info->frame_size,
+					      frame_rate))
 		frame_rate = mode_info->default_fps;
-	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+	if (!ov5640_format_supports_mode_fps(fmt->code, mode_info->frame_size,
+					      frame_rate))
 		return -EINVAL;
 
 	mutex_lock(&sensor->lock);
@@ -3852,6 +4108,9 @@ static int ov5640_enum_framesizes(struct v4l2_subdev *sd,
 
 		if (!ov5640_mode_has_available_reg_table(mode_info))
 			continue;
+		if (!ov5640_format_supports_frame_size(fse->code,
+						       mode_info->frame_size))
+			continue;
 
 		if (count++ != fse->index)
 			continue;
@@ -3891,11 +4150,12 @@ static int ov5640_enum_frameintervals(struct v4l2_subdev *sd,
 	if (!ov5640_find_datafmt(fie->code))
 		return -EINVAL;
 
-	mode_info = ov5640_find_mode(fie->width, fie->height, false);
+	mode_info = ov5640_find_mode_for_format(fie->code, fie->width,
+					fie->height, false);
 	if (!mode_info)
 		return -EINVAL;
 
-	ret = ov5640_enum_frame_rate_for_mode(mode_info->frame_size,
+	ret = ov5640_enum_frame_rate_for_mode(fie->code, mode_info->frame_size,
 					       fie->index, &frame_rate);
 	if (ret < 0)
 		return ret;
