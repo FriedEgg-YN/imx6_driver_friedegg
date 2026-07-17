@@ -3,6 +3,8 @@
 
 #include "imx6smartmonitor/types.h"
 
+#include <QByteArray>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QList>
 #include <QObject>
@@ -63,6 +65,7 @@ struct CameraCaps {
 };
 
 class CameraCaptureThread;
+class CameraSaveWorker;
 
 class CameraDevice : public QObject {
     Q_OBJECT
@@ -88,10 +91,11 @@ public:
 
     bool setStrobeMode(StrobeMode mode);
     bool triggerFlash();
+    bool stopFlash();
     bool startAutoFocus();
     bool focusTouch(int activeFrameX, int activeFrameY);
 
-    ActionResult requestSnapshot(const QString &path);
+    ActionResult requestSnapshot(const QString &path, int frameDelay = 0);
     ActionResult startRecording(const QString &path);
     ActionResult stopRecording();
 
@@ -100,6 +104,8 @@ public:
     CameraState state() const;
     QString lastError() const;
     bool isStreaming() const;
+    void setPreviewDisplayEnabled(bool enabled);
+    bool isPreviewDisplayEnabled() const;
 
     bool supportsStrobeMode() const;
     bool supportsFlashPulse() const;
@@ -122,11 +128,14 @@ signals:
 
 private slots:
     void deliverFrame(const QImage &image);
+    void deliverJpegFrame(const QByteArray &jpeg);
     void deliverState(CameraState state);
     void deliverActiveMode(const CameraMode &mode);
     void deliverFrameStats(qulonglong frameCount, double fps);
     void deliverAfStatus(const QString &status);
     void deliverStrobeStatus(const QString &status);
+    void deliverSnapshotStatus(const QString &status);
+    void deliverRecordingStatus(const QString &status);
     void deliverError(const QString &error);
     void deliverLog(const QString &line);
 
@@ -135,13 +144,26 @@ private:
     void setLocalError(const QString &error);
     bool requirePreviewThread(const QString &operation);
     bool refreshCaps(const QString &devicePath);
+    ActionResult queueSnapshotImage(const QString &path, const QImage &image);
+    ActionResult queueSnapshotJpeg(const QString &path, const QByteArray &jpeg);
 
     CameraCaptureThread *captureThread;
+    CameraSaveWorker *saveWorker;
     CameraCaps currentCaps;
     CameraMode currentMode;
     CameraState currentState;
     QString currentDevicePath;
     QString currentLastError;
+    QImage latestFrame;
+    QByteArray latestJpegFrame;
+    QString pendingSnapshotPath;
+    int pendingSnapshotFrames;
+    QElapsedTimer previewFrameTimer;
+    qint64 lastPreviewFrameMs;
+    bool recordingActive;
+    bool previewDisplayEnabled;
+    QString recordingPath;
+    int recordingGeneration;
 };
 
 } // namespace imx6sm

@@ -1,22 +1,43 @@
-# OV5640 V4L2 驱动与调试记录
+# OV5640 Camera Driver
 
-本目录维护 OV5640 摄像头相关外置驱动和板端测试程序。
+本目录维护 OV5640 camera 外置驱动、i.MX6ULL CSI host 适配和用户态测试程序。当前 Buildroot 包名和源码目录均为 `ov5640`，构建、部署和清理命令都使用这个包名。
 
-| 项 | 内容 |
+## 目录概览
+
+| 项 | 当前内容 |
 | --- | --- |
-| Buildroot 包 | `bsp/package/ov5640_drv/` |
-| 源码目录 | `src/ov5640_drv/` |
-| 内核模块 | `ov5640.ko`、`mx6s_capture.ko` |
-| 用户态测试 | `/usr/bin/ov5640_test` |
-| 模块工具链 | `BSP_KERNEL_CROSS_COMPILE` 指向的 Linaro 4.9 |
-| 测试程序工具链 | Buildroot target toolchain |
+| Buildroot 包 | `bsp/package/ov5640/` |
+| 源码目录 | `src/ov5640/` |
+| Sensor driver | `ov5640.c`，I2C V4L2 subdev，负责寄存器、电源、格式/帧率、controls、stream。 |
+| CSI host driver | `mx6s_capture.c`，V4L2 video node、VB2、CSI DMA、IRQ 完成路径。 |
+| 用户态测试 | `ov5640_test`、`ov5640_interface_demo`、`test_v4l2_matrix.sh`。 |
+| 主要模块 | `ov5640.ko`、`mx6s_capture.ko`。 |
+
+## 当前能力
+
+- RGB565/YUV/Y8 等非压缩 media-bus 格式协商。
+- OV5640 sensor JPEG 输出路径，首批覆盖 `640x480`、`800x480`、`1280x720` 的 15/30fps 稳定组合，其中实际可选帧率以模式表存在的寄存器组合为准。
+- i.MX6ULL CSI host 将 JPEG 映射为 `V4L2_PIX_FMT_JPEG`，并以固定 DMA 外壳采集到 V4L2 MMAP buffer。
+- 用户态可通过 `v4l2-ctl` 或 Smart Monitor Camera Test 选择 JPEG 格式采集。
+
+## docs 索引
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/ov5640-jpeg-capture-path.md`](docs/ov5640-jpeg-capture-path.md) | 当前 JPEG sensor -> CSI -> V4L2 -> userspace 采集路径和验证计划。 |
+| [`docs/ov5640_sensor_driver_guide.md`](docs/ov5640_sensor_driver_guide.md) | Sensor subdev 架构、状态机、回调导读；部分段落保留 JPEG 前的历史描述。 |
+| [`docs/ov5640_host_driver_guide.md`](docs/ov5640_host_driver_guide.md) | `mx6s_capture.c` host 驱动架构、VB2/CSI DMA/IRQ 状态机。 |
+| [`docs/ov5640_userspace_api速查.md`](docs/ov5640_userspace_api速查.md) | 用户态 V4L2 ioctl、`v4l2-ctl`、测试脚本速查。 |
+| [`docs/v4l2-ctl-callback-guide.md`](docs/v4l2-ctl-callback-guide.md) | 从 `v4l2-ctl` 命令追踪到 host/sensor 回调的学习笔记。 |
+| [`docs/移植效果分析及功能完善.md`](docs/移植效果分析及功能完善.md) | 早期移植效果、功能缺口和演进计划记录。 |
+| `docs/*.pdf` | ATK 模块手册、OV5640 datasheet、i.MX6ULL CSI RM、AF firmware guide 等原始资料。 |
 
 ## 构建与部署
 
 只改本目录驱动或测试程序：
 
 ```bash
-NFS_DIR=<nfs-dir> bash buildscripts/build_and_deploy.sh drv ov5640_drv
+NFS_DIR=<nfs-dir> bash buildscripts/build_and_deploy.sh drv ov5640
 ```
 
 如果同时改了摄像头相关 DTS/DTSI：
@@ -28,63 +49,17 @@ TFTP_DIR=<tftp-dir> bash buildscripts/build_and_deploy.sh dtb
 删除或重命名模块、测试程序后，显式清理 NFS 旧文件：
 
 ```bash
-NFS_DIR=<nfs-dir> bash buildscripts/pkg_clean_stale.sh ov5640_drv
+NFS_DIR=<nfs-dir> bash buildscripts/pkg_clean_stale.sh ov5640
 ```
 
-## 板端验证
+## 板端验证入口
 
 ```bash
 dmesg | grep -i -E 'ov5640|csi|video'
 modprobe ov5640
 modprobe mx6s_capture
-ls -l /dev/video*
-ov5640_test
+v4l2-ctl -d /dev/video1 --list-formats-ext
+v4l2-ctl -d /dev/video1 --set-fmt-video=width=640,height=480,pixelformat=JPEG --stream-mmap --stream-count=30 --stream-to=/tmp/ov5640-vga.mjpg
 ```
 
-如果 `modprobe` 顺序或依赖在当前 rootfs 中不稳定，可以临时使用 `insmod` 指定模块路径验证，再回到 Buildroot 包和模块依赖上修正。
-
-## 画面翻转(vflip/mirror)
-
-寄存器0x3820和0x3821能够分别控制vflip及mirror。这两者又分为Sensor、ISP vflip/mirror两种。经验证，**Sensor的vflip和mirror直接控制画面方向，Sensor与ISP 的vflip和mirror要保持一致，否则最终画面颜色异常**。
-
-对于Sensor与ISP翻转位不匹配导致画面异常问题，找到的原因为Bayer彩色滤波阵列(CFA)的起始排列被打乱。具体如下：
-
-- CMOS传感器的CFA通常为RGGB或BGGR
-- 修改Sensor vflip/mirror导致起始行可能改变，如从RGRGR...改为GBGBG...，与ISP假定的顺序不一致，从而导致ISP处理后颜色怪异
-
-## 移植调试记录
-
-早期移植时反复出现 `reg write/read error`。排查过程如下：
-
-1. 对照 datasheet 检查报错寄存器含义，并根据 `probe` 路径定位失败位置。
-2. 多次复现后发现报错寄存器地址会变化，问题不像单个寄存器配置错误，更像 I2C 通信不稳定。
-3. `i2cdetect -y 1` 中 OV5640 地址 `0x3c` 显示为 `UU`，说明内核驱动已经绑定该地址。
-4. 继续检查各路电压、I2C 频率和模块加载顺序。
-
-当时还怀疑过 BusyBox `mdev` 自动加载顺序：
-
-- 自启动日志中能看到 `camera ov5640, is found`。
-- 随后卸载 `mx6s_capture` 时曾出现 `send error`、`camera ov5640 is not found`。
-- 再次加载 `mx6s_capture` 和 `ov5640` 时偶发 `camera ov5640 not found`。
-- 临时通过 overlay 关闭 mdev autoload 后，多次卸载/加载模块更稳定；重新打开 autoload 后又出现过异常。
-
-后续重新复现时，这个 autoload 问题没有稳定再现：
-
-1. 临时禁用 `S90imx6-monitor`，避免服务自动加载摄像头相关模块。
-2. 恢复默认 `S10mdev`。
-3. 恢复默认 `mdev.conf`。
-4. 手动加载 `mx6s_capture.ko` 和 `ov5640.ko` 后，`ov5640_test` 可以显示摄像头内容。
-5. 默认 `S10mdev` 和默认 `mdev.conf` 下再次验证也正常。
-
-当时关键启动日志示例：
-
-```text
-Starting mdev... OK
-1-003c supply DOVDD not found, using dummy regulator
-1-003c supply DVDD not found, using dummy regulator
-1-003c supply AVDD not found, using dummy regulator
-camera ov5640, is found
-CSI: Registered sensor subdevice: ov5640 1-003c
-```
-
-当前结论：mdev autoload 可能曾经放大了模块加载顺序或电源/复位时序问题，但现阶段没有稳定复现。后续如果再次出现，应优先保留完整启动日志、模块加载顺序、`i2cdetect` 结果和 `dmesg` 时间线，再决定是修 mdev 规则、模块依赖还是驱动 probe/remove 时序。
+JPEG 文件的实际帧长由 Smart Monitor 等用户态扫描 SOI/EOI 得到；内核第一阶段不在 IRQ 路径读取 OV5640 JPEG length 寄存器。`v4l2-ctl --stream-to` 保存的是固定 DMA 外壳连续流，适合验证出流，不等同于裁剪后的 `.jpg`。

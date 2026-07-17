@@ -1,6 +1,6 @@
 # VSCode + Codex AI 组件使用指南
 
-扫描日期：2026-07-11
+扫描日期：2026-07-17
 
 本文记录本仓库当前真实存在的 Codex/AI 辅助组件，以及它们在 i.MX6ULL BSP、Buildroot 集成和 Linux 驱动学习中的使用边界。项目文档只写可复现规则和脱敏示例，不写真实 SSH、NFS/TFTP、板卡 IP、token、provider endpoint、私有笔记库路径或用户级运行状态。
 
@@ -12,11 +12,15 @@
 | 项目级 | skill | `.agents/skills/kernel-api-explainer/SKILL.md` | 已启用 | Linux kernel API、宏、枚举、结构体字段和 driver helper 解释 |
 | 项目级 | skill | `.agents/skills/driver-callback-walkthrough/SKILL.md` | 已启用 | driver callback、V4L2 ioctl/subdev/VB2、file ops 等回调链路讲解 |
 | 项目级 | skill | `.agents/skills/cite-project-docs/SKILL.md` | 已启用 | 从项目 docs、package docs 和 PDF/manual 查找依据、页码和项目笔记证据 |
+| 项目级 | skill | `.agents/skills/learning-driven-development/SKILL.md` | 已启用 | 开发/调试任务中的最低必懂模型、实现、验证和学习笔记沉淀 |
+| 项目级 | skill | `.agents/skills/project-doc-curator/SKILL.md` | 已启用 | 文档扫描、内容归属判断、漂移修复和索引同步 |
+| 项目级 | prompt | `.agents/prompts/learning-dev-task.md` | 已启用 | 学习驱动开发任务入口模板 |
+| 项目级 | prompt | `.agents/prompts/documentation-refresh.md` | 已启用 | 文档治理和漂移修复任务入口模板 |
 | 用户级 | skill | `~/.codex/skills/ai-system-architect/SKILL.md` | 用户级 | 设计或维护 Codex/VSCode+Codex AI 组件体系 |
 
-当前没有项目级 `.agents/prompts/`、`.agents/context/`、`.agents/mcp/`、hook 或 subagent 配置。不要在任务中把这些规划型组件当成已经可用；只有实际创建后再补充本文档。
+当前没有项目级 `.agents/context/`、`.agents/mcp/`、hook 或 subagent 配置。不要在任务中把这些规划型组件当成已经可用；只有实际创建后再补充本文档。
 
-旧的 driver summary notes skill 已删除。驱动学习总结不再走单独 skill：普通学习总结直接由当前回答完成；如果问题聚焦 API，则用 `$kernel-api-explainer`；如果问题聚焦回调触发链路，则用 `$driver-callback-walkthrough`；如果问题要求依据、页码或 manual/RM 证明，则用 `$cite-project-docs`。
+旧的 driver summary notes skill 已删除。普通一次性学习总结仍可由当前回答完成；如果任务需要“边开发边理解并沉淀”，用 `$learning-driven-development`；如果问题聚焦 API，则用 `$kernel-api-explainer`；如果问题聚焦回调触发链路，则用 `$driver-callback-walkthrough`；如果问题要求依据、页码或 manual/RM 证明，则用 `$cite-project-docs`。
 
 ## 打开工作区
 
@@ -24,6 +28,7 @@
 
 - `AGENTS.md` 的项目规则。
 - `.agents/skills/` 的项目级工作流。
+- `.agents/prompts/` 的标准任务入口模板。
 - `buildscripts/` 的构建部署入口。
 - `bsp/` 的 Buildroot external、rootfs overlay、package 和配置。
 - `src/<pkg>/` 的外置驱动包和用户态测试程序。
@@ -42,6 +47,51 @@
 涉及板端命令时，如果 Codex 无法实际运行，应要求输出 exact board-side commands 和 expected result。
 
 ## Skill 路由
+
+### `$learning-driven-development`
+
+使用场景：
+
+- 你希望 Codex 不只是改代码，还要帮助建立系统理解。
+- 开发/调试 BSP、Buildroot、Linux 驱动、V4L2、Qt 或 smart monitor 功能。
+- 需要最低必懂模型、关键 API/回调/锁/上下文解释、最窄验证和 Markdown 学习笔记。
+
+示例：
+
+```text
+Use $learning-driven-development.
+修复 OV5640 JPEG 采集问题，同时讲清 sensor -> CSI -> V4L2 buffer 的最低必懂模型，最后给出适合进入 src/ov5640/docs/ 的复盘提纲。
+```
+
+期望行为：
+
+- 先判断任务归属和本次涉及的数据/控制路径。
+- 开发前给出小而准的系统地图，不写泛泛教材。
+- 实现时沿用当前代码模式，关键改动要解释原因和风险。
+- 验证时选择最窄命令；无法上板时给 exact board-side commands 和 expected result。
+- 收尾时给出知识沉淀位置和 Markdown-ready 要点。
+
+### `$project-doc-curator`
+
+使用场景：
+
+- 扫描、重整、补全文档，修复文档职责混乱、重复、缺失或漂移。
+- 判断内容该放根 `README.md`、项目 `docs/`、模块 `src/<pkg>/README.md`、模块 `src/<pkg>/docs/` 还是 `.notrace/`。
+- 新增、删除、重命名 skill/prompt 后同步 `AGENTS.md` 和本文档。
+
+示例：
+
+```text
+Use $project-doc-curator.
+扫描当前 README/docs/src/<pkg>/README.md，修复包名、源码路径、docs 索引和 AI 组件清单漂移。
+```
+
+期望行为：
+
+- 先用 `rg --files` 和 Buildroot package `.mk` 文件确认真实状态。
+- 建立文档归属判断，再修改最小必要文件。
+- `.notrace/` 默认不改。
+- 修改后用 `rg` 检查旧名称、实际文件和组件清单是否一致。
 
 ### `$kernel-api-explainer`
 
@@ -136,9 +186,9 @@ Use $ai-system-architect.
 | BusyBox/Buildroot 配置 | `bsp/configs/` | `bash buildscripts/build_and_deploy.sh config status` 后按需 `rootfs` |
 | 内核 DTS 或内核驱动 | `src/linux-friedegg/` | `dtb` 或 `zimage` |
 | U-Boot | `src/uboot-friedegg/` | 按具体启动链路选择，不默认改 |
-| 文档和学习材料 | `docs/`、`src/<pkg>/README.md`、`src/<pkg>/docs/` | Markdown 检查或人工阅读 |
+| 文档和学习材料 | `README.md`、`docs/`、`src/<pkg>/README.md`、`src/<pkg>/docs/` | `rg` 漂移检查、Markdown 检查或人工阅读 |
 
-当前可见外置包包括 `ap3216c`、`gt9147`、`ov5640`、`imx6_monitor`、`imx6_qt5_demo` 和 `print_chasing_led`。不要假设只有当前打开的 `ov5640` 存在。
+当前可见本地包包括 `ap3216c`、`ov5640`、`gt9147`、`imx6-monitor`、`imx6-qt5-demo`、`imx6-smart-monitor` 和 `print_chasing_led`。不要假设只有当前打开的 `ov5640` 存在。
 
 ## 验证命令
 
@@ -158,8 +208,9 @@ bash buildscripts/build_and_deploy.sh config status
 
 - `AGENTS.md` 放长期项目规则、仓库边界、隐私边界、验证入口和默认路由。
 - `.agents/skills/` 放稳定、可复用、多步骤工作流。
+- `.agents/prompts/` 放标准任务入口模板，只约定输入字段和期望输出，不承载长期项目规则。
 - 一次性学习总结、任务复盘、简历整理和面试问答优先在普通回答中完成，不再单独维护 summary-notes skill。
-- prompt、context、MCP 模板、hook、subagent 只有创建后才写入“当前组件清单”。
+- context、MCP 模板、hook、subagent 只有创建后才写入“当前组件清单”。
 - 删除或重命名 skill 后，必须同步更新 `AGENTS.md` 和本文档，并用 `rg` 检查旧名称残留。
 - 用户级配置保留个人偏好、真实路径、provider、token、MCP 实例和运行状态；项目级配置只保留可共享、可复现、脱敏后的规则。
 
@@ -186,6 +237,7 @@ bash buildscripts/build_and_deploy.sh config status
 ```bash
 rg --files .agents
 rg -n "<old-skill-or-component-name>" AGENTS.md docs .agents
+python3 /home/friedegg/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/<skill-name>
 ```
 
-第一条用于核对项目级 AI 组件实际文件；第二条把占位符替换为被删除或重命名的旧组件名，用于确认旧名称没有残留在路由和当前清单中。
+第一条用于核对项目级 AI 组件实际文件；第二条把占位符替换为被删除或重命名的旧组件名，用于确认旧名称没有残留在路由和当前清单中。第三条用于校验新增或修改后的 skill 元数据和目录结构。

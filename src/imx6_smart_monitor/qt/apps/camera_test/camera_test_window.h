@@ -3,6 +3,7 @@
 
 #include "qt/common/module_test_window.h"
 #include "camera/camera_device.h"
+#include "storage/storage_manager.h"
 
 #include <QList>
 #include <QPoint>
@@ -27,12 +28,21 @@ public:
     ~CameraTestWindow() override;
 
 private:
+    enum class PendingCaptureAction {
+        None,
+        Snapshot,
+        FlashSnapshot,
+        Record,
+    };
+
     void buildCameraLayout();
     QVBoxLayout *createMenuPage(QWidget **page);
     QPushButton *createSideButton(const QString &text);
     void showMainMenu();
     void setSelectedStrobeMode(StrobeMode mode);
+    void handleStrobeStatus(const QString &status);
     void takeSnapshot();
+    void startRecording();
     void toggleLog();
     void queryCaps();
     void startPreview();
@@ -42,10 +52,29 @@ private:
     void updateStrobeButtons();
     void updatePreviewOverlay();
     void handlePreviewTouch(const QPoint &pos, const QSize &imageSize, const QRect &imageRect);
-    CameraMode selectedMode() const;
+    bool captureActionPending() const;
+    bool ensureCaptureSession(const CameraMode &mode);
+    bool prepareCaptureAction(PendingCaptureAction action, const QString &path, const QString &relativePath);
+    void startPendingCaptureAction();
+    void requestSnapshotNow(const QString &path, const QString &relativePath, bool flash);
+    void requestRecordingNow(const QString &path, const QString &relativePath);
+    void restorePreviewModeIfNeeded();
+    bool beginFlashSnapshot(const QString &path, const QString &relativePath);
+    void handleFlashSnapshotTimeout(const QString &path);
+    void finishFlashSnapshotStrobe();
+    bool isFlashSnapshotPath(const QString &path) const;
+    void handleSnapshotStatus(const QString &status);
+    void handleRecordingStatus(const QString &status);
+    void appendCaptureEvent(const QString &type, const QString &relativePath, const QString &status);
+    void appendCaptureIndex(const QString &relativePath, const QString &kind, const QString &status);
+    QString captureRelativePath(const QString &absolutePath) const;
+    QString savedPathFromStatus(const QString &status) const;
+    CameraMode selectedPreviewMode() const;
+    CameraMode selectedCaptureMode() const;
     QString modeListSummary(const CameraCaps &caps) const;
     QString controlSummary(const CameraCaps &caps) const;
 
+    StorageManager storage;
     CameraDevice camera;
     QWidget *bodyWidget;
     QStackedWidget *menuStack;
@@ -55,7 +84,9 @@ private:
     QWidget *strobeMenuPage;
     QWidget *captureMenuPage;
     QLineEdit *pathEdit;
+    QLineEdit *saveRootEdit;
     QComboBox *modeCombo;
+    QComboBox *captureModeCombo;
     PreviewWidget *previewWidget;
     QLabel *driverLabel;
     QLabel *cardLabel;
@@ -85,9 +116,22 @@ private:
     QPushButton *snapshotButton;
     QPushButton *recordButton;
     QList<CameraMode> visibleModes;
+    QList<CameraMode> captureModes;
     CameraMode currentActiveMode;
+    PendingCaptureAction pendingCaptureAction;
+    CameraMode pendingCaptureMode;
+    CameraMode restorePreviewMode;
+    QString pendingCapturePath;
+    QString pendingCaptureRelativePath;
     StrobeMode selectedStrobeMode;
+    CameraTestSessionResult captureSession;
     QString strobeStatusText;
+    QString flashSnapshotPath;
+    QString flashSnapshotRelativePath;
+    int captureSequence;
+    bool recordingUiActive;
+    bool flashSnapshotActive;
+    bool restorePreviewAfterCapture;
 };
 
 } // namespace imx6sm

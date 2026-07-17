@@ -1,6 +1,7 @@
 #include "camera_test_window.h"
 
 #include <QComboBox>
+#include <QDir>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -24,10 +26,33 @@ static bool isRgb565Mode(const CameraMode &mode)
     return mode.fourcc == QStringLiteral("RGBP") && mode.width > 0 && mode.height > 0;
 }
 
+static bool isJpegMode(const CameraMode &mode)
+{
+    return (mode.fourcc == QStringLiteral("JPEG") || mode.fourcc == QStringLiteral("MJPG")) &&
+           mode.width > 0 && mode.height > 0;
+}
+
+static bool isCaptureMode(const CameraMode &mode)
+{
+    return isRgb565Mode(mode) || isJpegMode(mode);
+}
+
 static bool sameUiMode(const CameraMode &a, const CameraMode &b)
 {
     return a.fourcc == b.fourcc && a.width == b.width && a.height == b.height &&
            a.fpsNum == b.fpsNum && a.fpsDen == b.fpsDen;
+}
+
+static QString statusPathFromText(const QString &status)
+{
+    QString text = status.trimmed();
+    const int colon = text.indexOf(QLatin1Char(':'));
+    if (colon >= 0)
+        text = text.mid(colon + 1).trimmed();
+    const int suffix = text.indexOf(QStringLiteral(" ("));
+    if (suffix >= 0)
+        text = text.left(suffix).trimmed();
+    return text;
 }
 
 class PreviewWidget : public QWidget {
@@ -125,7 +150,9 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
     , strobeMenuPage(nullptr)
     , captureMenuPage(nullptr)
     , pathEdit(new QLineEdit(QStringLiteral("/dev/video1"), this))
+    , saveRootEdit(new QLineEdit(QStringLiteral("/smart-monitor"), this))
     , modeCombo(new QComboBox(this))
+    , captureModeCombo(new QComboBox(this))
     , previewWidget(new PreviewWidget(this))
     , driverLabel(new QLabel(QStringLiteral("--"), this))
     , cardLabel(new QLabel(QStringLiteral("--"), this))
@@ -154,8 +181,13 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
     , flashButton(nullptr)
     , snapshotButton(nullptr)
     , recordButton(nullptr)
+    , pendingCaptureAction(PendingCaptureAction::None)
     , selectedStrobeMode(StrobeMode::None)
     , strobeStatusText(QStringLiteral("off"))
+    , captureSequence(0)
+    , recordingUiActive(false)
+    , flashSnapshotActive(false)
+    , restorePreviewAfterCapture(false)
 {
     resize(800, 480);
     buildCameraLayout();
@@ -170,20 +202,27 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
     connect(stopButton, &QPushButton::clicked, this, [this]() { stopPreview(); });
     connect(afButton, &QPushButton::clicked, this, [this]() {
         if (camera.startAutoFocus())
-            afLabel->setText(QStringLiteral("START queued"));
+            afLabel->setText(QStringLiteral("DEFAULT queued"));
         updatePreviewOverlay();
     });
     connect(strobeOffButton, &QPushButton::clicked, this, [this]() { setSelectedStrobeMode(StrobeMode::None); });
     connect(torchButton, &QPushButton::clicked, this, [this]() { setSelectedStrobeMode(StrobeMode::Torch); });
     connect(flashButton, &QPushButton::clicked, this, [this]() { setSelectedStrobeMode(StrobeMode::Flash); });
     connect(snapshotButton, &QPushButton::clicked, this, [this]() { takeSnapshot(); });
-    connect(recordButton, &QPushButton::clicked, this, [this]() {
-        camera.startRecording(QStringLiteral("/tmp/imx6-sm-camera-test.mjpeg"));
-    });
+    connect(recordButton, &QPushButton::clicked, this, [this]() { startRecording(); });
     connect(modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, [this](int) {
-                if (camera.isStreaming())
-                    camera.setMode(selectedMode());
+                if (captureActionPending())
+                    return;
+                const CameraMode mode = selectedPreviewMode();
+                if (camera.isStreaming() && isRgb565Mode(mode)) {
+                    camera.setPreviewDisplayEnabled(true);
+                    camera.setMode(mode);
+                }
+                updatePreviewOverlay();
+            });
+    connect(captureModeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, [this](int) {
                 updatePreviewOverlay();
             });
 
@@ -195,13 +234,19 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
         stateLabel->setText(stateText);
         setStatus(stateText);
         updateButtons();
-        if (state == CameraState::Streaming && selectedStrobeMode == StrobeMode::Torch && camera.supportsStrobeMode())
-            camera.setStrobeMode(StrobeMode::Torch);
+        if (state == CameraState::Streaming) {
+            if (selectedStrobeMode == StrobeMode::Torch && camera.supportsStrobeMode())
+                camera.setStrobeMode(StrobeMode::Torch);
+        } else if (flashSnapshotActive) {
+            finishFlashSnapshotStrobe();
+        }
         updatePreviewOverlay();
     });
     connect(&camera, &CameraDevice::activeModeChanged, this, [this](const CameraMode &mode) {
         currentActiveMode = mode;
         activeModeLabel->setText(mode.width > 0 ? mode.label() : QStringLiteral("--"));
+        if (captureActionPending() && sameUiMode(mode, pendingCaptureMode))
+            startPendingCaptureAction();
         updatePreviewOverlay();
     });
     connect(&camera, &CameraDevice::frameStatsChanged, this,
@@ -216,19 +261,13 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
         updatePreviewOverlay();
     });
     connect(&camera, &CameraDevice::strobeStatusChanged, this, [this](const QString &status) {
-        strobeStatusText = selectedStrobeMode == StrobeMode::Flash && status == QStringLiteral("off")
-                               ? QStringLiteral("flash armed")
-                               : status;
-        strobeLabel->setText(strobeStatusText);
-        updatePreviewOverlay();
+        handleStrobeStatus(status);
     });
     connect(&camera, &CameraDevice::snapshotStatusChanged, this, [this](const QString &status) {
-        snapshotLabel->setText(status);
-        updatePreviewOverlay();
+        handleSnapshotStatus(status);
     });
     connect(&camera, &CameraDevice::recordingStatusChanged, this, [this](const QString &status) {
-        recordingLabel->setText(status);
-        updatePreviewOverlay();
+        handleRecordingStatus(status);
     });
     connect(&camera, &CameraDevice::errorChanged, this, [this](const QString &error) {
         errorLabel->setText(error.isEmpty() ? QStringLiteral("--") : error);
@@ -288,8 +327,13 @@ void CameraTestWindow::buildCameraLayout()
     menuStack->setFixedWidth(118);
     pathEdit->setObjectName(QStringLiteral("sideEdit"));
     pathEdit->setMinimumHeight(40);
+    saveRootEdit->setObjectName(QStringLiteral("sideEdit"));
+    saveRootEdit->setMinimumHeight(40);
+    saveRootEdit->setPlaceholderText(QStringLiteral("/smart-monitor"));
     modeCombo->setObjectName(QStringLiteral("sideCombo"));
     modeCombo->setMinimumHeight(40);
+    captureModeCombo->setObjectName(QStringLiteral("sideCombo"));
+    captureModeCombo->setMinimumHeight(40);
 
     QVBoxLayout *mainLayout = createMenuPage(&mainMenuPage);
     deviceMenuButton = createSideButton(QStringLiteral("Device"));
@@ -310,6 +354,7 @@ void CameraTestWindow::buildCameraLayout()
     queryButton = createSideButton(QStringLiteral("Query"));
     deviceLayout->addWidget(deviceBackButton);
     deviceLayout->addWidget(pathEdit);
+    deviceLayout->addWidget(saveRootEdit);
     deviceLayout->addWidget(queryButton);
     deviceLayout->addStretch();
 
@@ -343,6 +388,7 @@ void CameraTestWindow::buildCameraLayout()
     afButton = createSideButton(QStringLiteral("AF"));
     recordButton = createSideButton(QStringLiteral("Record"));
     captureLayout->addWidget(captureBackButton);
+    captureLayout->addWidget(captureModeCombo);
     captureLayout->addWidget(snapshotButton);
     captureLayout->addWidget(afButton);
     captureLayout->addWidget(recordButton);
@@ -374,6 +420,7 @@ void CameraTestWindow::showMainMenu()
 
 void CameraTestWindow::setSelectedStrobeMode(StrobeMode mode)
 {
+    const StrobeMode previousMode = selectedStrobeMode;
     selectedStrobeMode = mode;
 
     if (mode == StrobeMode::Torch) {
@@ -382,11 +429,12 @@ void CameraTestWindow::setSelectedStrobeMode(StrobeMode mode)
             camera.setStrobeMode(StrobeMode::Torch);
     } else if (mode == StrobeMode::Flash) {
         strobeStatusText = QStringLiteral("flash armed");
-        if (camera.isStreaming() && camera.supportsStrobeMode())
+        if (previousMode == StrobeMode::Torch && camera.isStreaming() && camera.supportsStrobeMode())
             camera.setStrobeMode(StrobeMode::None);
         appendLog(QStringLiteral("flash armed for next snapshot"));
     } else {
         strobeStatusText = QStringLiteral("off");
+        finishFlashSnapshotStrobe();
         if (camera.isStreaming() && camera.supportsStrobeMode())
             camera.setStrobeMode(StrobeMode::None);
     }
@@ -396,15 +444,106 @@ void CameraTestWindow::setSelectedStrobeMode(StrobeMode mode)
     updatePreviewOverlay();
 }
 
-void CameraTestWindow::takeSnapshot()
+void CameraTestWindow::handleStrobeStatus(const QString &status)
 {
-    if (selectedStrobeMode == StrobeMode::Flash) {
-        if (camera.isStreaming() && camera.supportsStrobeMode())
-            camera.setStrobeMode(StrobeMode::None);
-        appendLog(QStringLiteral("snapshot keeps strobe off to avoid OV5640 LED exposure sync"));
+    strobeStatusText = status;
+    strobeLabel->setText(strobeStatusText);
+
+    if (flashSnapshotActive && status == QStringLiteral("flash triggered")) {
+        QString error;
+        if (camera.requestSnapshot(flashSnapshotPath, 3) != CameraDevice::ActionResult::Ok) {
+            snapshotLabel->setText(QStringLiteral("failed: flash snapshot request rejected"));
+            appendCaptureEvent(QStringLiteral("flash_snapshot_failed"), flashSnapshotRelativePath, QStringLiteral("request rejected"));
+            if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, &error) && !error.isEmpty())
+                appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+            finishFlashSnapshotStrobe();
+            restorePreviewModeIfNeeded();
+        } else {
+            snapshotLabel->setText(QStringLiteral("flash: waiting %1").arg(flashSnapshotRelativePath));
+            appendCaptureEvent(QStringLiteral("flash_snapshot_triggered"), flashSnapshotRelativePath, QStringLiteral("waiting third frame"));
+            if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_flash_waiting"), flashSnapshotRelativePath, &error) && !error.isEmpty())
+                appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        }
     }
 
-    camera.requestSnapshot(QStringLiteral("/tmp/imx6-sm-camera-test.jpg"));
+    updateButtons();
+    updatePreviewOverlay();
+}
+
+void CameraTestWindow::takeSnapshot()
+{
+    if (!camera.isStreaming()) {
+        appendLog(QStringLiteral("snapshot requires active capture streaming"));
+        snapshotLabel->setText(QStringLiteral("failed: capture inactive"));
+        updatePreviewOverlay();
+        return;
+    }
+
+    if (captureActionPending()) {
+        appendLog(QStringLiteral("snapshot ignored: capture mode switch in progress"));
+        return;
+    }
+
+    const CameraMode captureMode = selectedCaptureMode();
+    if (!isCaptureMode(captureMode)) {
+        snapshotLabel->setText(QStringLiteral("failed: no capture mode"));
+        appendLog(QStringLiteral("snapshot failed: no RGB565/JPEG capture mode selected"));
+        return;
+    }
+
+    if (!ensureCaptureSession(captureMode))
+        return;
+
+    const CameraTestPathResult path = storage.makeCameraSnapshotPath(captureSession);
+    if (!path.ok) {
+        snapshotLabel->setText(QStringLiteral("failed: %1").arg(path.error));
+        appendLog(QStringLiteral("snapshot path failed: %1").arg(path.error));
+        return;
+    }
+
+    const PendingCaptureAction action = selectedStrobeMode == StrobeMode::Flash
+        ? PendingCaptureAction::FlashSnapshot
+        : PendingCaptureAction::Snapshot;
+    prepareCaptureAction(action, path.path, captureRelativePath(path.path));
+}
+
+void CameraTestWindow::startRecording()
+{
+    if (!camera.isStreaming()) {
+        appendLog(QStringLiteral("recording requires active capture streaming"));
+        recordingLabel->setText(QStringLiteral("failed: capture inactive"));
+        updatePreviewOverlay();
+        return;
+    }
+
+    if (recordingUiActive) {
+        appendLog(QStringLiteral("recording already active"));
+        return;
+    }
+
+    if (captureActionPending()) {
+        appendLog(QStringLiteral("recording ignored: capture mode switch in progress"));
+        return;
+    }
+
+    const CameraMode captureMode = selectedCaptureMode();
+    if (!isCaptureMode(captureMode)) {
+        recordingLabel->setText(QStringLiteral("failed: no capture mode"));
+        appendLog(QStringLiteral("recording failed: no RGB565/JPEG capture mode selected"));
+        return;
+    }
+
+    if (!ensureCaptureSession(captureMode))
+        return;
+
+    const CameraTestPathResult path = storage.makeCameraRecordingPath(captureSession);
+    if (!path.ok) {
+        recordingLabel->setText(QStringLiteral("failed: %1").arg(path.error));
+        appendLog(QStringLiteral("recording path failed: %1").arg(path.error));
+        return;
+    }
+
+    prepareCaptureAction(PendingCaptureAction::Record, path.path, captureRelativePath(path.path));
 }
 
 void CameraTestWindow::toggleLog()
@@ -432,8 +571,11 @@ void CameraTestWindow::queryCaps()
         formatLabel->setText(QStringLiteral("--"));
         controlLabel->setText(QStringLiteral("--"));
         visibleModes.clear();
+        captureModes.clear();
         modeCombo->clear();
-        modeCombo->addItem(QStringLiteral("No RGB565/RGBP mode"));
+        modeCombo->addItem(QStringLiteral("No RGB565 preview"));
+        captureModeCombo->clear();
+        captureModeCombo->addItem(QStringLiteral("No capture mode"));
         updateButtons();
         updatePreviewOverlay();
         return;
@@ -455,8 +597,9 @@ void CameraTestWindow::queryCaps()
         strobeLabel->setText(strobeStatusText);
     }
     setStatus(QStringLiteral("Ready"));
-    appendLog(QStringLiteral("VIDIOC_QUERYCAP ok, %1 RGB565 mode(s), %2 control(s)")
+    appendLog(QStringLiteral("VIDIOC_QUERYCAP ok, %1 preview mode(s), %2 capture mode(s), %3 control(s)")
                   .arg(visibleModes.size())
+                  .arg(captureModes.size())
                   .arg(caps.controls.size()));
     updateButtons();
     updatePreviewOverlay();
@@ -464,6 +607,26 @@ void CameraTestWindow::queryCaps()
 
 void CameraTestWindow::startPreview()
 {
+    if (captureActionPending()) {
+        appendLog(QStringLiteral("preview resume delayed: capture mode switch in progress"));
+        return;
+    }
+
+    if (camera.isStreaming()) {
+        const CameraMode mode = selectedPreviewMode();
+        if (!isRgb565Mode(mode)) {
+            appendLog(QStringLiteral("no RGB565/RGBP preview mode selected"));
+            return;
+        }
+        camera.setPreviewDisplayEnabled(true);
+        if (!sameUiMode(camera.activeMode(), mode))
+            camera.setMode(mode);
+        appendLog(QStringLiteral("RGB preview display resumed"));
+        updateButtons();
+        updatePreviewOverlay();
+        return;
+    }
+
     const QString path = pathEdit->text().trimmed();
     if (camera.capabilities().devicePath != path || !camera.capabilities().available) {
         queryCaps();
@@ -471,9 +634,9 @@ void CameraTestWindow::startPreview()
             return;
     }
 
-    const CameraMode mode = selectedMode();
+    const CameraMode mode = selectedPreviewMode();
     if (!isRgb565Mode(mode)) {
-        appendLog(QStringLiteral("no RGB565/RGBP mode selected"));
+        appendLog(QStringLiteral("no RGB565/RGBP preview mode selected"));
         return;
     }
 
@@ -487,62 +650,90 @@ void CameraTestWindow::startPreview()
 
 void CameraTestWindow::stopPreview()
 {
-    camera.stopPreview();
-    previewWidget->clearFrame();
-    frameLabel->setText(QStringLiteral("0  0.0 fps"));
+    if (camera.isStreaming()) {
+        camera.setPreviewDisplayEnabled(false);
+        previewWidget->clearFrame();
+        appendLog(QStringLiteral("preview display paused; capture stream remains active"));
+    }
     updateButtons();
     updatePreviewOverlay();
 }
 
 void CameraTestWindow::updateModeList(const CameraCaps &caps)
 {
-    QSignalBlocker blocker(modeCombo);
+    QSignalBlocker previewBlocker(modeCombo);
+    QSignalBlocker captureBlocker(captureModeCombo);
     modeCombo->clear();
+    captureModeCombo->clear();
     visibleModes.clear();
+    captureModes.clear();
 
     for (const CameraMode &mode : caps.modes) {
         if (isRgb565Mode(mode))
             visibleModes.append(mode);
+        if (isCaptureMode(mode))
+            captureModes.append(mode);
     }
 
     if (visibleModes.isEmpty()) {
-        modeCombo->addItem(QStringLiteral("No RGB565/RGBP mode"));
-        return;
+        modeCombo->addItem(QStringLiteral("No RGB565 preview"));
+    } else {
+        const CameraMode preferred = CameraDevice::preferredMode(caps);
+        int preferredIndex = 0;
+        for (int i = 0; i < visibleModes.size(); ++i) {
+            const CameraMode mode = visibleModes.at(i);
+            modeCombo->addItem(mode.label());
+            if (sameUiMode(mode, preferred))
+                preferredIndex = i;
+        }
+        modeCombo->setCurrentIndex(preferredIndex);
+        currentActiveMode = visibleModes.at(preferredIndex);
+        activeModeLabel->setText(currentActiveMode.label());
     }
 
-    const CameraMode preferred = CameraDevice::preferredMode(caps);
-    int preferredIndex = 0;
-    for (int i = 0; i < visibleModes.size(); ++i) {
-        const CameraMode mode = visibleModes.at(i);
-        modeCombo->addItem(mode.label());
-        if (sameUiMode(mode, preferred))
-            preferredIndex = i;
+    if (captureModes.isEmpty()) {
+        captureModeCombo->addItem(QStringLiteral("No capture mode"));
+    } else {
+        const CameraMode previewMode = selectedPreviewMode();
+        int captureIndex = 0;
+        for (int i = 0; i < captureModes.size(); ++i) {
+            const CameraMode mode = captureModes.at(i);
+            captureModeCombo->addItem(mode.label());
+            if (sameUiMode(mode, previewMode))
+                captureIndex = i;
+        }
+        captureModeCombo->setCurrentIndex(captureIndex);
     }
-    modeCombo->setCurrentIndex(preferredIndex);
-    currentActiveMode = visibleModes.at(preferredIndex);
-    activeModeLabel->setText(currentActiveMode.label());
+
     updatePreviewOverlay();
 }
 
 void CameraTestWindow::updateButtons()
 {
     const bool running = camera.isStreaming();
-    const bool haveMode = !visibleModes.isEmpty();
+    const bool previewDisplay = camera.isPreviewDisplayEnabled();
+    const bool havePreviewMode = !visibleModes.isEmpty();
+    const bool haveCaptureMode = !captureModes.isEmpty();
     const bool capsAvailable = camera.capabilities().available;
     const bool haveStrobe = camera.supportsStrobeMode();
     const bool haveFlash = camera.supportsFlashPulse();
+    const bool pendingCapture = captureActionPending();
 
-    pathEdit->setEnabled(!running);
-    queryButton->setEnabled(!running);
-    modeCombo->setEnabled(haveMode);
-    startButton->setEnabled(haveMode && !running);
-    stopButton->setEnabled(running);
-    afButton->setEnabled(running && camera.supportsAutoFocus());
-    strobeOffButton->setEnabled(capsAvailable || selectedStrobeMode != StrobeMode::None);
-    torchButton->setEnabled(running && haveStrobe);
-    flashButton->setEnabled(capsAvailable && haveFlash);
-    snapshotButton->setEnabled(true);
-    recordButton->setEnabled(true);
+    pathEdit->setEnabled(!running && !pendingCapture);
+    saveRootEdit->setEnabled(!running && !recordingUiActive && !pendingCapture);
+    queryButton->setEnabled(!running && !pendingCapture);
+    modeCombo->setEnabled(havePreviewMode && !pendingCapture && !recordingUiActive);
+    captureModeCombo->setEnabled(haveCaptureMode && !pendingCapture && !recordingUiActive);
+    startButton->setText(running ? QStringLiteral("Show") : QStringLiteral("Start"));
+    stopButton->setText(QStringLiteral("Hide"));
+    startButton->setEnabled(havePreviewMode && !pendingCapture && !recordingUiActive && (!running || !previewDisplay));
+    stopButton->setEnabled(running && previewDisplay && !pendingCapture && !recordingUiActive);
+    afButton->setEnabled(running && camera.supportsAutoFocus() && !pendingCapture);
+    strobeOffButton->setEnabled((capsAvailable || selectedStrobeMode != StrobeMode::None) && !pendingCapture);
+    torchButton->setEnabled(running && haveStrobe && !pendingCapture);
+    flashButton->setEnabled(capsAvailable && haveFlash && !pendingCapture);
+    snapshotButton->setEnabled(running && haveCaptureMode && !pendingCapture && !recordingUiActive);
+    recordButton->setEnabled(running && haveCaptureMode && !recordingUiActive && !pendingCapture);
 
     deviceMenuButton->setEnabled(true);
     previewMenuButton->setEnabled(true);
@@ -577,7 +768,15 @@ void CameraTestWindow::updatePreviewOverlay()
         parts << active;
     if (!frames.isEmpty())
         parts << frames;
+    if (camera.isStreaming() && !camera.isPreviewDisplayEnabled())
+        parts << QStringLiteral("preview:off");
+    if (captureActionPending() && pendingCaptureMode.width > 0)
+        parts << QStringLiteral("capture:%1").arg(pendingCaptureMode.label());
     parts << QStringLiteral("strobe:%1").arg(strobeStatusText);
+    if (!snapshotLabel->text().isEmpty() && snapshotLabel->text() != QStringLiteral("planned"))
+        parts << QStringLiteral("snap:%1").arg(snapshotLabel->text());
+    if (!recordingLabel->text().isEmpty() && recordingLabel->text() != QStringLiteral("planned"))
+        parts << QStringLiteral("rec:%1").arg(recordingLabel->text());
     if (!error.isEmpty() && error != QStringLiteral("--"))
         parts << QStringLiteral("err:%1").arg(error);
 
@@ -607,12 +806,394 @@ void CameraTestWindow::handlePreviewTouch(const QPoint &pos, const QSize &imageS
     }
 }
 
-CameraMode CameraTestWindow::selectedMode() const
+bool CameraTestWindow::captureActionPending() const
+{
+    return pendingCaptureAction != PendingCaptureAction::None;
+}
+
+bool CameraTestWindow::prepareCaptureAction(PendingCaptureAction action, const QString &path, const QString &relativePath)
+{
+    const CameraMode captureMode = selectedCaptureMode();
+    if (!isCaptureMode(captureMode))
+        return false;
+    if (captureActionPending())
+        return false;
+
+    pendingCaptureAction = action;
+    pendingCaptureMode = captureMode;
+    pendingCapturePath = path;
+    pendingCaptureRelativePath = relativePath;
+
+    restorePreviewMode = selectedPreviewMode();
+    restorePreviewAfterCapture = camera.isStreaming() && camera.isPreviewDisplayEnabled() && isRgb565Mode(restorePreviewMode);
+
+    if (isJpegMode(captureMode)) {
+        camera.setPreviewDisplayEnabled(false);
+        previewWidget->clearFrame();
+    }
+
+    if (action == PendingCaptureAction::Record)
+        recordingLabel->setText(QStringLiteral("switching: %1").arg(captureMode.label()));
+    else
+        snapshotLabel->setText(QStringLiteral("switching: %1").arg(captureMode.label()));
+
+    if (!sameUiMode(camera.activeMode(), captureMode)) {
+        appendLog(QStringLiteral("switch capture mode to %1").arg(captureMode.label()));
+        if (!camera.setMode(captureMode)) {
+            appendLog(QStringLiteral("capture mode switch rejected"));
+            pendingCaptureAction = PendingCaptureAction::None;
+            pendingCaptureMode = CameraMode();
+            pendingCapturePath.clear();
+            pendingCaptureRelativePath.clear();
+            restorePreviewModeIfNeeded();
+            updateButtons();
+            updatePreviewOverlay();
+            return false;
+        }
+        updateButtons();
+        updatePreviewOverlay();
+        return true;
+    }
+
+    startPendingCaptureAction();
+    return true;
+}
+
+void CameraTestWindow::startPendingCaptureAction()
+{
+    const PendingCaptureAction action = pendingCaptureAction;
+    const QString path = pendingCapturePath;
+    const QString relativePath = pendingCaptureRelativePath;
+
+    pendingCaptureAction = PendingCaptureAction::None;
+    pendingCaptureMode = CameraMode();
+    pendingCapturePath.clear();
+    pendingCaptureRelativePath.clear();
+
+    switch (action) {
+    case PendingCaptureAction::Snapshot:
+        requestSnapshotNow(path, relativePath, false);
+        break;
+    case PendingCaptureAction::FlashSnapshot:
+        requestSnapshotNow(path, relativePath, true);
+        break;
+    case PendingCaptureAction::Record:
+        requestRecordingNow(path, relativePath);
+        break;
+    case PendingCaptureAction::None:
+        break;
+    }
+}
+
+void CameraTestWindow::requestSnapshotNow(const QString &path, const QString &relativePath, bool flash)
+{
+    if (flash) {
+        if (!beginFlashSnapshot(path, relativePath))
+            restorePreviewModeIfNeeded();
+        updateButtons();
+        updatePreviewOverlay();
+        return;
+    }
+
+    QString error;
+    if (camera.requestSnapshot(path, 1) != CameraDevice::ActionResult::Ok) {
+        snapshotLabel->setText(QStringLiteral("failed: request rejected"));
+        appendLog(QStringLiteral("snapshot request rejected"));
+        restorePreviewModeIfNeeded();
+        return;
+    }
+
+    appendCaptureEvent(QStringLiteral("snapshot_requested"), relativePath, QStringLiteral("waiting next frame"));
+    if (!storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_waiting"), relativePath, &error) && !error.isEmpty())
+        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+    snapshotLabel->setText(QStringLiteral("waiting: %1").arg(relativePath));
+    updateButtons();
+    updatePreviewOverlay();
+}
+
+void CameraTestWindow::requestRecordingNow(const QString &path, const QString &relativePath)
+{
+    QString error;
+    if (camera.startRecording(path) != CameraDevice::ActionResult::Ok) {
+        recordingLabel->setText(QStringLiteral("failed: request rejected"));
+        appendLog(QStringLiteral("recording request rejected"));
+        restorePreviewModeIfNeeded();
+        return;
+    }
+
+    recordingUiActive = true;
+    appendCaptureEvent(QStringLiteral("recording_requested"), relativePath, QStringLiteral("requested"));
+    if (!storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saving"), relativePath, &error) && !error.isEmpty())
+        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+    recordingLabel->setText(QStringLiteral("recording: %1").arg(relativePath));
+    updateButtons();
+    updatePreviewOverlay();
+}
+
+void CameraTestWindow::restorePreviewModeIfNeeded()
+{
+    if (!restorePreviewAfterCapture)
+        return;
+
+    restorePreviewAfterCapture = false;
+    if (!camera.isStreaming())
+        return;
+
+    CameraMode previewMode = restorePreviewMode;
+    if (!isRgb565Mode(previewMode))
+        previewMode = selectedPreviewMode();
+    restorePreviewMode = CameraMode();
+    if (!isRgb565Mode(previewMode))
+        return;
+
+    camera.setPreviewDisplayEnabled(true);
+    if (!sameUiMode(camera.activeMode(), previewMode)) {
+        appendLog(QStringLiteral("restore RGB preview mode %1").arg(previewMode.label()));
+        camera.setMode(previewMode);
+    } else {
+        appendLog(QStringLiteral("RGB preview display resumed"));
+    }
+}
+
+QString CameraTestWindow::captureRelativePath(const QString &absolutePath) const
+{
+    if (!captureSession.ok || absolutePath.isEmpty())
+        return absolutePath;
+    return QDir(captureSession.sessionPath).relativeFilePath(absolutePath);
+}
+
+QString CameraTestWindow::savedPathFromStatus(const QString &status) const
+{
+    return statusPathFromText(status);
+}
+
+bool CameraTestWindow::ensureCaptureSession(const CameraMode &mode)
+{
+    const QString root = saveRootEdit->text().trimmed().isEmpty()
+        ? QStringLiteral("/smart-monitor")
+        : saveRootEdit->text().trimmed();
+    const QString device = pathEdit->text().trimmed();
+
+    if (!isCaptureMode(mode)) {
+        appendLog(QStringLiteral("capture session failed: invalid capture mode"));
+        return false;
+    }
+
+    if (captureSession.ok && captureSession.rootPath == root && captureSession.devicePath == device &&
+        sameUiMode(captureSession.mode, mode)) {
+        return true;
+    }
+
+    captureSession = storage.openCameraTestSession(root, device, mode);
+    captureSequence = 0;
+    if (!captureSession.ok) {
+        appendLog(QStringLiteral("capture session failed: %1").arg(captureSession.error));
+        snapshotLabel->setText(QStringLiteral("failed: %1").arg(captureSession.error));
+        recordingLabel->setText(QStringLiteral("failed: %1").arg(captureSession.error));
+        updatePreviewOverlay();
+        return false;
+    }
+
+    appendLog(QStringLiteral("capture session opened %1").arg(captureSession.sessionPath));
+    return true;
+}
+
+void CameraTestWindow::appendCaptureEvent(const QString &type, const QString &relativePath, const QString &status)
+{
+    if (!captureSession.ok)
+        return;
+
+    QString error;
+    if (!storage.appendCameraEvent(captureSession, type, relativePath, status, &error))
+        appendLog(QStringLiteral("capture event write failed: %1").arg(error));
+}
+
+void CameraTestWindow::appendCaptureIndex(const QString &relativePath, const QString &kind, const QString &status)
+{
+    if (!captureSession.ok)
+        return;
+
+    QString error;
+    if (!storage.appendCameraIndex(captureSession, ++captureSequence, relativePath, kind, status, &error))
+        appendLog(QStringLiteral("capture index write failed: %1").arg(error));
+}
+
+
+bool CameraTestWindow::beginFlashSnapshot(const QString &path, const QString &relativePath)
+{
+    if (!camera.supportsFlashPulse()) {
+        snapshotLabel->setText(QStringLiteral("failed: flash controls unavailable"));
+        appendLog(QStringLiteral("flash snapshot unavailable: missing flash controls"));
+        return false;
+    }
+    if (flashSnapshotActive) {
+        snapshotLabel->setText(QStringLiteral("failed: flash snapshot already active"));
+        appendLog(QStringLiteral("flash snapshot already active"));
+        return false;
+    }
+
+    flashSnapshotActive = true;
+    flashSnapshotPath = path;
+    flashSnapshotRelativePath = relativePath;
+    snapshotLabel->setText(QStringLiteral("flash: arming %1").arg(relativePath));
+    appendCaptureEvent(QStringLiteral("flash_snapshot_requested"), relativePath, QStringLiteral("arming"));
+
+    QString error;
+    if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_flash_arming"), relativePath, &error) && !error.isEmpty())
+        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+
+    if (!camera.setStrobeMode(StrobeMode::Flash) || !camera.triggerFlash()) {
+        snapshotLabel->setText(QStringLiteral("failed: flash trigger rejected"));
+        appendCaptureEvent(QStringLiteral("flash_snapshot_failed"), relativePath, QStringLiteral("trigger rejected"));
+        finishFlashSnapshotStrobe();
+        return false;
+    }
+
+    QTimer::singleShot(2000, this, [this, path]() { handleFlashSnapshotTimeout(path); });
+    return true;
+}
+
+void CameraTestWindow::handleFlashSnapshotTimeout(const QString &path)
+{
+    if (!flashSnapshotActive || flashSnapshotPath != path)
+        return;
+
+    const QString relativePath = flashSnapshotRelativePath;
+    QString error;
+    snapshotLabel->setText(QStringLiteral("failed: flash snapshot timeout"));
+    appendCaptureEvent(QStringLiteral("flash_snapshot_failed"), relativePath, QStringLiteral("timeout"));
+    if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), relativePath, &error) && !error.isEmpty())
+        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+    finishFlashSnapshotStrobe();
+    restorePreviewModeIfNeeded();
+}
+
+void CameraTestWindow::finishFlashSnapshotStrobe()
+{
+    const bool wasActive = flashSnapshotActive;
+    flashSnapshotActive = false;
+    flashSnapshotPath.clear();
+    flashSnapshotRelativePath.clear();
+
+    if (wasActive && camera.isStreaming() && camera.supportsFlashPulse())
+        camera.stopFlash();
+    if (selectedStrobeMode == StrobeMode::Flash)
+        selectedStrobeMode = StrobeMode::None;
+    if (wasActive)
+        appendLog(QStringLiteral("flash snapshot strobe stop requested"));
+    updateStrobeButtons();
+}
+
+bool CameraTestWindow::isFlashSnapshotPath(const QString &path) const
+{
+    return flashSnapshotActive && !flashSnapshotPath.isEmpty() && path == flashSnapshotPath;
+}
+
+void CameraTestWindow::handleSnapshotStatus(const QString &status)
+{
+    QString path;
+    QString relativePath;
+    QString error;
+
+    if (status.startsWith(QStringLiteral("waiting:"))) {
+        path = savedPathFromStatus(status);
+        relativePath = captureRelativePath(path);
+        snapshotLabel->setText(QStringLiteral("waiting: %1").arg(relativePath));
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_waiting"), relativePath, &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+    } else if (status.startsWith(QStringLiteral("saving:"))) {
+        path = savedPathFromStatus(status);
+        const bool flashPath = isFlashSnapshotPath(path);
+        relativePath = captureRelativePath(path);
+        snapshotLabel->setText(QStringLiteral("saving: %1").arg(relativePath));
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_saving"), relativePath, &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        if (flashPath)
+            finishFlashSnapshotStrobe();
+    } else if (status.startsWith(QStringLiteral("saved:"))) {
+        path = savedPathFromStatus(status);
+        relativePath = captureRelativePath(path);
+        snapshotLabel->setText(QStringLiteral("saved: %1").arg(relativePath));
+        appendCaptureEvent(QStringLiteral("snapshot_saved"), relativePath, status);
+        appendCaptureIndex(relativePath, QStringLiteral("snapshot"), QStringLiteral("saved"));
+        if (captureSession.ok && !storage.updateLatestImage(captureSession, path, QStringLiteral("snapshot_saved"), &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest image update failed: %1").arg(error));
+        restorePreviewModeIfNeeded();
+    } else if (status.startsWith(QStringLiteral("failed:"))) {
+        snapshotLabel->setText(status);
+        appendCaptureEvent(QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, status);
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        if (flashSnapshotActive)
+            finishFlashSnapshotStrobe();
+        restorePreviewModeIfNeeded();
+    } else {
+        snapshotLabel->setText(status);
+    }
+
+    updateButtons();
+    updatePreviewOverlay();
+}
+
+void CameraTestWindow::handleRecordingStatus(const QString &status)
+{
+    QString path;
+    QString relativePath;
+    QString error;
+
+    if (status.startsWith(QStringLiteral("recording:"))) {
+        recordingUiActive = true;
+        path = savedPathFromStatus(status);
+        relativePath = captureRelativePath(path);
+        recordingLabel->setText(QStringLiteral("recording: %1").arg(relativePath));
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saving"), relativePath, &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+    } else if (status.startsWith(QStringLiteral("saved:"))) {
+        recordingUiActive = false;
+        path = savedPathFromStatus(status);
+        relativePath = captureRelativePath(path);
+        recordingLabel->setText(QStringLiteral("saved: %1").arg(relativePath));
+        appendCaptureEvent(QStringLiteral("recording_saved"), relativePath, status);
+        appendCaptureIndex(relativePath, QStringLiteral("recording"), QStringLiteral("saved"));
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saved"), relativePath, &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        restorePreviewModeIfNeeded();
+    } else if (status.startsWith(QStringLiteral("failed:"))) {
+        recordingUiActive = false;
+        recordingLabel->setText(status);
+        appendCaptureEvent(QStringLiteral("recording_failed"), QString(), status);
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_failed"), QString(), &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        restorePreviewModeIfNeeded();
+    } else if (status.startsWith(QStringLiteral("stopped:"))) {
+        recordingUiActive = false;
+        recordingLabel->setText(status);
+        appendCaptureEvent(QStringLiteral("recording_stopped"), QString(), status);
+        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_stopped"), QString(), &error) && !error.isEmpty())
+            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
+        restorePreviewModeIfNeeded();
+    } else {
+        recordingLabel->setText(status);
+    }
+
+    updateButtons();
+    updatePreviewOverlay();
+}
+
+CameraMode CameraTestWindow::selectedPreviewMode() const
 {
     const int index = modeCombo->currentIndex();
     if (index < 0 || index >= visibleModes.size())
         return CameraMode();
     return visibleModes.at(index);
+}
+
+CameraMode CameraTestWindow::selectedCaptureMode() const
+{
+    const int index = captureModeCombo->currentIndex();
+    if (index < 0 || index >= captureModes.size())
+        return CameraMode();
+    return captureModes.at(index);
 }
 
 QString CameraTestWindow::modeListSummary(const CameraCaps &caps) const
@@ -621,17 +1202,19 @@ QString CameraTestWindow::modeListSummary(const CameraCaps &caps) const
     for (const CameraFormat &format : caps.formats)
         formats << QStringLiteral("%1 %2").arg(format.fourcc, format.description);
 
-    QStringList modes;
+    QStringList previewModes;
+    QStringList captureModesText;
     for (const CameraMode &mode : caps.modes) {
-        if (isRgb565Mode(mode))
-            modes << mode.label();
-        if (modes.size() >= 6)
-            break;
+        if (isRgb565Mode(mode) && previewModes.size() < 3)
+            previewModes << mode.label();
+        if (isCaptureMode(mode) && captureModesText.size() < 5)
+            captureModesText << mode.label();
     }
 
     const QString formatText = formats.isEmpty() ? QStringLiteral("--") : formats.join(QStringLiteral(", "));
-    const QString modeText = modes.isEmpty() ? QStringLiteral("no RGB565") : modes.join(QStringLiteral(", "));
-    return QStringLiteral("%1 | modes: %2").arg(formatText, modeText);
+    const QString previewText = previewModes.isEmpty() ? QStringLiteral("no RGB565") : previewModes.join(QStringLiteral(", "));
+    const QString captureText = captureModesText.isEmpty() ? QStringLiteral("no RGB565/JPEG") : captureModesText.join(QStringLiteral(", "));
+    return QStringLiteral("%1 | preview: %2 | capture: %3").arg(formatText, previewText, captureText);
 }
 
 QString CameraTestWindow::controlSummary(const CameraCaps &caps) const

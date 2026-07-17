@@ -34,6 +34,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/v4l2-mediabus.h>
+#include <linux/workqueue.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
 
@@ -55,7 +56,9 @@
 #define OV5640_REG_PAD_SELECT00			0x301c
 #define OV5640_REG_SYSTEM_RESET00      0x3000
 #define OV5640_REG_SYSTEM_RESET01      0x3001
+#define OV5640_REG_SYSTEM_RESET02      0x3002
 #define OV5640_REG_CLOCK_ENABLE01      0x3005
+#define OV5640_REG_CLOCK_ENABLE02      0x3006
 #define OV5640_REG_SYSCLK_PLL_CTRL0     0x3034
 #define OV5640_REG_SYSCLK_PLL_CTRL1     0x3035
 #define OV5640_REG_SYSCLK_PLL_MULT      0x3036
@@ -104,6 +107,28 @@
 #define OV5640_REG_TIMING_VOFFSET       0x3813
 #define OV5640_REG_STREAM_CTRL          0x4202
 #define OV5640_REG_FORMAT_CONTROL00     0x4300
+#define OV5640_REG_JPEG_CTRL00          0x4400
+#define OV5640_REG_JPEG_CTRL01          0x4401
+#define OV5640_REG_JPEG_CTRL02          0x4402
+#define OV5640_REG_JPEG_CTRL03          0x4403
+#define OV5640_REG_JPEG_CTRL04          0x4404
+#define OV5640_REG_JPEG_CTRL05          0x4405
+#define OV5640_REG_JPEG_CTRL06          0x4406
+#define OV5640_REG_JPEG_CTRL07          0x4407
+#define OV5640_REG_JPEG_ISI_CTRL        0x4408
+#define OV5640_REG_JPEG_CTRL09          0x4409
+#define OV5640_REG_JPEG_CTRL0A          0x440a
+#define OV5640_REG_JPEG_CTRL0B          0x440b
+#define OV5640_REG_JPEG_CTRL0C          0x440c
+#define OV5640_REG_JPEG_COMMENT_LEN     0x4430
+#define OV5640_REG_JPEG_COMMENT_MARKER  0x4431
+#define OV5640_REG_VFIFO_CTRL00         0x4600
+#define OV5640_REG_VFIFO_HSIZE_H        0x4602
+#define OV5640_REG_VFIFO_VSIZE_H        0x4604
+#define OV5640_REG_VFIFO_CTRL0C         0x460c
+#define OV5640_REG_VFIFO_CTRL0D         0x460d
+#define OV5640_REG_DVP_JPEG_MODE        0x4713
+#define OV5640_REG_DVP_HREF_CTRL        0x471f
 #define OV5640_REG_FORMAT_MUX_CONTROL   0x501f
 #define OV5640_REG_PCLK_PERIOD           0x4837
 #define OV5640_REG_DVP_PCLK_DIVIDER      0x3824
@@ -118,6 +143,11 @@
 #define OV5640_REG_AVG_READOUT          0x56a1
 
 #define OV5640_TIMING_FLIP_MASK         0x06
+#define OV5640_TIMING_JPEG_ENABLE       0x20
+#define OV5640_RESET_JPEG_PATH_MASK     0x1c
+#define OV5640_CLOCK_JPEG_PATH_MASK     0x28
+#define OV5640_VFIFO_FIXED_HEIGHT       0x20
+#define OV5640_JPEG_MODE_2              0x02
 #define OV5640_BANDING_MANUAL_ENABLE    0x80
 #define OV5640_BANDING_MANUAL_50HZ      0x04
 
@@ -283,6 +313,13 @@ struct ov5640_af_state {
 	u32 touch_x_q16;
 	u32 touch_y_q16;
 	u8 zone_result;
+	struct work_struct work;
+	spinlock_t lock;
+	bool worker_active;
+	bool start_requested;
+	bool stop_requested;
+	int cached_status;
+	u8 cached_zone_result;
 };
 
 struct ov5640_ctrls {
@@ -325,6 +362,8 @@ struct ov5640 {
 };
 
 static void ov5640_af_invalidate(struct ov5640 *sensor);
+static int ov5640_af_request_stop(struct ov5640 *sensor);
+static void ov5640_af_work(struct work_struct *work);
 
 static const struct reg_value ov5640_global_init_setting[] = {
 	{0x3008, 0x42, 0, 0},
@@ -1208,6 +1247,7 @@ static const struct ov5640_datafmt ov5640_colour_fmts[] = {
 	{MEDIA_BUS_FMT_UYVY8_2X8, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_YUYV8_2X8, V4L2_COLORSPACE_SRGB},
 	{MEDIA_BUS_FMT_Y8_1X8, V4L2_COLORSPACE_SRGB},
+	{MEDIA_BUS_FMT_JPEG_1X8, V4L2_COLORSPACE_JPEG},
 };
 
 static inline struct ov5640 *sd_to_ov5640(struct v4l2_subdev *sd)
@@ -1347,7 +1387,8 @@ ov5640_find_nearest_mode(enum ov5640_frame_rate frame_rate, u32 width, u32 heigh
 		width_delta = mode_info->width > width ?
 			      mode_info->width - width : width - mode_info->width;
 		height_delta = mode_info->height > height ?
-			       mode_info->height - height : height - mode_info->height;
+			       mode_info->height - height :
+			       height - mode_info->height;
 		distance = width_delta + height_delta;
 
 		if (!best || distance < best_distance) {
@@ -1396,6 +1437,33 @@ ov5640_find_mode(u32 width, u32 height, bool nearest)
 	return best;
 }
 
+static bool ov5640_format_is_jpeg(u32 code)
+{
+	return code == MEDIA_BUS_FMT_JPEG_1X8;
+}
+
+static bool ov5640_jpeg_frame_size_supported(enum ov5640_frame_size frame_size)
+{
+	switch (frame_size) {
+	case ov5640_frame_size_VGA_640_480:
+	case ov5640_frame_size_800_480:
+	case ov5640_frame_size_720P_1280_720:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool ov5640_format_supports_frame_size(u32 code,
+					      enum ov5640_frame_size frame_size)
+{
+	if (!ov5640_find_datafmt(code))
+		return false;
+	if (!ov5640_format_is_jpeg(code))
+		return true;
+	return ov5640_jpeg_frame_size_supported(frame_size);
+}
+
 static inline bool ov5640_mode_supports_fps(enum ov5640_frame_size frame_size,
 					    enum ov5640_frame_rate frame_rate)
 {
@@ -1403,7 +1471,65 @@ static inline bool ov5640_mode_supports_fps(enum ov5640_frame_size frame_size,
 					 frame_rate) != NULL;
 }
 
-static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
+static bool ov5640_format_supports_mode_fps(u32 code,
+					   enum ov5640_frame_size frame_size,
+					   enum ov5640_frame_rate frame_rate)
+{
+	if (!ov5640_format_supports_frame_size(code, frame_size))
+		return false;
+	if (ov5640_format_is_jpeg(code) &&
+	    frame_rate != ov5640_15_fps && frame_rate != ov5640_30_fps)
+		return false;
+	return ov5640_mode_supports_fps(frame_size, frame_rate);
+}
+
+static const struct ov5640_mode_info *
+ov5640_find_mode_for_format(u32 code, u32 width, u32 height, bool nearest)
+{
+	const struct ov5640_mode_info *best = NULL;
+	u32 best_distance = ~0U;
+	int i;
+
+	if (!ov5640_find_datafmt(code))
+		return NULL;
+	if (!ov5640_format_is_jpeg(code))
+		return ov5640_find_mode(width, height, nearest);
+
+	for (i = 0; i < ARRAY_SIZE(ov5640_modes); i++) {
+		const struct ov5640_mode_info *mode_info = &ov5640_modes[i];
+		u32 width_delta;
+		u32 height_delta;
+		u32 distance;
+
+		if (!ov5640_mode_has_available_reg_table(mode_info))
+			continue;
+		if (!ov5640_format_supports_frame_size(code, mode_info->frame_size))
+			continue;
+
+		if (mode_info->width == width && mode_info->height == height)
+			return mode_info;
+
+		if (!nearest)
+			continue;
+
+		width_delta = mode_info->width > width ?
+			      mode_info->width - width : width - mode_info->width;
+		height_delta = mode_info->height > height ?
+			       mode_info->height - height :
+			       height - mode_info->height;
+		distance = width_delta + height_delta;
+
+		if (!best || distance < best_distance) {
+			best = mode_info;
+			best_distance = distance;
+		}
+	}
+
+	return best;
+}
+
+static int ov5640_enum_frame_rate_for_mode(u32 code,
+					   enum ov5640_frame_size frame_size,
 					   unsigned int index,
 					   enum ov5640_frame_rate *frame_rate)
 {
@@ -1414,7 +1540,7 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 		return -EINVAL;
 
 	for (i = ov5640_15_fps; i < ov5640_num_framerates; i++) {
-		if (!ov5640_mode_supports_fps(frame_size, i))
+		if (!ov5640_format_supports_mode_fps(code, frame_size, i))
 			continue;
 
 		if (count == index) {
@@ -1428,6 +1554,132 @@ static int ov5640_enum_frame_rate_for_mode(enum ov5640_frame_size frame_size,
 	return -EINVAL;
 }
 
+static int ov5640_disable_jpeg(struct ov5640 *sensor)
+{
+	int ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
+				     OV5640_TIMING_JPEG_ENABLE, 0);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYSTEM_RESET02,
+				     OV5640_RESET_JPEG_PATH_MASK,
+				     OV5640_RESET_JPEG_PATH_MASK);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_mod_reg(sensor, OV5640_REG_CLOCK_ENABLE02,
+			       OV5640_CLOCK_JPEG_PATH_MASK, 0);
+}
+
+static int ov5640_apply_jpeg_format(struct ov5640 *sensor)
+{
+	u16 width = sensor->state.mbus_fmt.width;
+	u16 height = sensor->state.mbus_fmt.height;
+	u16 vfifo_width;
+	int ret;
+
+	if (!width || !height || width > 0xffff / 2)
+		return -EINVAL;
+
+	vfifo_width = width * 2;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_MUX_CONTROL,
+				 OV5640_FORMAT_MUX_YUV422);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL00,
+				 OV5640_FORMAT_CTRL_YUYV);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYSTEM_RESET02,
+				     OV5640_RESET_JPEG_PATH_MASK, 0);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_CLOCK_ENABLE02,
+				     OV5640_CLOCK_JPEG_PATH_MASK,
+				     OV5640_CLOCK_JPEG_PATH_MASK);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_TIMING_TC_REG21,
+				     OV5640_TIMING_JPEG_ENABLE,
+				     OV5640_TIMING_JPEG_ENABLE);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL00, 0x81);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL01, 0x01);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL02, 0x10);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL03, 0x33);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL04, 0x24);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL05, 0x40);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL06, 0x40);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL07, 0x04);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_ISI_CTRL, 0x02);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL09, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0A, 0x4e);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0B, 0x16);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_CTRL0C, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_COMMENT_LEN, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_JPEG_COMMENT_MARKER, 0xfe);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL00,
+				 0x80 | OV5640_VFIFO_FIXED_HEIGHT);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_HSIZE_H,
+				  vfifo_width);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_VSIZE_H, height);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL0C, 0x20);
+	if (ret < 0)
+		return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_VFIFO_CTRL0D, 0x00);
+	if (ret < 0)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_DVP_JPEG_MODE,
+				 OV5640_JPEG_MODE_2);
+	if (ret < 0)
+		return ret;
+	return ov5640_write_reg(sensor, OV5640_REG_DVP_HREF_CTRL, 0x40);
+}
+
 static int ov5640_apply_format(struct ov5640 *sensor,
 			       const struct ov5640_datafmt *fmt)
 {
@@ -1435,6 +1687,13 @@ static int ov5640_apply_format(struct ov5640 *sensor,
 
 	if (!fmt)
 		return -EINVAL;
+
+	if (ov5640_format_is_jpeg(fmt->code))
+		return ov5640_apply_jpeg_format(sensor);
+
+	ret = ov5640_disable_jpeg(sensor);
+	if (ret < 0)
+		return ret;
 
 	switch (fmt->code) {
 	case MEDIA_BUS_FMT_UYVY8_2X8:
@@ -1485,12 +1744,19 @@ static void ov5640_init_default_state(struct ov5640 *sensor)
 	sensor->state.frame_size = ov5640_frame_size_800_480;
 	sensor->state.powered = false;
 	sensor->state.streaming = false;
+	spin_lock_init(&sensor->af.lock);
+	INIT_WORK(&sensor->af.work, ov5640_af_work);
 	sensor->af.firmware_loaded = false;
 	sensor->af.zone_pending = true;
 	sensor->af.zone_mode = OV5640_AF_ZONE_MODE_DEFAULT;
 	sensor->af.touch_x_q16 = 0;
 	sensor->af.touch_y_q16 = 0;
 	sensor->af.zone_result = 0;
+	sensor->af.worker_active = false;
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
 	sensor->state.prev_sysclk = 0;
 	sensor->state.prev_hts = 0;
 	sensor->state.ae_target = 52;
@@ -1559,6 +1825,8 @@ static int ov5640_set_stream(struct ov5640 *sensor, bool enable)
 #endif
 
 	sensor->state.streaming = enable;
+	if (!enable)
+		ov5640_af_request_stop(sensor);
 	if (enable) {
 		fps = DEFAULT_FPS;
 		if (ov5640_frame_rate_valid(sensor->state.frame_rate))
@@ -1736,11 +2004,96 @@ static bool ov5640_af_status_is_focusing(u8 status)
 	return status <= 0x0f || (status >= 0x80 && status <= 0x8f);
 }
 
+static void ov5640_af_set_cached(struct ov5640 *sensor, int status, u8 zone_result)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.cached_status = status;
+	sensor->af.cached_zone_result = zone_result;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+}
+
 static void ov5640_af_invalidate(struct ov5640 *sensor)
 {
+	unsigned long flags;
+
 	sensor->af.firmware_loaded = false;
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+}
+
+static void ov5640_af_schedule_if_idle(struct ov5640 *sensor, bool *schedule)
+{
+	if (!sensor->af.worker_active) {
+		sensor->af.worker_active = true;
+		*schedule = true;
+	}
+}
+
+static int ov5640_af_request_start_locked(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool schedule = false;
+
+	if (!sensor->state.powered || !sensor->state.streaming)
+		return -EPIPE;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	if (sensor->af.cached_status & V4L2_AUTO_FOCUS_STATUS_BUSY) {
+		spin_unlock_irqrestore(&sensor->af.lock, flags);
+		return 0;
+	}
+
+	sensor->af.start_requested = true;
+	sensor->af.stop_requested = false;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+	sensor->af.cached_zone_result = 0;
+	ov5640_af_schedule_if_idle(sensor, &schedule);
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	if (schedule)
+		schedule_work(&sensor->af.work);
+	return 0;
+}
+
+static int ov5640_af_request_stop(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool schedule = false;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	sensor->af.start_requested = false;
+	sensor->af.stop_requested = true;
+	sensor->af.cached_status = V4L2_AUTO_FOCUS_STATUS_IDLE;
+	sensor->af.cached_zone_result = 0;
+	ov5640_af_schedule_if_idle(sensor, &schedule);
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	if (schedule)
+		schedule_work(&sensor->af.work);
+	return 0;
+}
+
+static bool ov5640_af_consume_stop(struct ov5640 *sensor)
+{
+	unsigned long flags;
+	bool stop;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	stop = sensor->af.stop_requested;
+	if (stop)
+		sensor->af.stop_requested = false;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+	return stop;
 }
 
 static int ov5640_af_wait_status(struct ov5640 *sensor, u8 expected,
@@ -1972,28 +2325,16 @@ static int ov5640_af_note_zone_change(struct ov5640 *sensor)
 {
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
-
-	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
-		return 0;
-
-	return ov5640_af_apply_zone(sensor);
+	ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+	return 0;
 }
 
 static int ov5640_af_note_mode_change(struct ov5640 *sensor)
 {
-	int ret;
-
 	sensor->af.zone_pending = true;
 	sensor->af.zone_result = 0;
-
-	if (!sensor->af.firmware_loaded || !sensor->state.streaming)
-		return 0;
-
-	ret = ov5640_af_command(sensor, OV5640_AF_CMD_RELAUNCH_ZONE, NULL, 0);
-	if (ret < 0)
-		return ret;
-
-	return ov5640_af_apply_zone(sensor);
+	ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+	return 0;
 }
 
 static int ov5640_af_get_focus_result(struct ov5640 *sensor)
@@ -2065,7 +2406,7 @@ static int ov5640_af_stop(struct ov5640 *sensor)
 	return 0;
 }
 
-static int ov5640_af_get_status(struct ov5640 *sensor, int *status)
+static int ov5640_af_poll_status(struct ov5640 *sensor, int *status)
 {
 	u8 fw_status;
 	int ret;
@@ -2105,13 +2446,125 @@ static int ov5640_af_get_status(struct ov5640 *sensor, int *status)
 	return 0;
 }
 
+static int ov5640_af_get_cached_status(struct ov5640 *sensor, int *status)
+{
+	unsigned long flags;
+
+	if (!status)
+		return -EINVAL;
+
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	*status = sensor->af.cached_status;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
+	return 0;
+}
+
 static int ov5640_af_get_zone_result(struct ov5640 *sensor, int *result)
 {
+	unsigned long flags;
+
 	if (!result)
 		return -EINVAL;
 
-	*result = sensor->af.zone_result;
+	spin_lock_irqsave(&sensor->af.lock, flags);
+	*result = sensor->af.cached_zone_result;
+	spin_unlock_irqrestore(&sensor->af.lock, flags);
 	return 0;
+}
+
+static void ov5640_af_work(struct work_struct *work)
+{
+	struct ov5640 *sensor = container_of(work, struct ov5640, af.work);
+	bool start;
+	bool stop;
+	unsigned long flags;
+
+	for (;;) {
+		spin_lock_irqsave(&sensor->af.lock, flags);
+		start = sensor->af.start_requested;
+		stop = sensor->af.stop_requested;
+		sensor->af.start_requested = false;
+		sensor->af.stop_requested = false;
+		if (!start && !stop) {
+			sensor->af.worker_active = false;
+			spin_unlock_irqrestore(&sensor->af.lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&sensor->af.lock, flags);
+
+		if (stop) {
+			int ret;
+
+			mutex_lock(&sensor->lock);
+			ret = ov5640_af_stop(sensor);
+			mutex_unlock(&sensor->lock);
+			if (ret < 0)
+				dev_warn(sensor->dev, "AF stop failed: %d\n", ret);
+			ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+			continue;
+		}
+
+		if (start) {
+			unsigned long deadline;
+			int status = V4L2_AUTO_FOCUS_STATUS_BUSY;
+			u8 zone_result = 0;
+			int ret;
+
+			mutex_lock(&sensor->lock);
+			if (!sensor->state.powered || !sensor->state.streaming)
+				ret = -EPIPE;
+			else
+				ret = ov5640_af_start(sensor);
+			mutex_unlock(&sensor->lock);
+			if (ret < 0) {
+				dev_warn(sensor->dev, "AF start failed: %d\n", ret);
+				ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+				continue;
+			}
+
+			deadline = jiffies + msecs_to_jiffies(5000);
+			ov5640_af_set_cached(sensor, status, zone_result);
+			for (;;) {
+				if (ov5640_af_consume_stop(sensor)) {
+					mutex_lock(&sensor->lock);
+					ret = ov5640_af_stop(sensor);
+					mutex_unlock(&sensor->lock);
+					if (ret < 0)
+						dev_warn(sensor->dev, "AF stop failed: %d\n", ret);
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_IDLE, 0);
+					break;
+				}
+
+				msleep(100);
+				mutex_lock(&sensor->lock);
+				ret = ov5640_af_poll_status(sensor, &status);
+				zone_result = sensor->af.zone_result;
+				mutex_unlock(&sensor->lock);
+				if (ret < 0) {
+					dev_warn(sensor->dev, "AF status failed: %d\n", ret);
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+					break;
+				}
+
+				ov5640_af_set_cached(sensor, status, zone_result);
+				if (status & (V4L2_AUTO_FOCUS_STATUS_REACHED |
+					      V4L2_AUTO_FOCUS_STATUS_FAILED))
+					break;
+
+				if (time_after_eq(jiffies, deadline)) {
+					mutex_lock(&sensor->lock);
+					ret = ov5640_af_stop(sensor);
+					mutex_unlock(&sensor->lock);
+					if (ret < 0)
+						dev_warn(sensor->dev, "AF timeout stop failed: %d\n", ret);
+					else
+						dev_warn(sensor->dev, "AF timeout\n");
+					ov5640_af_set_cached(sensor, V4L2_AUTO_FOCUS_STATUS_FAILED, 0);
+					break;
+				}
+			}
+		}
+	}
 }
 
 static void ov5640_af_update_touch_x(struct ov5640 *sensor, u32 x)
@@ -2257,16 +2710,34 @@ static int ov5640_set_strobe_mode(struct ov5640 *sensor)
 
 static int ov5640_set_strobe_request(struct ov5640 *sensor)
 {
+	u8 ctrl;
+	int ret;
+
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return 0;
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+				      ctrl | OV5640_STROBE_REQUEST_ON);
 }
 
 static int ov5640_set_strobe_stop(struct ov5640 *sensor)
 {
+	u8 ctrl;
+	int ret;
+
 	if (sensor->ctrls.strobe_mode->val != V4L2_FLASH_LED_MODE_FLASH)
 		return -EINVAL;
-	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL, 0x00);
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_STROBE_CTRL, &ctrl);
+	if (ret < 0)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_STROBE_CTRL,
+				      ctrl & ~OV5640_STROBE_REQUEST_ON);
 }
 
 static int ov5640_apply_controls(struct ov5640 *sensor)
@@ -2300,6 +2771,9 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 		container_of(ctrl->handler, struct ov5640, ctrls.ctrl_handler);
 	int ret = 0;
 
+	if (ctrl->id == V4L2_CID_AUTO_FOCUS_STOP)
+		return ov5640_af_request_stop(sensor);
+
 	mutex_lock(&sensor->lock);
 
 	switch (ctrl->id) {
@@ -2316,14 +2790,10 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 		ret = ov5640_af_note_zone_change(sensor);
 		goto out;
 	case V4L2_CID_AUTO_FOCUS_STOP:
-		ret = ov5640_af_stop(sensor);
+		ret = ov5640_af_request_stop(sensor);
 		goto out;
 	case V4L2_CID_AUTO_FOCUS_START:
-		if (!sensor->state.powered) {
-			ret = -EPIPE;
-			goto out;
-		}
-		ret = ov5640_af_start(sensor);
+		ret = ov5640_af_request_start_locked(sensor);
 		goto out;
 	default:
 		break;
@@ -2371,10 +2841,9 @@ static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	int value = 0;
 	int ret = 0;
 
-	mutex_lock(&sensor->lock);
 	switch (ctrl->id) {
 	case V4L2_CID_AUTO_FOCUS_STATUS:
-		ret = ov5640_af_get_status(sensor, &value);
+		ret = ov5640_af_get_cached_status(sensor, &value);
 		if (ret == 0)
 			ctrl->val = value;
 		break;
@@ -2387,7 +2856,6 @@ static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 		ret = -EINVAL;
 		break;
 	}
-	mutex_unlock(&sensor->lock);
 	return ret;
 }
 
@@ -3358,7 +3826,6 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 	struct ov5640 *sensor = sd_to_ov5640(sd);
 	struct v4l2_captureparm *cparm = &a->parm.capture;
 	struct v4l2_fract *timeperframe = &cparm->timeperframe;
-	const struct ov5640_mode_info *mode_info;
 	const struct ov5640_datafmt *fmt;
 	u32 tgt_fps;
 	enum ov5640_frame_rate frame_rate;
@@ -3397,8 +3864,9 @@ static int ov5640_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
 
 		mutex_lock(&sensor->lock);
 
-		mode_info = ov5640_get_mode_info(sensor->state.frame_size);
-		if (!ov5640_get_mode_reg_table(mode_info, frame_rate)) {
+		if (!ov5640_format_supports_mode_fps(sensor->state.mbus_fmt.code,
+					      sensor->state.frame_size,
+					      frame_rate)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
@@ -3480,7 +3948,8 @@ static int ov5640_try_fmt(struct v4l2_subdev *sd,
 	if (!fmt)
 		fmt = &ov5640_colour_fmts[0];
 
-	mode_info = ov5640_find_mode(mf->width, mf->height, true);
+	mode_info = ov5640_find_mode_for_format(fmt->code, mf->width,
+					mf->height, true);
 	if (!mode_info)
 		return -EINVAL;
 
@@ -3519,14 +3988,20 @@ static int ov5640_s_fmt(struct v4l2_subdev *sd,
 		return retval;
 
 	fmt = ov5640_find_datafmt(mf->code);
-	mode_info = ov5640_find_mode(mf->width, mf->height, false);
-	if (!fmt || !mode_info)
+	if (!fmt)
+		return -EINVAL;
+
+	mode_info = ov5640_find_mode_for_format(fmt->code, mf->width,
+				mf->height, false);
+	if (!mode_info)
 		return -EINVAL;
 
 	frame_rate = sensor->state.frame_rate;
-	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+	if (!ov5640_format_supports_mode_fps(fmt->code, mode_info->frame_size,
+					      frame_rate))
 		frame_rate = mode_info->default_fps;
-	if (!ov5640_get_mode_reg_table(mode_info, frame_rate))
+	if (!ov5640_format_supports_mode_fps(fmt->code, mode_info->frame_size,
+					      frame_rate))
 		return -EINVAL;
 
 	mutex_lock(&sensor->lock);
@@ -3633,6 +4108,9 @@ static int ov5640_enum_framesizes(struct v4l2_subdev *sd,
 
 		if (!ov5640_mode_has_available_reg_table(mode_info))
 			continue;
+		if (!ov5640_format_supports_frame_size(fse->code,
+						       mode_info->frame_size))
+			continue;
 
 		if (count++ != fse->index)
 			continue;
@@ -3672,11 +4150,12 @@ static int ov5640_enum_frameintervals(struct v4l2_subdev *sd,
 	if (!ov5640_find_datafmt(fie->code))
 		return -EINVAL;
 
-	mode_info = ov5640_find_mode(fie->width, fie->height, false);
+	mode_info = ov5640_find_mode_for_format(fie->code, fie->width,
+					fie->height, false);
 	if (!mode_info)
 		return -EINVAL;
 
-	ret = ov5640_enum_frame_rate_for_mode(mode_info->frame_size,
+	ret = ov5640_enum_frame_rate_for_mode(fie->code, mode_info->frame_size,
 					       fie->index, &frame_rate);
 	if (ret < 0)
 		return ret;
@@ -3967,6 +4446,7 @@ static int ov5640_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ov5640 *sensor = i2c_to_ov5640(client);
 
+	cancel_work_sync(&sensor->af.work);
 	pm_runtime_disable(&client->dev);
 
 	v4l2_async_unregister_subdev(sd);

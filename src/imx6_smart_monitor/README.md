@@ -1,36 +1,46 @@
-# i.MX6 Smart Monitor Skeleton
+# i.MX6 Smart Monitor
 
-本目录是 `docs/smart-monitor-project-architecture.md` 对应的第一版项目骨架。
-当前实现一个综合 Qt launcher 和各模块测试 app。综合入口用于像手机主页一样打开、返回各测试页；独立测试程序仍保留，便于单模块调试。
+本目录实现面向 i.MX6ULL 板端的 Qt 触摸屏监控与硬件测试程序。当前形态是一个综合 launcher 加若干独立测试 app：launcher 负责页面入口和返回，各测试页分别封装触摸、IIO 传感器、LD2410、OV5640 camera、存储和核心状态机验证。
 
-## 目录
+Camera Test 已覆盖 RGB565 预览/截图/录制路径，并新增 OV5640 sensor JPEG 采集路径。预览菜单只使用 RGB565；Snapshot/Record 可在 Capture 菜单独立选择 RGB565 或 JPEG。预览打开时执行 JPEG 采集会临时切到 JPEG，保存 sensor 输出的 JPEG bytes 后再恢复 RGB565 预览。
 
-| 路径 | 作用 |
+## 目录概览
+
+| 路径 | 内容 |
 | --- | --- |
-| `include/imx6smartmonitor/` | 公共数据类型。 |
-| `camera/` | OV5640/V4L2 轻量探测封装。 |
-| `sensors/` | AP3216C、LD2410C 和 SensorHub 入口占位。 |
+| `include/imx6smartmonitor/` | 公共类型和枚举。 |
+| `common/` | 公共类型实现。 |
+| `camera/` | V4L2 camera 封装、MMAP streaming、snapshot/record worker。 |
+| `sensors/` | AP3216C、LD2410C 等传感器访问封装。 |
+| `storage/` | `/smart-monitor` session、latest、index 文件管理。 |
 | `core/` | MonitorCore 状态机骨架。 |
-| `storage/` | NFS/session 存储检查骨架。 |
-| `qt/common/` | Qt 模块测试 app 共用窗口和启动逻辑。 |
-| `qt/apps/launcher/` | 综合测试 launcher，点击打开各模块测试页，页内 Home 返回主页。 |
-| `qt/apps/*_test/` | 各模块独立测试 app，同时提供 launcher 复用的测试窗口。 |
+| `qt/common/` | Qt 测试窗口和 app runner 复用层。 |
+| `qt/apps/launcher/` | 综合入口 `imx6-smart-monitor`。 |
+| `qt/apps/*_test/` | 可独立运行、也可被 launcher 复用的模块测试页。 |
+| `docs/` | 模块细节文档和验证记录。 |
 
-## Qt app
+## 程序入口
 
-| 程序 | 测试对象 |
+| 程序 | 作用 |
 | --- | --- |
-| `imx6-smart-monitor` | 综合 launcher，单进程打开/返回各模块测试页。 |
-| `imx6-sm-touch-test` | Qt input/touch 事件链路。 |
+| `imx6-smart-monitor` | 综合 launcher。 |
+| `imx6-sm-touch-test` | 触摸 input/Qt 事件链路测试。 |
 | `imx6-sm-ap3216c-test` | AP3216C IIO sysfs 扫描和采样。 |
-| `imx6-sm-ld2410-test` | LD2410C OUT/input 和 UART 节点探测。 |
-| `imx6-sm-camera-test` | `/dev/videoX` V4L2 capability 和 format 枚举。 |
-| `imx6-sm-storage-test` | `<nfs-dir>/smart-monitor` 可写性和 session 文件骨架。 |
-| `imx6-sm-core-test` | MonitorCore presence/light/storage 决策骨架。 |
+| `imx6-sm-ld2410-test` | LD2410C OUT/input 与 UART 节点探测。 |
+| `imx6-sm-camera-test` | OV5640 V4L2 枚举、RGB565 预览、RGB565/JPEG snapshot、record。 |
+| `imx6-sm-storage-test` | `/smart-monitor` 可写性与 session 文件测试。 |
+| `imx6-sm-core-test` | MonitorCore presence/light/storage 决策骨架测试。 |
 
-## 构建
+## docs 索引
 
-板端 Buildroot 包：
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/camera-test-performance-notes.md`](docs/camera-test-performance-notes.md) | Camera Test RGB565/JPEG 采集性能、验证命令、已知限制。 |
+| [`docs/camera-data-flow-and-format-path.md`](docs/camera-data-flow-and-format-path.md) | OV5640 后的数据流、RGB565/JPEG 格式转换、buffer 与 SOI/EOI 裁剪语义。 |
+
+## 构建与运行
+
+Buildroot 包构建和部署：
 
 ```bash
 NFS_DIR=<nfs-dir> bash buildscripts/build_and_deploy.sh drv imx6-smart-monitor
@@ -45,24 +55,15 @@ make -j$(nproc)
 file bin/imx6-smart-monitor bin/imx6-sm-*-test
 ```
 
-主机离板 Qt 预览需要安装桌面 Qt5，再用主机 `qmake` 生成 x86 程序。
-
 板端运行示例：
 
 ```bash
 QT_QPA_PLATFORM=linuxfb imx6-smart-monitor
-QT_QPA_PLATFORM=linuxfb imx6-sm-touch-test
-QT_QPA_PLATFORM=linuxfb imx6-sm-ap3216c-test
-QT_QPA_PLATFORM=linuxfb imx6-sm-ld2410-test
 QT_QPA_PLATFORM=linuxfb imx6-sm-camera-test
-QT_QPA_PLATFORM=linuxfb imx6-sm-storage-test
-QT_QPA_PLATFORM=linuxfb imx6-sm-core-test
 ```
 
 ## 边界
 
-- Qt 测试页只通过对应模块封装访问设备节点。
-- 综合 launcher 只负责页面入口和返回，不复制 V4L2/IIO/UART/Storage 逻辑。
-- 完整智能监控业务页、回放页和完整 camera streaming 本次不实现。
-- Camera 测试 app 当前只做 V4L2 capability 和 format 枚举；MMAP streaming 后续进入 Camera SDK。
-- Storage 测试 app 默认写 `/tmp/smart-monitor`，板端验证 NFS 时请改成 `<nfs-dir>/smart-monitor`。
+- 各测试页只通过对应模块封装访问设备节点；launcher 不复制 V4L2/IIO/UART/Storage 逻辑。
+- Camera Test 的 JPEG 第一阶段不提供 quality UI，不做 RGB565/JPEG 双路并行采集。
+- Storage 默认写 `/smart-monitor`，在 NFS root 模式下可从 `<nfs-dir>/smart-monitor` 查看 session 产物。

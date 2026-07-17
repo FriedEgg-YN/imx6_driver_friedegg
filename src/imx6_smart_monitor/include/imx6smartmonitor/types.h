@@ -45,7 +45,7 @@ struct MonitorPolicy {
     int presenceStartConfirmMs = 300;
     int presenceEndCooldownMs = 15000;
     int snapshotIntervalMs = 1000;
-    QString storageRoot = QStringLiteral("/tmp/smart-monitor");
+    QString storageRoot = QStringLiteral("/smart-monitor");
 };
 
 enum class PresenceState {
