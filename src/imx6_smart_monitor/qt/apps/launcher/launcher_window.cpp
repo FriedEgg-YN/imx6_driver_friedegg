@@ -1,5 +1,6 @@
 #include "launcher_window.h"
 
+#include "smart_monitor_page.h"
 #include "qt/apps/ap3216c_test/ap3216c_test_window.h"
 #include "qt/apps/camera_test/camera_test_window.h"
 #include "qt/apps/core_test/core_test_window.h"
@@ -53,11 +54,12 @@ static QIcon appIcon(const QString &tag, const QColor &color)
     return QIcon(pixmap);
 }
 
-
 SmartMonitorLauncher::SmartMonitorLauncher(QWidget *parent)
     : QWidget(parent)
     , stack(new QStackedWidget(this))
+    , monitorPage(new SmartMonitorPage(this))
     , homePage(nullptr)
+    , playbackPage(new PlaybackPage(this))
 {
     setMinimumSize(480, 272);
     setWindowTitle(QStringLiteral("i.MX6 Smart Monitor"));
@@ -75,12 +77,19 @@ SmartMonitorLauncher::SmartMonitorLauncher(QWidget *parent)
         "QPushButton#quitButton:pressed{background:#253847;}"));
 
     homePage = createHomePage();
+    stack->addWidget(monitorPage);
     stack->addWidget(homePage);
+    stack->addWidget(playbackPage);
+
+    connect(monitorPage, &SmartMonitorPage::toolsRequested, this, &SmartMonitorLauncher::showHome);
+    connect(monitorPage, &SmartMonitorPage::playbackRequested, this, &SmartMonitorLauncher::showPlayback);
+    connect(playbackPage, &PlaybackPage::backRequested, this, &SmartMonitorLauncher::showMonitor);
 
     QVBoxLayout *layout = new QVBoxLayout;
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(stack);
     setLayout(layout);
+    showMonitor();
 }
 
 QWidget *SmartMonitorLauncher::createHomePage()
@@ -95,6 +104,10 @@ QWidget *SmartMonitorLauncher::createHomePage()
     QLabel *brand = new QLabel(QStringLiteral("i.MX6ULL"), statusBar);
     brand->setObjectName(QStringLiteral("brandLabel"));
 
+    QPushButton *monitor = new QPushButton(QStringLiteral("Monitor"), statusBar);
+    monitor->setObjectName(QStringLiteral("quitButton"));
+    connect(monitor, &QPushButton::clicked, this, &SmartMonitorLauncher::showMonitor);
+
     QPushButton *quit = new QPushButton(QStringLiteral("Exit"), statusBar);
     quit->setObjectName(QStringLiteral("quitButton"));
     connect(quit, &QPushButton::clicked, qApp, &QApplication::quit);
@@ -103,9 +116,10 @@ QWidget *SmartMonitorLauncher::createHomePage()
     statusLayout->setContentsMargins(14, 0, 14, 0);
     statusLayout->addWidget(brand);
     statusLayout->addStretch();
+    statusLayout->addWidget(monitor);
     statusLayout->addWidget(quit);
 
-    QLabel *title = new QLabel(QStringLiteral("Smart Monitor"), page);
+    QLabel *title = new QLabel(QStringLiteral("Tools"), page);
     title->setObjectName(QStringLiteral("title"));
     title->setAlignment(Qt::AlignHCenter);
 
@@ -166,12 +180,34 @@ void SmartMonitorLauncher::openApp(const AppEntry &entry)
     showHome();
 
     ModuleTestWindow *page = entry.factory();
-    QPushButton *back = page->addHeaderButton(QStringLiteral("Home"));
+    QPushButton *back = page->addHeaderButton(QStringLiteral("Tools"));
     connect(back, &QPushButton::clicked, this, [this]() { showHome(); });
 
     currentAppPage = page;
     stack->addWidget(currentAppPage);
     stack->setCurrentWidget(currentAppPage);
+}
+
+void SmartMonitorLauncher::showMonitor()
+{
+    if (currentAppPage) {
+        QWidget *oldPage = currentAppPage;
+        currentAppPage = nullptr;
+        stack->removeWidget(oldPage);
+        oldPage->deleteLater();
+    }
+    stack->setCurrentWidget(monitorPage);
+}
+
+void SmartMonitorLauncher::showPlayback()
+{
+    if (currentAppPage) {
+        QWidget *oldPage = currentAppPage;
+        currentAppPage = nullptr;
+        stack->removeWidget(oldPage);
+        oldPage->deleteLater();
+    }
+    stack->setCurrentWidget(playbackPage);
 }
 
 void SmartMonitorLauncher::showHome()

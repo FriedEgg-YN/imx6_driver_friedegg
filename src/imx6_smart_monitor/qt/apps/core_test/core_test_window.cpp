@@ -7,13 +7,19 @@ namespace imx6sm {
 
 CoreTestWindow::CoreTestWindow(QWidget *parent)
     : ModuleTestWindow(QStringLiteral("MonitorCore Test"), parent)
+    , monitoringLabel(addRow(QStringLiteral("Monitoring")))
     , presenceLabel(addRow(QStringLiteral("Presence")))
     , lightLabel(addRow(QStringLiteral("Light")))
     , cameraLabel(addRow(QStringLiteral("Camera")))
     , storageLabel(addRow(QStringLiteral("Storage")))
     , torchLabel(addRow(QStringLiteral("Torch")))
+    , wantedLabel(addRow(QStringLiteral("Wanted")))
+    , sessionLabel(addRow(QStringLiteral("Session")))
+    , errorLabel(addRow(QStringLiteral("Error")))
     , actionLabel(addRow(QStringLiteral("Action")))
 {
+    QPushButton *start = addButton(QStringLiteral("Start"));
+    QPushButton *stop = addButton(QStringLiteral("Stop"));
     QPushButton *person = addButton(QStringLiteral("Person"));
     QPushButton *confirm = addButton(QStringLiteral("Confirm"));
     QPushButton *noPerson = addButton(QStringLiteral("No Person"));
@@ -22,6 +28,14 @@ CoreTestWindow::CoreTestWindow(QWidget *parent)
     QPushButton *bright = addButton(QStringLiteral("Bright"));
     QPushButton *reset = addButton(QStringLiteral("Reset"));
 
+    connect(start, &QPushButton::clicked, this, [this]() {
+        core.startMonitoring();
+        refresh();
+    });
+    connect(stop, &QPushButton::clicked, this, [this]() {
+        core.stopMonitoring();
+        refresh();
+    });
     connect(person, &QPushButton::clicked, this, [this]() {
         core.handlePresence(true);
         refresh();
@@ -48,20 +62,26 @@ CoreTestWindow::CoreTestWindow(QWidget *parent)
     });
     connect(reset, &QPushButton::clicked, this, [this]() {
         core.reset();
+        core.startMonitoring();
         refresh();
     });
 
+    core.startMonitoring();
     refresh();
 }
 
 void CoreTestWindow::refresh()
 {
     const MonitorSnapshot state = core.snapshot();
+    monitoringLabel->setText(state.monitoringEnabled ? QStringLiteral("enabled") : QStringLiteral("disabled"));
     presenceLabel->setText(toString(state.presence));
     lightLabel->setText(toString(state.light));
     cameraLabel->setText(toString(state.camera));
     storageLabel->setText(toString(state.storage));
     torchLabel->setText(state.torchWanted ? QStringLiteral("on") : QStringLiteral("off"));
+    wantedLabel->setText(QStringLiteral("camera:%1 torch:%2").arg(state.cameraWanted ? QStringLiteral("yes") : QStringLiteral("no"), state.torchWanted ? QStringLiteral("yes") : QStringLiteral("no")));
+    sessionLabel->setText(state.sessionId.isEmpty() ? QStringLiteral("--") : state.sessionId);
+    errorLabel->setText((state.cameraError + QStringLiteral(" ") + state.storageError).trimmed().isEmpty() ? QStringLiteral("--") : (state.cameraError + QStringLiteral(" ") + state.storageError).trimmed());
     actionLabel->setText(state.lastAction.isEmpty() ? QStringLiteral("--") : state.lastAction);
     setStatus(toString(state.presence));
 }

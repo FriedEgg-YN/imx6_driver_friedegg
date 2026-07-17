@@ -15,11 +15,15 @@ public:
 private:
     void refresh();
 
+    QLabel *monitoringLabel;
     QLabel *presenceLabel;
     QLabel *lightLabel;
     QLabel *cameraLabel;
     QLabel *storageLabel;
     QLabel *torchLabel;
+    QLabel *wantedLabel;
+    QLabel *sessionLabel;
+    QLabel *errorLabel;
     QLabel *actionLabel;
     MonitorCore core;
 };
