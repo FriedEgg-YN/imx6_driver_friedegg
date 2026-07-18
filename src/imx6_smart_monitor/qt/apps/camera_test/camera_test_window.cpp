@@ -184,7 +184,6 @@ CameraTestWindow::CameraTestWindow(QWidget *parent)
     , pendingCaptureAction(PendingCaptureAction::None)
     , selectedStrobeMode(StrobeMode::None)
     , strobeStatusText(QStringLiteral("off"))
-    , captureSequence(0)
     , recordingUiActive(false)
     , flashSnapshotActive(false)
     , restorePreviewAfterCapture(false)
@@ -450,19 +449,14 @@ void CameraTestWindow::handleStrobeStatus(const QString &status)
     strobeLabel->setText(strobeStatusText);
 
     if (flashSnapshotActive && status == QStringLiteral("flash triggered")) {
-        QString error;
         if (camera.requestSnapshot(flashSnapshotPath, 3) != CameraDevice::ActionResult::Ok) {
             snapshotLabel->setText(QStringLiteral("failed: flash snapshot request rejected"));
             appendCaptureEvent(QStringLiteral("flash_snapshot_failed"), flashSnapshotRelativePath, QStringLiteral("request rejected"));
-            if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, &error) && !error.isEmpty())
-                appendLog(QStringLiteral("latest status write failed: %1").arg(error));
             finishFlashSnapshotStrobe();
             restorePreviewModeIfNeeded();
         } else {
             snapshotLabel->setText(QStringLiteral("flash: waiting %1").arg(flashSnapshotRelativePath));
             appendCaptureEvent(QStringLiteral("flash_snapshot_triggered"), flashSnapshotRelativePath, QStringLiteral("waiting third frame"));
-            if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_flash_waiting"), flashSnapshotRelativePath, &error) && !error.isEmpty())
-                appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         }
     }
 
@@ -491,10 +485,10 @@ void CameraTestWindow::takeSnapshot()
         return;
     }
 
-    if (!ensureCaptureSession(captureMode))
+    if (!ensureCaptureRoot())
         return;
 
-    const CameraTestPathResult path = storage.makeCameraSnapshotPath(captureSession);
+    const StoragePathResult path = storage.makeFramePath(captureRootPath, QStringLiteral("snapshot"));
     if (!path.ok) {
         snapshotLabel->setText(QStringLiteral("failed: %1").arg(path.error));
         appendLog(QStringLiteral("snapshot path failed: %1").arg(path.error));
@@ -533,10 +527,10 @@ void CameraTestWindow::startRecording()
         return;
     }
 
-    if (!ensureCaptureSession(captureMode))
+    if (!ensureCaptureRoot())
         return;
 
-    const CameraTestPathResult path = storage.makeCameraRecordingPath(captureSession);
+    const StoragePathResult path = storage.makeVideoPath(captureRootPath, QStringLiteral("recording"));
     if (!path.ok) {
         recordingLabel->setText(QStringLiteral("failed: %1").arg(path.error));
         appendLog(QStringLiteral("recording path failed: %1").arg(path.error));
@@ -894,8 +888,6 @@ void CameraTestWindow::requestSnapshotNow(const QString &path, const QString &re
         updatePreviewOverlay();
         return;
     }
-
-    QString error;
     if (camera.requestSnapshot(path, 1) != CameraDevice::ActionResult::Ok) {
         snapshotLabel->setText(QStringLiteral("failed: request rejected"));
         appendLog(QStringLiteral("snapshot request rejected"));
@@ -904,8 +896,6 @@ void CameraTestWindow::requestSnapshotNow(const QString &path, const QString &re
     }
 
     appendCaptureEvent(QStringLiteral("snapshot_requested"), relativePath, QStringLiteral("waiting next frame"));
-    if (!storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_waiting"), relativePath, &error) && !error.isEmpty())
-        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
     snapshotLabel->setText(QStringLiteral("waiting: %1").arg(relativePath));
     updateButtons();
     updatePreviewOverlay();
@@ -913,8 +903,7 @@ void CameraTestWindow::requestSnapshotNow(const QString &path, const QString &re
 
 void CameraTestWindow::requestRecordingNow(const QString &path, const QString &relativePath)
 {
-    QString error;
-    if (camera.startRecording(path) != CameraDevice::ActionResult::Ok) {
+    if (camera.startRecording(path, 5000) != CameraDevice::ActionResult::Ok) {
         recordingLabel->setText(QStringLiteral("failed: request rejected"));
         appendLog(QStringLiteral("recording request rejected"));
         restorePreviewModeIfNeeded();
@@ -923,8 +912,6 @@ void CameraTestWindow::requestRecordingNow(const QString &path, const QString &r
 
     recordingUiActive = true;
     appendCaptureEvent(QStringLiteral("recording_requested"), relativePath, QStringLiteral("requested"));
-    if (!storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saving"), relativePath, &error) && !error.isEmpty())
-        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
     recordingLabel->setText(QStringLiteral("recording: %1").arg(relativePath));
     updateButtons();
     updatePreviewOverlay();
@@ -957,9 +944,9 @@ void CameraTestWindow::restorePreviewModeIfNeeded()
 
 QString CameraTestWindow::captureRelativePath(const QString &absolutePath) const
 {
-    if (!captureSession.ok || absolutePath.isEmpty())
+    if (captureRootPath.isEmpty() || absolutePath.isEmpty())
         return absolutePath;
-    return QDir(captureSession.sessionPath).relativeFilePath(absolutePath);
+    return QDir(captureRootPath).relativeFilePath(absolutePath);
 }
 
 QString CameraTestWindow::savedPathFromStatus(const QString &status) const
@@ -967,55 +954,41 @@ QString CameraTestWindow::savedPathFromStatus(const QString &status) const
     return statusPathFromText(status);
 }
 
-bool CameraTestWindow::ensureCaptureSession(const CameraMode &mode)
+bool CameraTestWindow::ensureCaptureRoot()
 {
     const QString root = saveRootEdit->text().trimmed().isEmpty()
         ? QStringLiteral("/smart-monitor")
         : saveRootEdit->text().trimmed();
-    const QString device = pathEdit->text().trimmed();
 
-    if (!isCaptureMode(mode)) {
-        appendLog(QStringLiteral("capture session failed: invalid capture mode"));
-        return false;
-    }
-
-    if (captureSession.ok && captureSession.rootPath == root && captureSession.devicePath == device &&
-        sameUiMode(captureSession.mode, mode)) {
+    if (!captureRootPath.isEmpty() && QDir(captureRootPath).absolutePath() == QDir(root).absolutePath())
         return true;
-    }
 
-    captureSession = storage.openCameraTestSession(root, device, mode);
-    captureSequence = 0;
-    if (!captureSession.ok) {
-        appendLog(QStringLiteral("capture session failed: %1").arg(captureSession.error));
-        snapshotLabel->setText(QStringLiteral("failed: %1").arg(captureSession.error));
-        recordingLabel->setText(QStringLiteral("failed: %1").arg(captureSession.error));
+    const StorageCheckResult check = storage.checkRoot(root);
+    if (!check.ok) {
+        appendLog(QStringLiteral("capture root failed: %1").arg(check.error));
+        snapshotLabel->setText(QStringLiteral("failed: %1").arg(check.error));
+        recordingLabel->setText(QStringLiteral("failed: %1").arg(check.error));
         updatePreviewOverlay();
         return false;
     }
 
-    appendLog(QStringLiteral("capture session opened %1").arg(captureSession.sessionPath));
+    captureRootPath = check.rootPath;
+    appendLog(QStringLiteral("capture root ready %1").arg(captureRootPath));
     return true;
 }
 
 void CameraTestWindow::appendCaptureEvent(const QString &type, const QString &relativePath, const QString &status)
 {
-    if (!captureSession.ok)
-        return;
-
-    QString error;
-    if (!storage.appendCameraEvent(captureSession, type, relativePath, status, &error))
-        appendLog(QStringLiteral("capture event write failed: %1").arg(error));
+    Q_UNUSED(type)
+    Q_UNUSED(relativePath)
+    Q_UNUSED(status)
 }
 
 void CameraTestWindow::appendCaptureIndex(const QString &relativePath, const QString &kind, const QString &status)
 {
-    if (!captureSession.ok)
-        return;
-
-    QString error;
-    if (!storage.appendCameraIndex(captureSession, ++captureSequence, relativePath, kind, status, &error))
-        appendLog(QStringLiteral("capture index write failed: %1").arg(error));
+    Q_UNUSED(relativePath)
+    Q_UNUSED(kind)
+    Q_UNUSED(status)
 }
 
 
@@ -1038,9 +1011,6 @@ bool CameraTestWindow::beginFlashSnapshot(const QString &path, const QString &re
     snapshotLabel->setText(QStringLiteral("flash: arming %1").arg(relativePath));
     appendCaptureEvent(QStringLiteral("flash_snapshot_requested"), relativePath, QStringLiteral("arming"));
 
-    QString error;
-    if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_flash_arming"), relativePath, &error) && !error.isEmpty())
-        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
 
     if (!camera.setStrobeMode(StrobeMode::Flash) || !camera.triggerFlash()) {
         snapshotLabel->setText(QStringLiteral("failed: flash trigger rejected"));
@@ -1059,11 +1029,8 @@ void CameraTestWindow::handleFlashSnapshotTimeout(const QString &path)
         return;
 
     const QString relativePath = flashSnapshotRelativePath;
-    QString error;
     snapshotLabel->setText(QStringLiteral("failed: flash snapshot timeout"));
     appendCaptureEvent(QStringLiteral("flash_snapshot_failed"), relativePath, QStringLiteral("timeout"));
-    if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), relativePath, &error) && !error.isEmpty())
-        appendLog(QStringLiteral("latest status write failed: %1").arg(error));
     finishFlashSnapshotStrobe();
     restorePreviewModeIfNeeded();
 }
@@ -1093,21 +1060,16 @@ void CameraTestWindow::handleSnapshotStatus(const QString &status)
 {
     QString path;
     QString relativePath;
-    QString error;
 
     if (status.startsWith(QStringLiteral("waiting:"))) {
         path = savedPathFromStatus(status);
         relativePath = captureRelativePath(path);
         snapshotLabel->setText(QStringLiteral("waiting: %1").arg(relativePath));
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_waiting"), relativePath, &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
     } else if (status.startsWith(QStringLiteral("saving:"))) {
         path = savedPathFromStatus(status);
         const bool flashPath = isFlashSnapshotPath(path);
         relativePath = captureRelativePath(path);
         snapshotLabel->setText(QStringLiteral("saving: %1").arg(relativePath));
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_saving"), relativePath, &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         if (flashPath)
             finishFlashSnapshotStrobe();
     } else if (status.startsWith(QStringLiteral("saved:"))) {
@@ -1116,14 +1078,10 @@ void CameraTestWindow::handleSnapshotStatus(const QString &status)
         snapshotLabel->setText(QStringLiteral("saved: %1").arg(relativePath));
         appendCaptureEvent(QStringLiteral("snapshot_saved"), relativePath, status);
         appendCaptureIndex(relativePath, QStringLiteral("snapshot"), QStringLiteral("saved"));
-        if (captureSession.ok && !storage.updateLatestImage(captureSession, path, QStringLiteral("snapshot_saved"), &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest image update failed: %1").arg(error));
         restorePreviewModeIfNeeded();
     } else if (status.startsWith(QStringLiteral("failed:"))) {
         snapshotLabel->setText(status);
         appendCaptureEvent(QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, status);
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("snapshot_failed"), flashSnapshotRelativePath, &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         if (flashSnapshotActive)
             finishFlashSnapshotStrobe();
         restorePreviewModeIfNeeded();
@@ -1139,15 +1097,12 @@ void CameraTestWindow::handleRecordingStatus(const QString &status)
 {
     QString path;
     QString relativePath;
-    QString error;
 
     if (status.startsWith(QStringLiteral("recording:"))) {
         recordingUiActive = true;
         path = savedPathFromStatus(status);
         relativePath = captureRelativePath(path);
         recordingLabel->setText(QStringLiteral("recording: %1").arg(relativePath));
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saving"), relativePath, &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
     } else if (status.startsWith(QStringLiteral("saved:"))) {
         recordingUiActive = false;
         path = savedPathFromStatus(status);
@@ -1155,22 +1110,16 @@ void CameraTestWindow::handleRecordingStatus(const QString &status)
         recordingLabel->setText(QStringLiteral("saved: %1").arg(relativePath));
         appendCaptureEvent(QStringLiteral("recording_saved"), relativePath, status);
         appendCaptureIndex(relativePath, QStringLiteral("recording"), QStringLiteral("saved"));
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_saved"), relativePath, &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         restorePreviewModeIfNeeded();
     } else if (status.startsWith(QStringLiteral("failed:"))) {
         recordingUiActive = false;
         recordingLabel->setText(status);
         appendCaptureEvent(QStringLiteral("recording_failed"), QString(), status);
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_failed"), QString(), &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         restorePreviewModeIfNeeded();
     } else if (status.startsWith(QStringLiteral("stopped:"))) {
         recordingUiActive = false;
         recordingLabel->setText(status);
         appendCaptureEvent(QStringLiteral("recording_stopped"), QString(), status);
-        if (captureSession.ok && !storage.writeLatestStatus(captureSession.rootPath, QStringLiteral("recording_stopped"), QString(), &error) && !error.isEmpty())
-            appendLog(QStringLiteral("latest status write failed: %1").arg(error));
         restorePreviewModeIfNeeded();
     } else {
         recordingLabel->setText(status);

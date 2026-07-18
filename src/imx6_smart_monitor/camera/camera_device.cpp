@@ -2047,7 +2047,7 @@ CameraDevice::ActionResult CameraDevice::requestSnapshot(const QString &path, in
     return queueSnapshotImage(output, latestFrame);
 }
 
-CameraDevice::ActionResult CameraDevice::startRecording(const QString &path)
+CameraDevice::ActionResult CameraDevice::startRecording(const QString &path, int maxDurationMs)
 {
     if (!requirePreviewThread(QStringLiteral("startRecording")))
         return ActionResult::Failed;
@@ -2083,11 +2083,15 @@ CameraDevice::ActionResult CameraDevice::startRecording(const QString &path)
     recordingActive = true;
     recordingPath = output;
     const int generation = ++recordingGeneration;
-    QTimer::singleShot(5000, this, [this, generation]() {
-        if (recordingActive && recordingGeneration == generation)
-            stopRecording();
-    });
-    emit logMessage(QStringLiteral("recording scheduled 5000 ms %1").arg(output));
+    if (maxDurationMs > 0) {
+        QTimer::singleShot(maxDurationMs, this, [this, generation]() {
+            if (recordingActive && recordingGeneration == generation)
+                stopRecording();
+        });
+        emit logMessage(QStringLiteral("recording scheduled %1 ms %2").arg(maxDurationMs).arg(output));
+    } else {
+        emit logMessage(QStringLiteral("recording started until explicit stop %1").arg(output));
+    }
     return ActionResult::Ok;
 }
 

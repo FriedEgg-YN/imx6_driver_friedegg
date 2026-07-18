@@ -15,40 +15,49 @@
 
 namespace imx6sm {
 
+/*
+ * MonitorController 是 Smart Monitor 主页面的设备编排层：
+ * - 周期读取 AP3216C/LD2410C，送入 MonitorCore 做纯决策；
+ * - 根据 Core 输出打开/关闭 camera、启动/停止人在期间录制；
+ * - 只把状态和预览帧发给 UI，UI 不直接访问 V4L2/IIO/UART/storage。
+ */
 class MonitorController : public QObject {
     Q_OBJECT
 
 public:
+    enum class StrobePolicy {
+        Auto,
+        Off,
+        Torch,
+    };
+
     explicit MonitorController(QObject *parent = nullptr);
     ~MonitorController() override;
 
     MonitorSnapshot snapshot() const;
     QList<CameraMode> previewModes() const;
-    QList<MonitorSessionInfo> monitorSessions() const;
     int activeModeIndex() const;
+    StrobePolicy strobePolicy() const;
 
 public slots:
     void startMonitoring();
     void stopMonitoring();
     void setPreviewModeIndex(int index);
     void requestManualSnapshot();
-    void setManualTorch(bool enabled);
+    void setStrobePolicyIndex(int index);
     void requestAutoFocus();
     void focusAtFramePoint(int x, int y);
-    void refreshSessions();
 
 signals:
     void snapshotChanged(const imx6sm::MonitorSnapshot &snapshot);
     void previewFrameChanged(const QImage &image);
     void modesChanged();
-    void sessionsChanged();
     void logMessage(const QString &line);
 
 private slots:
     void pollSensors();
     void confirmPresence();
     void finishCooldown();
-    void takePeriodicSnapshot();
     void retryCameraOpen();
 
 private:
@@ -56,17 +65,19 @@ private:
     void updateModesFromCaps(const CameraCaps &caps);
     void emitSnapshot();
     void applyDecisions();
-    bool ensureSessionOpen();
-    void closeSession(const QString &status);
+    bool ensureStorageReady();
     bool ensureCameraRunning();
     void stopCamera();
+    bool ensureRecordingStarted();
+    void stopRecording();
     void syncTorch();
-    void queueSnapshot(const QString &kind);
+    void queueSnapshot();
     void handleSnapshotStatus(const QString &status);
+    void handleRecordingStatus(const QString &status);
     void updateCoreCameraState(CameraState state = CameraState::Closed);
     CameraMode selectedPreviewMode() const;
     QString statusPathFromText(const QString &status) const;
-    QString sessionRelativePath(const QString &absolutePath) const;
+    QString rootRelativePath(const QString &absolutePath) const;
     static bool isRgb565Mode(const CameraMode &mode);
 
     MonitorPolicy policy;
@@ -79,24 +90,21 @@ private:
     QTimer sensorTimer;
     QTimer confirmTimer;
     QTimer cooldownTimer;
-    QTimer snapshotTimer;
     QTimer retryTimer;
     QList<CameraMode> modes;
-    QList<MonitorSessionInfo> sessions;
-    MonitorSessionResult activeSession;
     QString devicePath;
     QString storageRoot;
     CameraMode activeCameraMode;
     QString cameraError;
     QString afStatus;
+    QString recordingPath;
     qulonglong frameCount = 0;
     double frameFps = 0.0;
     int modeIndex = 0;
-    int frameSequence = 0;
-    bool manualTorch = false;
+    StrobePolicy currentStrobePolicy = StrobePolicy::Auto;
+    bool recordingActive = false;
     bool snapshotPending = false;
     QString snapshotPendingPath;
-    QString snapshotPendingKind;
     QString lastSensorError;
 };
 

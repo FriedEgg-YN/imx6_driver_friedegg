@@ -9,6 +9,7 @@ void MonitorCore::setPolicy(const MonitorPolicy &newPolicy)
     policy = newPolicy;
     updateLightDecision();
     updateCameraDecision();
+    updateRecordingDecision();
 }
 
 MonitorPolicy MonitorCore::currentPolicy() const
@@ -38,6 +39,7 @@ void MonitorCore::startMonitoring()
     }
     updateLightDecision();
     updateCameraDecision();
+    updateRecordingDecision();
 }
 
 void MonitorCore::stopMonitoring()
@@ -47,12 +49,12 @@ void MonitorCore::stopMonitoring()
     current.presence = PresenceState::NoPerson;
     current.light = LightState::Normal;
     current.torchWanted = false;
+    current.recordingWanted = false;
     current.cameraWanted = false;
+    current.recordingAction = QStringLiteral("stop");
     current.cameraAction = QStringLiteral("close");
-    current.storageAction = QStringLiteral("close");
     current.strobeAction = QStringLiteral("off");
     current.storage = StorageState::Idle;
-    current.sessionId.clear();
     current.lastAction = QStringLiteral("monitoring disabled");
 }
 
@@ -85,6 +87,7 @@ void MonitorCore::handleSensorState(const SensorState &state)
     }
 
     updateCameraDecision();
+    updateRecordingDecision();
     updateLightDecision();
 }
 
@@ -109,25 +112,33 @@ void MonitorCore::handleCameraState(CameraState state, const QString &error,
     }
 
     updateCameraDecision();
+    updateRecordingDecision();
 }
 
-void MonitorCore::handleStorageState(StorageState state, const QString &error,
-                                     const QString &sessionId)
+void MonitorCore::handleStorageState(StorageState state, const QString &error)
 {
     clearActions();
     current.storage = state;
     current.storageError = error;
-    current.sessionId = sessionId;
 
     if (state == StorageState::Degraded) {
         current.lastAction = error.isEmpty()
             ? QStringLiteral("storage degraded")
             : QStringLiteral("storage degraded: %1").arg(error);
-    } else if (state == StorageState::SessionOpen) {
-        current.lastAction = QStringLiteral("storage session open");
+    } else if (state == StorageState::Ready) {
+        current.lastAction = QStringLiteral("storage ready");
     } else if (state == StorageState::Idle) {
         current.lastAction = QStringLiteral("storage idle");
     }
+}
+
+void MonitorCore::handleRecordingState(const QString &path, const QString &status)
+{
+    clearActions();
+    current.recordingPath = path;
+    current.recordingStatus = status;
+    if (!status.isEmpty())
+        current.lastAction = QStringLiteral("recording %1").arg(status);
 }
 
 void MonitorCore::handlePresence(bool present)
@@ -153,12 +164,11 @@ void MonitorCore::confirmPresenceTimeout()
     if (current.monitoringEnabled &&
         current.presence == PresenceState::PersonPending && latestPresence) {
         current.presence = PresenceState::ActiveMonitoring;
-        current.storage = StorageState::SessionOpen;
-        current.storageAction = QStringLiteral("open");
-        current.lastAction = QStringLiteral("open session and start camera");
+        current.lastAction = QStringLiteral("start camera and recording");
     }
 
     updateCameraDecision();
+    updateRecordingDecision();
     updateLightDecision();
 }
 
@@ -167,24 +177,23 @@ void MonitorCore::cooldownTimeout()
     clearActions();
     if (current.presence == PresenceState::Cooldown && !latestPresence) {
         current.presence = PresenceState::NoPerson;
-        current.storage = StorageState::Idle;
-        current.storageAction = QStringLiteral("close");
-        current.lastAction = QStringLiteral("close session and stop camera");
+        current.lastAction = QStringLiteral("stop camera after cooldown");
     }
 
     updateCameraDecision();
+    updateRecordingDecision();
     updateLightDecision();
 }
 
 void MonitorCore::setStorageWritable(bool writable)
 {
     clearActions();
-    if (!writable && current.storage == StorageState::SessionOpen) {
+    if (!writable && current.storage == StorageState::Ready) {
         current.storage = StorageState::Degraded;
         current.storageError = QStringLiteral("storage is not writable");
         current.lastAction = QStringLiteral("storage degraded");
     } else if (writable && current.storage == StorageState::Degraded) {
-        current.storage = StorageState::SessionOpen;
+        current.storage = StorageState::Ready;
         current.storageError.clear();
         current.lastAction = QStringLiteral("storage recovered");
     }
@@ -193,7 +202,7 @@ void MonitorCore::setStorageWritable(bool writable)
 void MonitorCore::clearActions()
 {
     current.cameraAction.clear();
-    current.storageAction.clear();
+    current.recordingAction.clear();
     current.strobeAction.clear();
     current.focusAction.clear();
 }
@@ -243,6 +252,17 @@ void MonitorCore::updateCameraDecision()
         current.cameraAction = QStringLiteral("open");
     if (current.camera == CameraState::Error && current.cameraWanted)
         current.cameraAction = QStringLiteral("retry");
+}
+
+void MonitorCore::updateRecordingDecision()
+{
+    const bool previousWanted = current.recordingWanted;
+    current.recordingWanted = current.monitoringEnabled &&
+                              (current.presence == PresenceState::ActiveMonitoring ||
+                               current.presence == PresenceState::Cooldown);
+
+    if (previousWanted != current.recordingWanted)
+        current.recordingAction = current.recordingWanted ? QStringLiteral("start") : QStringLiteral("stop");
 }
 
 } // namespace imx6sm

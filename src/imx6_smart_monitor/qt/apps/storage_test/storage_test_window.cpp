@@ -10,7 +10,8 @@ StorageTestWindow::StorageTestWindow(QWidget *parent)
     : ModuleTestWindow(QStringLiteral("Storage Test"), parent)
     , rootEdit(addPathEdit(QStringLiteral("Root"), QStringLiteral("/smart-monitor")))
     , resultLabel(addRow(QStringLiteral("Result")))
-    , sessionLabel(addRow(QStringLiteral("Session")))
+    , framesLabel(addRow(QStringLiteral("Frames")))
+    , videosLabel(addRow(QStringLiteral("Videos")))
 {
     QPushButton *check = addButton(QStringLiteral("Check"));
     connect(check, &QPushButton::clicked, this, [this]() { checkRoot(); });
@@ -22,15 +23,17 @@ void StorageTestWindow::checkRoot()
     if (!result.ok) {
         setStatus(QStringLiteral("Failed"));
         resultLabel->setText(result.error);
-        sessionLabel->setText(QStringLiteral("--"));
+        framesLabel->setText(QStringLiteral("--"));
+        videosLabel->setText(QStringLiteral("--"));
         appendLog(result.error);
         return;
     }
 
     setStatus(QStringLiteral("Ready"));
     resultLabel->setText(QStringLiteral("ok"));
-    sessionLabel->setText(result.sessionPath);
-    appendLog(QStringLiteral("storage check wrote test session"));
+    framesLabel->setText(result.framesPath);
+    videosLabel->setText(result.videosPath);
+    appendLog(QStringLiteral("storage check created frames/videos"));
 }
 
 } // namespace imx6sm

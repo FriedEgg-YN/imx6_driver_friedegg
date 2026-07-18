@@ -18,7 +18,8 @@ private:
 
     QLineEdit *rootEdit;
     QLabel *resultLabel;
-    QLabel *sessionLabel;
+    QLabel *framesLabel;
+    QLabel *videosLabel;
     StorageManager storage;
 };
 

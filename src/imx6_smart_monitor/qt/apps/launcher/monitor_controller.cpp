@@ -1,8 +1,8 @@
 #include "monitor_controller.h"
 
 #include <QDir>
-#include <QFileInfo>
 #include <QMetaType>
+#include <QStringList>
 
 namespace imx6sm {
 
@@ -13,22 +13,18 @@ MonitorController::MonitorController(QObject *parent)
     , storageRoot(policy.storageRoot)
 {
     qRegisterMetaType<MonitorSnapshot>("imx6sm::MonitorSnapshot");
-    qRegisterMetaType<MonitorSessionInfo>("imx6sm::MonitorSessionInfo");
-    qRegisterMetaType<QList<MonitorSessionInfo> >("QList<imx6sm::MonitorSessionInfo>");
 
     confirmTimer.setSingleShot(true);
     confirmTimer.setInterval(policy.presenceStartConfirmMs);
     cooldownTimer.setSingleShot(true);
     cooldownTimer.setInterval(policy.presenceEndCooldownMs);
     sensorTimer.setInterval(500);
-    snapshotTimer.setInterval(policy.snapshotIntervalMs);
     retryTimer.setSingleShot(true);
     retryTimer.setInterval(3000);
 
     connect(&sensorTimer, &QTimer::timeout, this, &MonitorController::pollSensors);
     connect(&confirmTimer, &QTimer::timeout, this, &MonitorController::confirmPresence);
     connect(&cooldownTimer, &QTimer::timeout, this, &MonitorController::finishCooldown);
-    connect(&snapshotTimer, &QTimer::timeout, this, &MonitorController::takePeriodicSnapshot);
     connect(&retryTimer, &QTimer::timeout, this, &MonitorController::retryCameraOpen);
 
     connect(&camera, &CameraDevice::frameReady, this, [this](const QImage &image) {
@@ -60,6 +56,7 @@ MonitorController::MonitorController(QObject *parent)
         emitSnapshot();
     });
     connect(&camera, &CameraDevice::snapshotStatusChanged, this, &MonitorController::handleSnapshotStatus);
+    connect(&camera, &CameraDevice::recordingStatusChanged, this, &MonitorController::handleRecordingStatus);
     connect(&camera, &CameraDevice::errorChanged, this, [this](const QString &error) {
         cameraError = error;
         if (!error.isEmpty())
@@ -73,7 +70,6 @@ MonitorController::MonitorController(QObject *parent)
     connect(&camera, &CameraDevice::logMessage, this, &MonitorController::logMessage);
 
     refreshCameraModes();
-    refreshSessions();
     emitSnapshot();
 }
 
@@ -92,23 +88,22 @@ QList<CameraMode> MonitorController::previewModes() const
     return modes;
 }
 
-QList<MonitorSessionInfo> MonitorController::monitorSessions() const
-{
-    return sessions;
-}
-
 int MonitorController::activeModeIndex() const
 {
     return modeIndex;
 }
 
+MonitorController::StrobePolicy MonitorController::strobePolicy() const
+{
+    return currentStrobePolicy;
+}
+
 void MonitorController::startMonitoring()
 {
     core.startMonitoring();
+    ensureStorageReady();
     if (!sensorTimer.isActive())
         sensorTimer.start();
-    if (!snapshotTimer.isActive())
-        snapshotTimer.start();
     emit logMessage(QStringLiteral("monitoring started"));
     pollSensors();
     applyDecisions();
@@ -120,13 +115,11 @@ void MonitorController::stopMonitoring()
     sensorTimer.stop();
     confirmTimer.stop();
     cooldownTimer.stop();
-    snapshotTimer.stop();
     retryTimer.stop();
 
     core.stopMonitoring();
-    manualTorch = false;
+    stopRecording();
     stopCamera();
-    closeSession(QStringLiteral("stopped"));
     emit logMessage(QStringLiteral("monitoring stopped"));
     emitSnapshot();
 }
@@ -135,6 +128,11 @@ void MonitorController::setPreviewModeIndex(int index)
 {
     if (index < 0 || index >= modes.size())
         return;
+
+    if (recordingActive || core.snapshot().recordingWanted) {
+        emit logMessage(QStringLiteral("mode switch ignored during recording"));
+        return;
+    }
 
     modeIndex = index;
     const CameraMode mode = selectedPreviewMode();
@@ -151,12 +149,22 @@ void MonitorController::setPreviewModeIndex(int index)
 
 void MonitorController::requestManualSnapshot()
 {
-    queueSnapshot(QStringLiteral("manual"));
+    queueSnapshot();
 }
 
-void MonitorController::setManualTorch(bool enabled)
+void MonitorController::setStrobePolicyIndex(int index)
 {
-    manualTorch = enabled;
+    switch (index) {
+    case 1:
+        currentStrobePolicy = StrobePolicy::Off;
+        break;
+    case 2:
+        currentStrobePolicy = StrobePolicy::Torch;
+        break;
+    default:
+        currentStrobePolicy = StrobePolicy::Auto;
+        break;
+    }
     syncTorch();
     emitSnapshot();
 }
@@ -190,15 +198,6 @@ void MonitorController::focusAtFramePoint(int x, int y)
     }
     updateCoreCameraState(camera.state());
     emitSnapshot();
-}
-
-void MonitorController::refreshSessions()
-{
-    QString error;
-    sessions = storage.listMonitorSessions(storageRoot, &error);
-    if (!error.isEmpty() && QFileInfo::exists(storageRoot))
-        emit logMessage(QStringLiteral("playback list: %1").arg(error));
-    emit sessionsChanged();
 }
 
 void MonitorController::pollSensors()
@@ -267,20 +266,14 @@ void MonitorController::finishCooldown()
     emitSnapshot();
 }
 
-void MonitorController::takePeriodicSnapshot()
-{
-    const MonitorSnapshot state = core.snapshot();
-    if (!state.monitoringEnabled || state.presence != PresenceState::ActiveMonitoring)
-        return;
-    queueSnapshot(QStringLiteral("auto"));
-}
-
 void MonitorController::retryCameraOpen()
 {
     const MonitorSnapshot state = core.snapshot();
     if (!state.monitoringEnabled || !state.cameraWanted)
         return;
     ensureCameraRunning();
+    if (state.recordingWanted && !recordingActive)
+        ensureRecordingStarted();
 }
 
 void MonitorController::refreshCameraModes()
@@ -325,56 +318,38 @@ void MonitorController::applyDecisions()
 {
     const MonitorSnapshot state = core.snapshot();
 
-    if (state.storageAction == QStringLiteral("open"))
-        ensureSessionOpen();
-    else if (state.storageAction == QStringLiteral("close"))
-        closeSession(QStringLiteral("cooldown"));
+    if (state.recordingAction == QStringLiteral("stop") || (!state.recordingWanted && recordingActive))
+        stopRecording();
 
     if (state.cameraAction == QStringLiteral("open") || state.cameraAction == QStringLiteral("retry"))
         ensureCameraRunning();
-    else if (state.cameraAction == QStringLiteral("close"))
+
+    if (state.recordingWanted && !recordingActive)
+        ensureRecordingStarted();
+
+    if (state.cameraAction == QStringLiteral("close"))
         stopCamera();
 
-    if (!state.strobeAction.isEmpty())
+    if (!state.strobeAction.isEmpty() || currentStrobePolicy != StrobePolicy::Auto)
         syncTorch();
 }
 
-bool MonitorController::ensureSessionOpen()
+bool MonitorController::ensureStorageReady()
 {
-    if (activeSession.ok)
-        return true;
-
-    activeSession = storage.openMonitorSession(storageRoot, devicePath, selectedPreviewMode());
-    frameSequence = 0;
-    if (!activeSession.ok) {
-        core.handleStorageState(StorageState::Degraded, activeSession.error);
-        emit logMessage(QStringLiteral("storage degraded: %1").arg(activeSession.error));
+    const MonitorSnapshot before = core.snapshot();
+    const StorageCheckResult check = storage.checkRoot(storageRoot);
+    if (!check.ok) {
+        if (before.storage != StorageState::Degraded || before.storageError != check.error)
+            emit logMessage(QStringLiteral("storage degraded: %1").arg(check.error));
+        core.handleStorageState(StorageState::Degraded, check.error);
         return false;
     }
 
-    core.handleStorageState(StorageState::SessionOpen, QString(), activeSession.sessionId);
-    emit logMessage(QStringLiteral("monitor session opened %1").arg(activeSession.sessionPath));
-    refreshSessions();
+    storageRoot = check.rootPath;
+    if (before.storage != StorageState::Ready)
+        emit logMessage(QStringLiteral("storage ready %1").arg(storageRoot));
+    core.handleStorageState(StorageState::Ready);
     return true;
-}
-
-void MonitorController::closeSession(const QString &status)
-{
-    if (!activeSession.ok) {
-        core.handleStorageState(StorageState::Idle);
-        return;
-    }
-
-    QString error;
-    if (!storage.closeMonitorSession(activeSession, status, &error)) {
-        core.handleStorageState(StorageState::Degraded, error, activeSession.sessionId);
-        emit logMessage(QStringLiteral("session close failed: %1").arg(error));
-    } else {
-        emit logMessage(QStringLiteral("monitor session closed %1").arg(activeSession.sessionId));
-        core.handleStorageState(StorageState::Idle);
-    }
-    activeSession = MonitorSessionResult();
-    refreshSessions();
 }
 
 bool MonitorController::ensureCameraRunning()
@@ -390,11 +365,6 @@ bool MonitorController::ensureCameraRunning()
     if (!camera.openDevice(devicePath)) {
         cameraError = camera.lastError();
         core.handleCameraState(CameraState::Error, cameraError);
-        if (activeSession.ok) {
-            QString error;
-            storage.appendMonitorEvent(activeSession, QStringLiteral("camera_error"),
-                                       QStringLiteral("open_failed"), cameraError, &error);
-        }
         if (!retryTimer.isActive())
             retryTimer.start();
         emit logMessage(QStringLiteral("camera open failed: %1").arg(cameraError));
@@ -429,6 +399,7 @@ bool MonitorController::ensureCameraRunning()
 
 void MonitorController::stopCamera()
 {
+    stopRecording();
     if (camera.isStreaming()) {
         if (camera.supportsStrobeMode())
             camera.setStrobeMode(StrobeMode::None);
@@ -438,16 +409,74 @@ void MonitorController::stopCamera()
     updateCoreCameraState(camera.state());
 }
 
+bool MonitorController::ensureRecordingStarted()
+{
+    if (recordingActive)
+        return true;
+    if (!ensureCameraRunning())
+        return false;
+    if (!ensureStorageReady())
+        return false;
+
+    const StoragePathResult path = storage.makeVideoPath(storageRoot, QStringLiteral("presence"));
+    if (!path.ok) {
+        core.handleStorageState(StorageState::Degraded, path.error);
+        emit logMessage(QStringLiteral("recording path failed: %1").arg(path.error));
+        return false;
+    }
+
+    if (camera.startRecording(path.path, 0) != CameraDevice::ActionResult::Ok) {
+        const QString status = QStringLiteral("failed: request rejected");
+        core.handleRecordingState(path.path, status);
+        emit logMessage(QStringLiteral("recording request rejected"));
+        return false;
+    }
+
+    recordingActive = true;
+    recordingPath = path.path;
+    core.handleRecordingState(recordingPath,
+                              QStringLiteral("recording: %1").arg(path.relativePath));
+    emit logMessage(QStringLiteral("presence recording started %1").arg(path.relativePath));
+    emitSnapshot();
+    return true;
+}
+
+void MonitorController::stopRecording()
+{
+    if (!recordingActive)
+        return;
+
+    recordingActive = false;
+    camera.stopRecording();
+    const QString text = recordingPath.isEmpty()
+        ? QStringLiteral("stopping")
+        : QStringLiteral("stopping: %1").arg(rootRelativePath(recordingPath));
+    core.handleRecordingState(recordingPath, text);
+    emit logMessage(QStringLiteral("presence recording stop requested"));
+}
+
 void MonitorController::syncTorch()
 {
     if (!camera.isStreaming() || !camera.supportsStrobeMode())
         return;
 
-    const bool torchWanted = manualTorch || core.snapshot().torchWanted;
+    bool torchWanted = false;
+    switch (currentStrobePolicy) {
+    case StrobePolicy::Auto:
+        torchWanted = core.snapshot().torchWanted;
+        break;
+    case StrobePolicy::Off:
+        torchWanted = false;
+        break;
+    case StrobePolicy::Torch:
+        torchWanted = true;
+        break;
+    }
+
     camera.setStrobeMode(torchWanted ? StrobeMode::Torch : StrobeMode::None);
 }
 
-void MonitorController::queueSnapshot(const QString &kind)
+void MonitorController::queueSnapshot()
 {
     if (snapshotPending)
         return;
@@ -455,66 +484,62 @@ void MonitorController::queueSnapshot(const QString &kind)
         emit logMessage(QStringLiteral("snapshot ignored: camera idle"));
         return;
     }
-    if (!ensureSessionOpen())
+    if (!ensureStorageReady())
         return;
 
-    const CameraTestPathResult path = storage.makeMonitorSnapshotPath(activeSession);
+    const StoragePathResult path = storage.makeFramePath(storageRoot, QStringLiteral("snapshot"));
     if (!path.ok) {
-        core.handleStorageState(StorageState::Degraded, path.error, activeSession.sessionId);
+        core.handleStorageState(StorageState::Degraded, path.error);
         emitSnapshot();
         return;
     }
 
     const CameraDevice::ActionResult result = camera.requestSnapshot(path.path, 1);
     if (result != CameraDevice::ActionResult::Ok) {
-        QString error;
-        storage.appendMonitorEvent(activeSession, QStringLiteral("snapshot_failed"),
-                                   QStringLiteral("request_rejected"), path.relativePath, &error);
         emit logMessage(QStringLiteral("snapshot request rejected"));
         return;
     }
 
     snapshotPending = true;
     snapshotPendingPath = path.path;
-    snapshotPendingKind = kind;
-    QString error;
-    if (!storage.appendMonitorEvent(activeSession, QStringLiteral("snapshot_requested"),
-                                    kind, path.relativePath, &error)) {
-        core.handleStorageState(StorageState::Degraded, error, activeSession.sessionId);
-        emitSnapshot();
-    }
+    emit logMessage(QStringLiteral("snapshot requested %1").arg(path.relativePath));
 }
 
 void MonitorController::handleSnapshotStatus(const QString &status)
 {
-    if (!activeSession.ok) {
-        snapshotPending = false;
-        return;
-    }
-
-    QString error;
     if (status.startsWith(QStringLiteral("saved:"))) {
         const QString path = statusPathFromText(status);
-        const QString relativePath = sessionRelativePath(path);
-        const QString kind = snapshotPendingKind.isEmpty() ? QStringLiteral("snapshot") : snapshotPendingKind;
-        if (!storage.appendMonitorEvent(activeSession, QStringLiteral("snapshot_saved"), kind, relativePath, &error) ||
-            !storage.appendMonitorIndex(activeSession, ++frameSequence, relativePath, kind, QStringLiteral("saved"), &error) ||
-            !storage.updateLatestImage(activeSession, path, QStringLiteral("snapshot_saved"), &error)) {
-            core.handleStorageState(StorageState::Degraded, error, activeSession.sessionId);
-            emit logMessage(QStringLiteral("snapshot storage failed: %1").arg(error));
-        }
+        emit logMessage(QStringLiteral("snapshot saved %1").arg(rootRelativePath(path)));
         snapshotPending = false;
         snapshotPendingPath.clear();
-        snapshotPendingKind.clear();
-        refreshSessions();
     } else if (status.startsWith(QStringLiteral("failed:"))) {
-        storage.appendMonitorEvent(activeSession, QStringLiteral("snapshot_failed"),
-                                   snapshotPendingKind, status, &error);
+        emit logMessage(QStringLiteral("snapshot %1").arg(status));
         snapshotPending = false;
         snapshotPendingPath.clear();
-        snapshotPendingKind.clear();
     }
 
+    emitSnapshot();
+}
+
+void MonitorController::handleRecordingStatus(const QString &status)
+{
+    const QString path = statusPathFromText(status);
+    if (!path.isEmpty())
+        recordingPath = path;
+
+    QString display = status;
+    if (!path.isEmpty())
+        display.replace(path, rootRelativePath(path));
+
+    if (status.startsWith(QStringLiteral("recording:"))) {
+        recordingActive = true;
+    } else if (status.startsWith(QStringLiteral("saved:")) ||
+               status.startsWith(QStringLiteral("failed:")) ||
+               status.startsWith(QStringLiteral("stopped:"))) {
+        recordingActive = false;
+    }
+
+    core.handleRecordingState(recordingPath, display);
     emitSnapshot();
 }
 
@@ -534,20 +559,22 @@ CameraMode MonitorController::selectedPreviewMode() const
 QString MonitorController::statusPathFromText(const QString &status) const
 {
     QString text = status.trimmed();
-    const int colon = text.indexOf(QLatin1Char(':'));
+    const int colon = text.indexOf(QStringLiteral(":"));
     if (colon >= 0)
         text = text.mid(colon + 1).trimmed();
     const int suffix = text.indexOf(QStringLiteral(" ("));
     if (suffix >= 0)
         text = text.left(suffix).trimmed();
+    if (!text.startsWith(QStringLiteral("/")))
+        return QString();
     return text;
 }
 
-QString MonitorController::sessionRelativePath(const QString &absolutePath) const
+QString MonitorController::rootRelativePath(const QString &absolutePath) const
 {
-    if (!activeSession.ok || absolutePath.isEmpty())
+    if (absolutePath.isEmpty())
         return absolutePath;
-    return QDir(activeSession.sessionPath).relativeFilePath(absolutePath);
+    return QDir(storageRoot).relativeFilePath(absolutePath);
 }
 
 bool MonitorController::isRgb565Mode(const CameraMode &mode)

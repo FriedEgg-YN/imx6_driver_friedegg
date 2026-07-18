@@ -69,8 +69,8 @@ QString toString(StorageState state)
     switch (state) {
     case StorageState::Idle:
         return QStringLiteral("Idle");
-    case StorageState::SessionOpen:
-        return QStringLiteral("SessionOpen");
+    case StorageState::Ready:
+        return QStringLiteral("Ready");
     case StorageState::Degraded:
         return QStringLiteral("Degraded");
     }
@@ -93,4 +93,3 @@ QString toString(StrobeMode mode)
 }
 
 } // namespace imx6sm
-

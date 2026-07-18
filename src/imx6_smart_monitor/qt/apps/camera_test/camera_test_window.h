@@ -53,7 +53,7 @@ private:
     void updatePreviewOverlay();
     void handlePreviewTouch(const QPoint &pos, const QSize &imageSize, const QRect &imageRect);
     bool captureActionPending() const;
-    bool ensureCaptureSession(const CameraMode &mode);
+    bool ensureCaptureRoot();
     bool prepareCaptureAction(PendingCaptureAction action, const QString &path, const QString &relativePath);
     void startPendingCaptureAction();
     void requestSnapshotNow(const QString &path, const QString &relativePath, bool flash);
@@ -124,11 +124,10 @@ private:
     QString pendingCapturePath;
     QString pendingCaptureRelativePath;
     StrobeMode selectedStrobeMode;
-    CameraTestSessionResult captureSession;
+    QString captureRootPath;
     QString strobeStatusText;
     QString flashSnapshotPath;
     QString flashSnapshotRelativePath;
-    int captureSequence;
     bool recordingUiActive;
     bool flashSnapshotActive;
     bool restorePreviewAfterCapture;

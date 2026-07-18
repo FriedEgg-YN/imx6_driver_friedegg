@@ -32,8 +32,8 @@ OV5640 formatter: RGB565
 语义：
 
 - `bytesperline` 为 `width * 2`。
-- Camera Test 的 preview 成功依赖 RGB565 buffer 拷贝和 Qt 绘制。
-- Snapshot/Record 的 JPEG 质量来自 Camera Test 保存 worker，和 sensor JPEG 无关。
+- Smart Monitor 主页面预览和 presence 录制优先使用 RGB565/RGBP。
+- Snapshot/Record 的 JPEG 质量来自 CameraDevice 保存 worker，和 sensor JPEG 无关。
 
 ## JPEG 路径
 
@@ -57,27 +57,28 @@ OV5640 JPEG encoder
 
 ## 模式切换
 
-Camera Test 现在拆成两个选择：Preview 菜单只列 RGB565/RGBP；Capture 菜单列 RGB565/RGBP 与 JPEG/MJPG。用户在预览打开时点击 Snapshot/Record：
+Camera Test 拆成两个选择：Preview 菜单只列 RGB565/RGBP；Capture 菜单列 RGB565/RGBP 与 JPEG/MJPG。用户在预览打开时点击 Snapshot/Record：
 
 - Capture 选择 RGB565：保持当前 RGB565 stream，`deliverFrame(QImage)` 承担 preview、pending snapshot 和 record enqueue。
 - Capture 选择 JPEG：先暂停 preview 显示并把 V4L2 stream 切到 JPEG，`deliverJpegFrame(QByteArray)` 承担 pending snapshot 和 record enqueue；动作完成后切回 Preview 菜单选中的 RGB565 模式继续预览。
 
-JPEG 模式不再在 capture 线程中解码预览帧。这样可以避免 sensor JPEG 先解码成 RGB 再重新编码成 JPEG，也避免 JPEG decode 阻塞采集线程。
+JPEG 模式不在 capture 线程中解码预览帧。这样可以避免 sensor JPEG 先解码成 RGB 再重新编码成 JPEG，也避免 JPEG decode 阻塞采集线程。
 
 ## 文件输出
 
 | 操作 | RGB565 Capture | JPEG Capture |
 | --- | --- | --- |
-| Preview | RGB565 `QImage::Format_RGB16` 连续显示 | 不显示 JPEG 预览；采集完成后恢复 RGB565 预览 |
-| Snapshot | 下一帧 `QImage` 编码成 `.jpg` | SOI/EOI 裁剪后的 raw JPEG 直接写 `.jpg` |
-| Record | 低频采样 `QImage`，缩放后编码 JPEG，追加到 `.mjpeg` | SOI/EOI 裁剪后的 raw JPEG 帧追加到 `.mjpeg` |
-| latest/current.jpg | 复制 snapshot 文件 | 复制 raw JPEG snapshot 文件 |
+| Preview | RGB565 `QImage::Format_RGB16` 连续显示 | 不显示 JPEG 预览；采集完成后恢复 RGB565 预览。 |
+| Snapshot | 下一帧 `QImage` 编码成 `.jpg`。 | SOI/EOI 裁剪后的 raw JPEG 直接写 `.jpg`。 |
+| Record | 低频采样 `QImage`，缩放后编码 JPEG，追加到 `.mjpeg`。 | SOI/EOI 裁剪后的 raw JPEG 帧追加到 `.mjpeg`。 |
+| Smart Monitor 主应用输出 | 手动 snapshot 写入 `/smart-monitor/frames/*.jpg`；presence 期间录制写入 `/smart-monitor/videos/*.mjpeg`。 | 主应用不使用 JPEG capture 模式；JPEG capture 仍由 Camera Test 验证。 |
 
 ## 验证重点
 
 - `v4l2-ctl --list-formats-ext` 能枚举 RGB565/RGBP 与 JPEG。
 - JPEG Snapshot 文件头应以 `ff d8` 开始、以 `ff d9` 结束。
 - JPEG Record 文件非空，且可以用支持 MJPEG 的工具拆帧或播放。
+- `find /smart-monitor -maxdepth 2 -type f | sort` 只应看到 `frames/` 和 `videos/` 下文件。
 - `dmesg` 中不应出现持续 RxFIFO overflow、HRESP error 或 sensor I2C 写失败。
 
 ## 后续可优化项

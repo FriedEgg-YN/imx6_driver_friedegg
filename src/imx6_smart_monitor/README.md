@@ -1,8 +1,12 @@
 # i.MX6 Smart Monitor
 
-本目录实现面向 i.MX6ULL 板端的 Qt 触摸屏 Smart Monitor 与硬件测试程序。当前 `imx6-smart-monitor` 首屏是 Smart Monitor v1 主页面：单进程 Qt 应用内由 controller 串联 AP3216C、LD2410C、MonitorCore、CameraDevice 和 StorageManager，完成 presence gate、RGB565 预览、自动/手动 snapshot、torch、storage/session 状态和静态 Playback。Tools 页面继续保留触摸、IIO、LD2410、OV5640 camera、存储和核心状态机单点测试入口。
+本目录实现面向 i.MX6ULL 板端的 Qt 触摸屏 Smart Monitor 与硬件测试程序。当前主应用 `imx6-smart-monitor` 的核心闭环已经精简为：
 
-Camera Test 仍覆盖 RGB565 预览/截图/录制路径和 OV5640 sensor JPEG 采集路径。Smart Monitor v1 的实时预览与自动 snapshot 走 RGB565 预览帧编码成 JPEG；Camera Test 的 Capture 菜单继续用于验证 sensor JPEG 专项路径。
+```text
+LD2410C presence -> MonitorCore -> CameraDevice record -> /smart-monitor/videos
+```
+
+主页面保留 RGB565 预览、手动 Snapshot、自动/关闭/常亮补光、分辨率/帧率选择和 LD2410C 配置入口。AP3216C 仍用于 `Auto` strobe 的 lux 判断；Camera Test 与 LD2410 Test 继续作为完整硬件实验台保留。
 
 ## 目录概览
 
@@ -12,10 +16,10 @@ Camera Test 仍覆盖 RGB565 预览/截图/录制路径和 OV5640 sensor JPEG �
 | `common/` | 公共类型实现。 |
 | `camera/` | V4L2 camera 封装、MMAP streaming、snapshot/record worker。 |
 | `sensors/` | AP3216C、LD2410C 等传感器访问封装。 |
-| `storage/` | `/smart-monitor` session、latest、index 文件管理。 |
+| `storage/` | `/smart-monitor/frames` 与 `/smart-monitor/videos` 路径生成和可写性检查。 |
 | `core/` | MonitorCore 纯决策状态机。 |
 | `qt/common/` | Qt 测试窗口和 app runner 复用层。 |
-| `qt/apps/launcher/` | `imx6-smart-monitor` 主页面、controller、Tools 和 Playback。 |
+| `qt/apps/launcher/` | `imx6-smart-monitor` 主页面、controller 和 Tools。 |
 | `qt/apps/*_test/` | 可独立运行、也可被 launcher 复用的模块测试页。 |
 | `docs/` | 模块细节文档和验证记录。 |
 
@@ -23,19 +27,19 @@ Camera Test 仍覆盖 RGB565 预览/截图/录制路径和 OV5640 sensor JPEG �
 
 | 程序 | 作用 |
 | --- | --- |
-| `imx6-smart-monitor` | Smart Monitor v1 主页面，含 Tools 和 Playback。 |
+| `imx6-smart-monitor` | Smart Monitor 主页面：presence 触发录制、预览、手动截图、strobe 和 Tools。 |
 | `imx6-sm-touch-test` | 触摸 input/Qt 事件链路测试。 |
 | `imx6-sm-ap3216c-test` | AP3216C IIO sysfs 扫描和采样。 |
-| `imx6-sm-ld2410-test` | LD2410C OUT/input 与 UART 节点探测。 |
-| `imx6-sm-camera-test` | OV5640 V4L2 枚举、RGB565 预览、RGB565/JPEG snapshot、record。 |
-| `imx6-sm-storage-test` | `/smart-monitor` 可写性与 session 文件测试。 |
-| `imx6-sm-core-test` | MonitorCore presence/light/storage 决策骨架测试。 |
+| `imx6-sm-ld2410-test` | LD2410C OUT/input、misc ioctl、UART 配置和工程数据测试。 |
+| `imx6-sm-camera-test` | OV5640 V4L2 枚举、RGB565 预览、RGB565/JPEG snapshot、短录制实验。 |
+| `imx6-sm-storage-test` | `/smart-monitor` 可写性以及 frames/videos 目录检查。 |
+| `imx6-sm-core-test` | MonitorCore presence/light/storage/record 决策骨架测试。 |
 
 ## docs 索引
 
 | 文档 | 内容 |
 | --- | --- |
-| [`docs/smart-monitor-v1-closed-loop.md`](docs/smart-monitor-v1-closed-loop.md) | Smart Monitor v1 架构、状态机、session 产物和验收命令。 |
+| [`docs/smart-monitor-v1-closed-loop.md`](docs/smart-monitor-v1-closed-loop.md) | Smart Monitor record-first 闭环、状态机、存储产物和验收命令。 |
 | [`docs/camera-test-performance-notes.md`](docs/camera-test-performance-notes.md) | Camera Test RGB565/JPEG 采集性能、验证命令、已知限制。 |
 | [`docs/camera-data-flow-and-format-path.md`](docs/camera-data-flow-and-format-path.md) | OV5640 后的数据流、RGB565/JPEG 格式转换、buffer 与 SOI/EOI 裁剪语义。 |
 
@@ -64,10 +68,18 @@ QT_QPA_PLATFORM=linuxfb imx6-sm-camera-test
 QT_QPA_PLATFORM=linuxfb imx6-sm-core-test
 ```
 
+## 验收重点
+
+```bash
+find /smart-monitor -maxdepth 2 -type f | sort
+```
+
+预期只看到 `frames/*.jpg` 和 `videos/*.mjpeg`。不再生成 `sessions/`、`latest/`、`session.json`、`events.jsonl` 或 `index.jsonl`。
+
 ## 边界
 
 - Smart Monitor 主页面只通过 `MonitorController` 发命令和订阅状态；Qt UI 不直接访问 V4L2/IIO/UART/Storage。
 - 各测试页只通过对应模块封装访问设备节点；launcher 不复制 V4L2/IIO/UART/Storage 逻辑。
-- Camera Test 的 JPEG 第一阶段不提供 quality UI，不做 RGB565/JPEG 双路并行采集。
-- Storage 默认写 `/smart-monitor`，在 NFS root 模式下可从 `<nfs-dir>/smart-monitor` 查看 session 产物。
-- Smart Monitor v1 不引入 GStreamer、QtMultimedia、libcamera、服务化或 AI 视觉算法；Playback 第一版只查看事件和 JPEG 帧。
+- Storage 默认写 `/smart-monitor`，只维护 `frames/` 和 `videos/` 两个子目录。
+- “视频”继续使用当前 CameraDevice 的连续 JPEG byte stream，扩展名为 `.mjpeg`，不引入 MP4 容器。
+- Smart Monitor 不提供 Playback，不引入 GStreamer、QtMultimedia、libcamera、服务化或 AI 视觉算法。

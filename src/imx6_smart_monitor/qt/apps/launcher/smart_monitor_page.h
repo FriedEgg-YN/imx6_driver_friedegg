@@ -2,15 +2,11 @@
 #define IMX6SMARTMONITOR_SMART_MONITOR_PAGE_H
 
 #include "monitor_controller.h"
-#include "storage/storage_manager.h"
 
-#include <QList>
 #include <QWidget>
 
 class QComboBox;
 class QLabel;
-class QListWidget;
-class QListWidgetItem;
 class QPushButton;
 class QTextEdit;
 
@@ -26,7 +22,7 @@ public:
 
 signals:
     void toolsRequested();
-    void playbackRequested();
+    void ld2410ConfigRequested();
 
 private:
     void refreshSnapshot(const MonitorSnapshot &snapshot);
@@ -37,11 +33,11 @@ private:
     PreviewPane *previewPane;
     QPushButton *startStopButton;
     QPushButton *snapshotButton;
-    QPushButton *torchButton;
     QPushButton *afButton;
-    QPushButton *playbackButton;
+    QPushButton *ld2410Button;
     QPushButton *toolsButton;
     QComboBox *modeCombo;
+    QComboBox *strobeCombo;
     QLabel *monitoringLabel;
     QLabel *presenceLabel;
     QLabel *luxLabel;
@@ -51,38 +47,9 @@ private:
     QLabel *afLabel;
     QLabel *torchLabel;
     QLabel *storageLabel;
-    QLabel *sessionLabel;
+    QLabel *recordingLabel;
     QLabel *errorLabel;
     QTextEdit *logView;
-};
-
-class PlaybackPage : public QWidget {
-    Q_OBJECT
-
-public:
-    explicit PlaybackPage(QWidget *parent = nullptr);
-
-signals:
-    void backRequested();
-
-private slots:
-    void refreshSessions();
-    void loadSession(int row);
-    void loadFrame(QListWidgetItem *item);
-
-private:
-    void loadEvents(const QString &sessionPath);
-    void loadFrames(const QString &sessionPath);
-    QString itemPath(QListWidgetItem *item) const;
-
-    StorageManager storage;
-    QString storageRoot;
-    QList<MonitorSessionInfo> sessions;
-    QListWidget *sessionList;
-    QListWidget *eventList;
-    QListWidget *frameList;
-    QLabel *imageLabel;
-    QLabel *statusLabel;
 };
 
 } // namespace imx6sm

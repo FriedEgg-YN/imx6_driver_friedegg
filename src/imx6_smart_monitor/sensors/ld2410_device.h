@@ -8,6 +8,10 @@
 
 namespace imx6sm {
 
+/*
+ * LD2410C 节点探测结果。misc 是主应用读取 presence/config 的首选路径，
+ * input 只作为 OUT 事件提示，UART 用于绑定 line discipline 和配置雷达。
+ */
 struct Ld2410Probe {
     QString miscPath;
     QString outPath;
@@ -20,6 +24,10 @@ struct Ld2410Probe {
     QString error;
 };
 
+/*
+ * LD2410C 实时状态快照。presence 是主闭环唯一依赖的 gate 信号，距离、能量、
+ * 工程模式 gate 数据主要供 LD2410 Test 展示和调参，不直接耦合录制策略。
+ */
 struct Ld2410State {
     bool available = false;
     bool reportValid = false;
@@ -45,6 +53,10 @@ struct Ld2410State {
     QString error;
 };
 
+/*
+ * LD2410C 可配置参数镜像。主页面只提供基础入口，完整读写、工程模式、
+ * 灵敏度和距离门配置仍在 LD2410 Test 中操作，避免主链路 UI 过重。
+ */
 struct Ld2410Config {
     bool available = false;
     quint8 maxGate = 0;
@@ -61,6 +73,12 @@ struct Ld2410Config {
     QString error;
 };
 
+/*
+ * LD2410Device 是对内核 friedegg/ld2410c misc ioctl 与 UART 绑定的轻量封装。
+ * 推荐顺序：probe() 找节点，openDevice() 打开 /dev/ld2410c0，readState() 周期读取；
+ * 需要配置时 attachUart() 后调用 readConfig()/writeConfig()。本类不拥有线程，
+ * 调用侧应避免在 UI 线程里做长时间阻塞配置或校准操作。
+ */
 class Ld2410Device {
 public:
     Ld2410Device();

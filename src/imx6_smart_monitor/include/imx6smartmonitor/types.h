@@ -44,7 +44,6 @@ struct MonitorPolicy {
     double darkExitLux = 40.0;
     int presenceStartConfirmMs = 300;
     int presenceEndCooldownMs = 15000;
-    int snapshotIntervalMs = 1000;
     QString storageRoot = QStringLiteral("/smart-monitor");
 };
 
@@ -73,7 +72,7 @@ enum class CameraState {
 
 enum class StorageState {
     Idle,
-    SessionOpen,
+    Ready,
     Degraded,
 };
 
@@ -96,4 +95,3 @@ Q_DECLARE_METATYPE(imx6sm::CameraState)
 Q_DECLARE_METATYPE(imx6sm::StrobeMode)
 
 #endif
-

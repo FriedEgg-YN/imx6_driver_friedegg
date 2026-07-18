@@ -2,24 +2,17 @@
 
 #include <QComboBox>
 #include <QDateTime>
-#include <QDir>
-#include <QFile>
 #include <QGridLayout>
 #include <QHBoxLayout>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
-#include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QStringList>
 #include <QTextEdit>
-#include <QTextStream>
 #include <QVBoxLayout>
-#include <QVariant>
 
 #include <functional>
 
@@ -127,11 +120,11 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     , previewPane(new PreviewPane(this))
     , startStopButton(new QPushButton(QStringLiteral("Start"), this))
     , snapshotButton(new QPushButton(QStringLiteral("Snapshot"), this))
-    , torchButton(new QPushButton(QStringLiteral("Torch"), this))
     , afButton(new QPushButton(QStringLiteral("AF"), this))
-    , playbackButton(new QPushButton(QStringLiteral("Playback"), this))
+    , ld2410Button(new QPushButton(QStringLiteral("LD2410"), this))
     , toolsButton(new QPushButton(QStringLiteral("Tools"), this))
     , modeCombo(new QComboBox(this))
+    , strobeCombo(new QComboBox(this))
     , monitoringLabel(makeValueLabel(this))
     , presenceLabel(makeValueLabel(this))
     , luxLabel(makeValueLabel(this))
@@ -141,7 +134,7 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     , afLabel(makeValueLabel(this))
     , torchLabel(makeValueLabel(this))
     , storageLabel(makeValueLabel(this))
-    , sessionLabel(makeValueLabel(this))
+    , recordingLabel(makeValueLabel(this))
     , errorLabel(makeValueLabel(this))
     , logView(new QTextEdit(this))
 {
@@ -153,16 +146,16 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
         "QLabel#valueLabel{font-size:13px;color:#f4f6f4;}"
         "QPushButton{font-size:13px;min-height:28px;padding:5px 9px;border:1px solid #3c4a48;border-radius:3px;background:#1f5d6b;color:#ffffff;}"
         "QPushButton:pressed{background:#2a7584;}"
-        "QPushButton:checked{background:#8a6428;border-color:#c99a45;}"
         "QPushButton:disabled{background:#293230;color:#77817e;}"
         "QComboBox{font-size:12px;min-height:28px;padding:4px;border:1px solid #3c4a48;background:#202725;color:#ffffff;}"
-        "QTextEdit{background:#0d0f0f;border:1px solid #2b3432;color:#b9c5c1;font-size:11px;}"
-        "QListWidget{background:#0d0f0f;border:1px solid #2b3432;color:#e8eeeb;font-size:12px;}"));
+        "QTextEdit{background:#0d0f0f;border:1px solid #2b3432;color:#b9c5c1;font-size:11px;}"));
 
-    torchButton->setCheckable(true);
     snapshotButton->setEnabled(false);
     afButton->setEnabled(false);
     modeCombo->setMinimumWidth(150);
+    strobeCombo->addItem(QStringLiteral("Auto"));
+    strobeCombo->addItem(QStringLiteral("Off"));
+    strobeCombo->addItem(QStringLiteral("Torch"));
 
     QLabel *title = new QLabel(QStringLiteral("Smart Monitor v1"), this);
     title->setObjectName(QStringLiteral("titleLabel"));
@@ -172,12 +165,12 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     top->setSpacing(6);
     top->addWidget(title);
     top->addWidget(modeCombo, 0);
+    top->addWidget(strobeCombo, 0);
     top->addStretch();
     top->addWidget(startStopButton);
     top->addWidget(snapshotButton);
-    top->addWidget(torchButton);
     top->addWidget(afButton);
-    top->addWidget(playbackButton);
+    top->addWidget(ld2410Button);
     top->addWidget(toolsButton);
 
     QGridLayout *statusGrid = new QGridLayout;
@@ -191,9 +184,9 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     addStatusRow(statusGrid, 4, QStringLiteral("Mode"), modeLabel, this);
     addStatusRow(statusGrid, 5, QStringLiteral("Frames"), frameLabel, this);
     addStatusRow(statusGrid, 6, QStringLiteral("AF"), afLabel, this);
-    addStatusRow(statusGrid, 7, QStringLiteral("Torch"), torchLabel, this);
+    addStatusRow(statusGrid, 7, QStringLiteral("Strobe"), torchLabel, this);
     addStatusRow(statusGrid, 8, QStringLiteral("Storage"), storageLabel, this);
-    addStatusRow(statusGrid, 9, QStringLiteral("Session"), sessionLabel, this);
+    addStatusRow(statusGrid, 9, QStringLiteral("Recording"), recordingLabel, this);
     addStatusRow(statusGrid, 10, QStringLiteral("Error"), errorLabel, this);
     statusGrid->setColumnStretch(1, 1);
 
@@ -226,12 +219,13 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
             controller->startMonitoring();
     });
     connect(snapshotButton, &QPushButton::clicked, controller, &MonitorController::requestManualSnapshot);
-    connect(torchButton, &QPushButton::toggled, controller, &MonitorController::setManualTorch);
     connect(afButton, &QPushButton::clicked, controller, &MonitorController::requestAutoFocus);
-    connect(playbackButton, &QPushButton::clicked, this, &SmartMonitorPage::playbackRequested);
+    connect(ld2410Button, &QPushButton::clicked, this, &SmartMonitorPage::ld2410ConfigRequested);
     connect(toolsButton, &QPushButton::clicked, this, &SmartMonitorPage::toolsRequested);
     connect(modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             controller, &MonitorController::setPreviewModeIndex);
+    connect(strobeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            controller, &MonitorController::setStrobePolicyIndex);
     connect(controller, &MonitorController::snapshotChanged, this, &SmartMonitorPage::refreshSnapshot);
     connect(controller, &MonitorController::previewFrameChanged, previewPane, &PreviewPane::setFrame);
     connect(controller, &MonitorController::modesChanged, this, &SmartMonitorPage::refreshModes);
@@ -245,9 +239,13 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
 
 void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
 {
+    const bool recordingNow = snapshot.recordingWanted ||
+        snapshot.recordingStatus.startsWith(QStringLiteral("recording:")) ||
+        snapshot.recordingStatus.startsWith(QStringLiteral("stopping:"));
     startStopButton->setText(snapshot.monitoringEnabled ? QStringLiteral("Stop") : QStringLiteral("Start"));
     snapshotButton->setEnabled(snapshot.camera == CameraState::Streaming);
     afButton->setEnabled(snapshot.camera == CameraState::Streaming);
+    modeCombo->setEnabled(modeCombo->count() > 0 && !recordingNow);
 
     monitoringLabel->setText(snapshot.monitoringEnabled ? QStringLiteral("enabled") : QStringLiteral("disabled"));
     const QString source = snapshot.presenceSource.isEmpty() ? QStringLiteral("--") : snapshot.presenceSource;
@@ -262,16 +260,18 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
     frameLabel->setText(QString::number(snapshot.frameCount));
     afLabel->setText(snapshot.afStatus.isEmpty() ? QStringLiteral("--") : snapshot.afStatus);
 
-    if (torchButton->isChecked())
-        torchLabel->setText(QStringLiteral("manual"));
+    const int strobeIndex = strobeCombo->currentIndex();
+    if (strobeIndex == 0)
+        torchLabel->setText(snapshot.torchWanted ? QStringLiteral("auto torch") : QStringLiteral("auto off"));
+    else if (strobeIndex == 2)
+        torchLabel->setText(QStringLiteral("forced torch"));
     else
-        torchLabel->setText(snapshot.torchWanted ? QStringLiteral("auto") : QStringLiteral("off"));
+        torchLabel->setText(QStringLiteral("forced off"));
 
-    QString storageText = toString(snapshot.storage);
-    if (!snapshot.storageAction.isEmpty())
-        storageText += QStringLiteral(" %1").arg(snapshot.storageAction);
-    storageLabel->setText(storageText);
-    sessionLabel->setText(snapshot.sessionId.isEmpty() ? QStringLiteral("--") : snapshot.sessionId);
+    storageLabel->setText(toString(snapshot.storage));
+    recordingLabel->setText(snapshot.recordingStatus.isEmpty()
+        ? (snapshot.recordingWanted ? QStringLiteral("wanted") : QStringLiteral("--"))
+        : snapshot.recordingStatus);
 
     QStringList errors;
     if (!snapshot.cameraError.isEmpty())
@@ -284,6 +284,8 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
     overlay << toString(snapshot.presence) << toString(snapshot.camera);
     if (!snapshot.activeMode.isEmpty())
         overlay << snapshot.activeMode;
+    if (recordingNow)
+        overlay << QStringLiteral("REC");
     overlay << QStringLiteral("frames:%1").arg(snapshot.frameCount);
     previewPane->setOverlay(overlay.join(QStringLiteral("  ")));
 }
@@ -302,7 +304,11 @@ void SmartMonitorPage::refreshModes()
     for (const CameraMode &mode : modes)
         modeCombo->addItem(mode.label());
     modeCombo->setCurrentIndex(controller->activeModeIndex());
-    modeCombo->setEnabled(true);
+    const MonitorSnapshot snapshot = controller->snapshot();
+    const bool recordingNow = snapshot.recordingWanted ||
+        snapshot.recordingStatus.startsWith(QStringLiteral("recording:")) ||
+        snapshot.recordingStatus.startsWith(QStringLiteral("stopping:"));
+    modeCombo->setEnabled(!recordingNow);
 }
 
 void SmartMonitorPage::appendLogLine(const QString &line)
@@ -311,193 +317,6 @@ void SmartMonitorPage::appendLogLine(const QString &line)
         return;
     logView->append(QStringLiteral("%1  %2")
                     .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), line));
-}
-
-PlaybackPage::PlaybackPage(QWidget *parent)
-    : QWidget(parent)
-    , storageRoot(QStringLiteral("/smart-monitor"))
-    , sessionList(new QListWidget(this))
-    , eventList(new QListWidget(this))
-    , frameList(new QListWidget(this))
-    , imageLabel(new QLabel(QStringLiteral("--"), this))
-    , statusLabel(new QLabel(QStringLiteral("--"), this))
-{
-    setMinimumSize(480, 272);
-    setStyleSheet(QStringLiteral(
-        "QWidget{background:#151719;color:#eef1ef;font-family:DejaVu Sans;}"
-        "QPushButton{font-size:13px;min-height:28px;padding:5px 9px;border:1px solid #3c4a48;border-radius:3px;background:#1f5d6b;color:#ffffff;}"
-        "QPushButton:pressed{background:#2a7584;}"
-        "QLabel{font-size:12px;color:#dfe5e2;}"
-        "QListWidget{background:#0d0f0f;border:1px solid #2b3432;color:#e8eeeb;font-size:12px;}"));
-
-    QPushButton *back = new QPushButton(QStringLiteral("Back"), this);
-    QPushButton *refresh = new QPushButton(QStringLiteral("Refresh"), this);
-    QLabel *title = new QLabel(QStringLiteral("Playback"), this);
-    title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:700;color:#ffffff;"));
-
-    QHBoxLayout *top = new QHBoxLayout;
-    top->setContentsMargins(8, 6, 8, 2);
-    top->addWidget(title);
-    top->addStretch();
-    top->addWidget(refresh);
-    top->addWidget(back);
-
-    sessionList->setMinimumWidth(170);
-    sessionList->setMaximumWidth(230);
-    eventList->setMinimumWidth(210);
-    frameList->setMaximumHeight(110);
-    imageLabel->setAlignment(Qt::AlignCenter);
-    imageLabel->setMinimumSize(220, 150);
-    imageLabel->setStyleSheet(QStringLiteral("background:#080909;border:1px solid #2b3432;color:#7f8b8c;"));
-
-    QVBoxLayout *right = new QVBoxLayout;
-    right->setContentsMargins(0, 0, 0, 0);
-    right->setSpacing(6);
-    right->addWidget(frameList);
-    right->addWidget(imageLabel, 1);
-    right->addWidget(statusLabel);
-
-    QHBoxLayout *body = new QHBoxLayout;
-    body->setContentsMargins(8, 2, 8, 6);
-    body->setSpacing(8);
-    body->addWidget(sessionList);
-    body->addWidget(eventList, 1);
-    body->addLayout(right, 1);
-
-    QVBoxLayout *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(4);
-    layout->addLayout(top);
-    layout->addLayout(body, 1);
-
-    connect(back, &QPushButton::clicked, this, &PlaybackPage::backRequested);
-    connect(refresh, &QPushButton::clicked, this, &PlaybackPage::refreshSessions);
-    connect(sessionList, &QListWidget::currentRowChanged, this, &PlaybackPage::loadSession);
-    connect(frameList, &QListWidget::itemClicked, this, &PlaybackPage::loadFrame);
-
-    refreshSessions();
-}
-
-void PlaybackPage::refreshSessions()
-{
-    QString error;
-    sessions = storage.listMonitorSessions(storageRoot, &error);
-    sessionList->clear();
-    eventList->clear();
-    frameList->clear();
-    imageLabel->setText(QStringLiteral("--"));
-    imageLabel->setPixmap(QPixmap());
-
-    for (const MonitorSessionInfo &session : sessions) {
-        QListWidgetItem *item = new QListWidgetItem(
-            QStringLiteral("%1\n%2 frame(s)").arg(session.sessionId).arg(session.frameCount));
-        item->setData(Qt::UserRole, session.sessionPath);
-        sessionList->addItem(item);
-    }
-
-    if (!error.isEmpty())
-        statusLabel->setText(error);
-    else
-        statusLabel->setText(QStringLiteral("%1 session(s)").arg(sessions.size()));
-
-    if (!sessions.isEmpty())
-        sessionList->setCurrentRow(0);
-}
-
-void PlaybackPage::loadSession(int row)
-{
-    if (row < 0 || row >= sessions.size())
-        return;
-
-    const MonitorSessionInfo session = sessions.at(row);
-    loadEvents(session.sessionPath);
-    loadFrames(session.sessionPath);
-    statusLabel->setText(QStringLiteral("%1  %2 event(s)  %3 frame(s)")
-                         .arg(session.sessionId)
-                         .arg(session.eventCount)
-                         .arg(session.frameCount));
-
-    if (frameList->count() > 0) {
-        frameList->setCurrentRow(0);
-        loadFrame(frameList->item(0));
-    }
-}
-
-void PlaybackPage::loadFrame(QListWidgetItem *item)
-{
-    const QString path = itemPath(item);
-    if (path.isEmpty())
-        return;
-
-    QImage image(path);
-    if (image.isNull()) {
-        imageLabel->setPixmap(QPixmap());
-        imageLabel->setText(QStringLiteral("cannot load image"));
-        return;
-    }
-
-    imageLabel->setText(QString());
-    imageLabel->setPixmap(QPixmap::fromImage(image).scaled(imageLabel->size(),
-                                                           Qt::KeepAspectRatio,
-                                                           Qt::SmoothTransformation));
-}
-
-void PlaybackPage::loadEvents(const QString &sessionPath)
-{
-    eventList->clear();
-    QFile file(QDir(sessionPath).absoluteFilePath(QStringLiteral("events.jsonl")));
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-
-    QTextStream stream(&file);
-    while (!stream.atEnd()) {
-        const QString line = stream.readLine().trimmed();
-        if (line.isEmpty())
-            continue;
-        const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
-        if (doc.isObject()) {
-            const QJsonObject obj = doc.object();
-            eventList->addItem(QStringLiteral("%1  %2  %3")
-                               .arg(obj.value(QStringLiteral("ts")).toString(),
-                                    obj.value(QStringLiteral("type")).toString(),
-                                    obj.value(QStringLiteral("status")).toString()));
-        } else {
-            eventList->addItem(line);
-        }
-    }
-}
-
-void PlaybackPage::loadFrames(const QString &sessionPath)
-{
-    frameList->clear();
-    QFile file(QDir(sessionPath).absoluteFilePath(QStringLiteral("index.jsonl")));
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-
-    QTextStream stream(&file);
-    while (!stream.atEnd()) {
-        const QString line = stream.readLine().trimmed();
-        if (line.isEmpty())
-            continue;
-        const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
-        if (!doc.isObject())
-            continue;
-        const QJsonObject obj = doc.object();
-        const QString relPath = obj.value(QStringLiteral("path")).toString();
-        if (relPath.isEmpty())
-            continue;
-        QListWidgetItem *item = new QListWidgetItem(
-            QStringLiteral("%1  %2").arg(obj.value(QStringLiteral("seq")).toInt()).arg(relPath));
-        item->setData(Qt::UserRole, QDir(sessionPath).absoluteFilePath(relPath));
-        frameList->addItem(item);
-    }
-}
-
-QString PlaybackPage::itemPath(QListWidgetItem *item) const
-{
-    if (!item)
-        return QString();
-    return item->data(Qt::UserRole).toString();
 }
 
 } // namespace imx6sm

@@ -13,7 +13,6 @@ class QToolButton;
 namespace imx6sm {
 
 class ModuleTestWindow;
-class PlaybackPage;
 class SmartMonitorPage;
 
 class SmartMonitorLauncher : public QWidget {
@@ -31,7 +30,7 @@ private:
 
     QWidget *createHomePage();
     void showMonitor();
-    void showPlayback();
+    void showLd2410Config();
     QToolButton *createAppButton(const AppEntry &entry);
     void addApp(QGridLayout *grid, int row, int column, const AppEntry &entry);
     void openApp(const AppEntry &entry);
@@ -40,7 +39,6 @@ private:
     QStackedWidget *stack;
     SmartMonitorPage *monitorPage;
     QWidget *homePage;
-    PlaybackPage *playbackPage;
     QWidget *currentAppPage = nullptr;
 };
 

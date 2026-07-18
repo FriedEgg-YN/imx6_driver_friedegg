@@ -22,7 +22,7 @@ private:
     QLabel *storageLabel;
     QLabel *torchLabel;
     QLabel *wantedLabel;
-    QLabel *sessionLabel;
+    QLabel *recordingLabel;
     QLabel *errorLabel;
     QLabel *actionLabel;
     MonitorCore core;

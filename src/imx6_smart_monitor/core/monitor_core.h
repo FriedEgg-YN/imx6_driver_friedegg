@@ -12,22 +12,29 @@ struct MonitorSnapshot {
     CameraState camera = CameraState::Closed;
     StorageState storage = StorageState::Idle;
     bool cameraWanted = false;
+    bool recordingWanted = false;
     bool torchWanted = false;
     QString presenceSource;
     double lux = 0.0;
-    QString sessionId;
     QString activeMode;
     qulonglong frameCount = 0;
     QString afStatus;
+    QString recordingPath;
+    QString recordingStatus;
     QString cameraError;
     QString storageError;
     QString cameraAction;
-    QString storageAction;
+    QString recordingAction;
     QString strobeAction;
     QString focusAction;
     QString lastAction;
 };
 
+/*
+ * MonitorCore 是 Smart Monitor 的纯状态机：输入传感器/camera/storage/recording
+ * 状态，输出 cameraAction/recordingAction/strobeAction。它不访问 Qt 控件、设备
+ * 节点或文件系统，便于用 Core Test 单独验证“有人 -> 录制”的决策链。
+ */
 class MonitorCore {
 public:
     MonitorCore();
@@ -44,8 +51,8 @@ public:
                            const QString &activeMode = QString(),
                            qulonglong frameCount = 0,
                            const QString &afStatus = QString());
-    void handleStorageState(StorageState state, const QString &error = QString(),
-                            const QString &sessionId = QString());
+    void handleStorageState(StorageState state, const QString &error = QString());
+    void handleRecordingState(const QString &path, const QString &status);
     void handlePresence(bool present);
     void handleLux(double lux);
     void confirmPresenceTimeout();
@@ -56,6 +63,7 @@ private:
     void clearActions();
     void updateLightDecision();
     void updateCameraDecision();
+    void updateRecordingDecision();
 
     MonitorPolicy policy;
     MonitorSnapshot current;

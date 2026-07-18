@@ -59,7 +59,6 @@ SmartMonitorLauncher::SmartMonitorLauncher(QWidget *parent)
     , stack(new QStackedWidget(this))
     , monitorPage(new SmartMonitorPage(this))
     , homePage(nullptr)
-    , playbackPage(new PlaybackPage(this))
 {
     setMinimumSize(480, 272);
     setWindowTitle(QStringLiteral("i.MX6 Smart Monitor"));
@@ -79,11 +78,9 @@ SmartMonitorLauncher::SmartMonitorLauncher(QWidget *parent)
     homePage = createHomePage();
     stack->addWidget(monitorPage);
     stack->addWidget(homePage);
-    stack->addWidget(playbackPage);
 
     connect(monitorPage, &SmartMonitorPage::toolsRequested, this, &SmartMonitorLauncher::showHome);
-    connect(monitorPage, &SmartMonitorPage::playbackRequested, this, &SmartMonitorLauncher::showPlayback);
-    connect(playbackPage, &PlaybackPage::backRequested, this, &SmartMonitorLauncher::showMonitor);
+    connect(monitorPage, &SmartMonitorPage::ld2410ConfigRequested, this, &SmartMonitorLauncher::showLd2410Config);
 
     QVBoxLayout *layout = new QVBoxLayout;
     layout->setContentsMargins(0, 0, 0, 0);
@@ -199,15 +196,11 @@ void SmartMonitorLauncher::showMonitor()
     stack->setCurrentWidget(monitorPage);
 }
 
-void SmartMonitorLauncher::showPlayback()
+void SmartMonitorLauncher::showLd2410Config()
 {
-    if (currentAppPage) {
-        QWidget *oldPage = currentAppPage;
-        currentAppPage = nullptr;
-        stack->removeWidget(oldPage);
-        oldPage->deleteLater();
-    }
-    stack->setCurrentWidget(playbackPage);
+    openApp(AppEntry{QStringLiteral("LD2410C"), QStringLiteral("presence config"),
+                     QStringLiteral("RAD"), QStringLiteral("#c45b31"),
+                     []() { return new Ld2410TestWindow; }});
 }
 
 void SmartMonitorLauncher::showHome()

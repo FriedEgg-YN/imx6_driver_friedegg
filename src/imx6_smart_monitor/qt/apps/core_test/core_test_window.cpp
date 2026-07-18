@@ -14,7 +14,7 @@ CoreTestWindow::CoreTestWindow(QWidget *parent)
     , storageLabel(addRow(QStringLiteral("Storage")))
     , torchLabel(addRow(QStringLiteral("Torch")))
     , wantedLabel(addRow(QStringLiteral("Wanted")))
-    , sessionLabel(addRow(QStringLiteral("Session")))
+    , recordingLabel(addRow(QStringLiteral("Recording")))
     , errorLabel(addRow(QStringLiteral("Error")))
     , actionLabel(addRow(QStringLiteral("Action")))
 {
@@ -79,8 +79,11 @@ void CoreTestWindow::refresh()
     cameraLabel->setText(toString(state.camera));
     storageLabel->setText(toString(state.storage));
     torchLabel->setText(state.torchWanted ? QStringLiteral("on") : QStringLiteral("off"));
-    wantedLabel->setText(QStringLiteral("camera:%1 torch:%2").arg(state.cameraWanted ? QStringLiteral("yes") : QStringLiteral("no"), state.torchWanted ? QStringLiteral("yes") : QStringLiteral("no")));
-    sessionLabel->setText(state.sessionId.isEmpty() ? QStringLiteral("--") : state.sessionId);
+    wantedLabel->setText(QStringLiteral("camera:%1 record:%2 torch:%3")
+                         .arg(state.cameraWanted ? QStringLiteral("yes") : QStringLiteral("no"),
+                              state.recordingWanted ? QStringLiteral("yes") : QStringLiteral("no"),
+                              state.torchWanted ? QStringLiteral("yes") : QStringLiteral("no")));
+    recordingLabel->setText(state.recordingStatus.isEmpty() ? QStringLiteral("--") : state.recordingStatus);
     errorLabel->setText((state.cameraError + QStringLiteral(" ") + state.storageError).trimmed().isEmpty() ? QStringLiteral("--") : (state.cameraError + QStringLiteral(" ") + state.storageError).trimmed());
     actionLabel->setText(state.lastAction.isEmpty() ? QStringLiteral("--") : state.lastAction);
     setStatus(toString(state.presence));
