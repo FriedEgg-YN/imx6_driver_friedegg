@@ -43,7 +43,6 @@ public slots:
     void startMonitoring();
     void stopMonitoring();
     void setPreviewModeIndex(int index);
-    void requestManualSnapshot();
     void setStrobePolicyIndex(int index);
     void requestAutoFocus();
     void focusAtFramePoint(int x, int y);
@@ -71,8 +70,6 @@ private:
     bool ensureRecordingStarted();
     void stopRecording();
     void syncTorch();
-    void queueSnapshot();
-    void handleSnapshotStatus(const QString &status);
     void handleRecordingStatus(const QString &status);
     void updateCoreCameraState(CameraState state = CameraState::Closed);
     CameraMode selectedPreviewMode() const;
@@ -103,8 +100,6 @@ private:
     int modeIndex = 0;
     StrobePolicy currentStrobePolicy = StrobePolicy::Auto;
     bool recordingActive = false;
-    bool snapshotPending = false;
-    QString snapshotPendingPath;
     QString lastSensorError;
 };
 

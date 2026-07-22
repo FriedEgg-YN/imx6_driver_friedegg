@@ -32,7 +32,6 @@ private:
     MonitorController *controller;
     PreviewPane *previewPane;
     QPushButton *startStopButton;
-    QPushButton *snapshotButton;
     QPushButton *afButton;
     QPushButton *ld2410Button;
     QPushButton *toolsButton;
@@ -41,6 +40,7 @@ private:
     QLabel *monitoringLabel;
     QLabel *presenceLabel;
     QLabel *luxLabel;
+    QLabel *occlusionLabel;
     QLabel *cameraLabel;
     QLabel *modeLabel;
     QLabel *frameLabel;

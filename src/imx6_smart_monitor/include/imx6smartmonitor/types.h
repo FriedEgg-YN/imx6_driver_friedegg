@@ -27,6 +27,12 @@ struct SensorState {
     int staticEnergy = -1;
 };
 
+struct OcclusionInput {
+    bool hasLux = false;
+    double lux = 0.0;
+    qint64 proximityRaw = -1;
+};
+
 struct CameraMode {
     QString fourcc;
     int width = 0;
@@ -42,6 +48,12 @@ struct CameraMode {
 struct MonitorPolicy {
     double darkEnterLux = 20.0;
     double darkExitLux = 40.0;
+    double occlusionEnterLux = 8.0;
+    double occlusionExitLux = 18.0;
+    qint64 occlusionProximityRaw = 800;
+    qint64 occlusionExitProximityRaw = 500;
+    int occlusionEnterCount = 4;
+    int occlusionExitCount = 4;
     int presenceStartConfirmMs = 300;
     int presenceEndCooldownMs = 15000;
     QString storageRoot = QStringLiteral("/smart-monitor");

@@ -28,6 +28,8 @@ void MonitorCore::reset()
     latestPresence = false;
     latestLuxValid = false;
     latestLux = 0.0;
+    occlusionEnterSamples = 0;
+    occlusionExitSamples = 0;
 }
 
 void MonitorCore::startMonitoring()
@@ -54,6 +56,10 @@ void MonitorCore::stopMonitoring()
     current.recordingAction = QStringLiteral("stop");
     current.cameraAction = QStringLiteral("close");
     current.strobeAction = QStringLiteral("off");
+    current.occlusionAlarm = false;
+    current.occlusionNear = false;
+    occlusionEnterSamples = 0;
+    occlusionExitSamples = 0;
     current.storage = StorageState::Idle;
     current.lastAction = QStringLiteral("monitoring disabled");
 }
@@ -69,6 +75,8 @@ void MonitorCore::handleSensorState(const SensorState &state)
         latestLux = state.lux;
         current.lux = state.lux;
     }
+    current.proximityRaw = state.proximityRaw;
+    current.irRaw = state.irRaw;
 
     if (current.monitoringEnabled) {
         if (state.presence) {
@@ -155,6 +163,51 @@ void MonitorCore::handleLux(double lux)
     latestLuxValid = true;
     latestLux = lux;
     current.lux = lux;
+    updateLightDecision();
+}
+
+void MonitorCore::handleOcclusionInput(const OcclusionInput &input)
+{
+    clearActions();
+
+    if (input.hasLux) {
+        latestLuxValid = true;
+        latestLux = input.lux;
+        current.lux = input.lux;
+    }
+    current.proximityRaw = input.proximityRaw;
+
+    const bool nearObject = input.proximityRaw >= (current.occlusionAlarm
+        ? policy.occlusionExitProximityRaw
+        : policy.occlusionProximityRaw);
+    const bool lowLux = input.hasLux && input.lux < (current.occlusionAlarm
+        ? policy.occlusionExitLux
+        : policy.occlusionEnterLux);
+    const bool luxRecovered = !input.hasLux || input.lux > policy.occlusionExitLux;
+    const bool proximityRecovered = input.proximityRaw < policy.occlusionExitProximityRaw;
+    const bool candidate = current.monitoringEnabled && nearObject && lowLux;
+    const bool clearCandidate = !current.monitoringEnabled || proximityRecovered || luxRecovered;
+
+    current.occlusionNear = nearObject;
+
+    if (candidate) {
+        ++occlusionEnterSamples;
+        occlusionExitSamples = 0;
+    } else if (clearCandidate) {
+        ++occlusionExitSamples;
+        occlusionEnterSamples = 0;
+    }
+
+    if (!current.occlusionAlarm && occlusionEnterSamples >= policy.occlusionEnterCount) {
+        current.occlusionAlarm = true;
+        current.lastAction = QStringLiteral("camera occlusion alarm");
+    } else if (current.occlusionAlarm && occlusionExitSamples >= policy.occlusionExitCount) {
+        current.occlusionAlarm = false;
+        current.lastAction = QStringLiteral("camera occlusion cleared");
+    }
+
+    updateCameraDecision();
+    updateRecordingDecision();
     updateLightDecision();
 }
 

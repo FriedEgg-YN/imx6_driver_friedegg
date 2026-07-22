@@ -119,7 +119,6 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     , controller(new MonitorController(this))
     , previewPane(new PreviewPane(this))
     , startStopButton(new QPushButton(QStringLiteral("Start"), this))
-    , snapshotButton(new QPushButton(QStringLiteral("Snapshot"), this))
     , afButton(new QPushButton(QStringLiteral("AF"), this))
     , ld2410Button(new QPushButton(QStringLiteral("LD2410"), this))
     , toolsButton(new QPushButton(QStringLiteral("Tools"), this))
@@ -128,6 +127,7 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     , monitoringLabel(makeValueLabel(this))
     , presenceLabel(makeValueLabel(this))
     , luxLabel(makeValueLabel(this))
+    , occlusionLabel(makeValueLabel(this))
     , cameraLabel(makeValueLabel(this))
     , modeLabel(makeValueLabel(this))
     , frameLabel(makeValueLabel(this))
@@ -150,7 +150,6 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
         "QComboBox{font-size:12px;min-height:28px;padding:4px;border:1px solid #3c4a48;background:#202725;color:#ffffff;}"
         "QTextEdit{background:#0d0f0f;border:1px solid #2b3432;color:#b9c5c1;font-size:11px;}"));
 
-    snapshotButton->setEnabled(false);
     afButton->setEnabled(false);
     modeCombo->setMinimumWidth(150);
     strobeCombo->addItem(QStringLiteral("Auto"));
@@ -168,7 +167,6 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     top->addWidget(strobeCombo, 0);
     top->addStretch();
     top->addWidget(startStopButton);
-    top->addWidget(snapshotButton);
     top->addWidget(afButton);
     top->addWidget(ld2410Button);
     top->addWidget(toolsButton);
@@ -180,14 +178,15 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
     addStatusRow(statusGrid, 0, QStringLiteral("Monitor"), monitoringLabel, this);
     addStatusRow(statusGrid, 1, QStringLiteral("Presence"), presenceLabel, this);
     addStatusRow(statusGrid, 2, QStringLiteral("Lux"), luxLabel, this);
-    addStatusRow(statusGrid, 3, QStringLiteral("Camera"), cameraLabel, this);
-    addStatusRow(statusGrid, 4, QStringLiteral("Mode"), modeLabel, this);
-    addStatusRow(statusGrid, 5, QStringLiteral("Frames"), frameLabel, this);
-    addStatusRow(statusGrid, 6, QStringLiteral("AF"), afLabel, this);
-    addStatusRow(statusGrid, 7, QStringLiteral("Strobe"), torchLabel, this);
-    addStatusRow(statusGrid, 8, QStringLiteral("Storage"), storageLabel, this);
-    addStatusRow(statusGrid, 9, QStringLiteral("Recording"), recordingLabel, this);
-    addStatusRow(statusGrid, 10, QStringLiteral("Error"), errorLabel, this);
+    addStatusRow(statusGrid, 3, QStringLiteral("Occlusion"), occlusionLabel, this);
+    addStatusRow(statusGrid, 4, QStringLiteral("Camera"), cameraLabel, this);
+    addStatusRow(statusGrid, 5, QStringLiteral("Mode"), modeLabel, this);
+    addStatusRow(statusGrid, 6, QStringLiteral("Frames"), frameLabel, this);
+    addStatusRow(statusGrid, 7, QStringLiteral("AF"), afLabel, this);
+    addStatusRow(statusGrid, 8, QStringLiteral("Strobe"), torchLabel, this);
+    addStatusRow(statusGrid, 9, QStringLiteral("Storage"), storageLabel, this);
+    addStatusRow(statusGrid, 10, QStringLiteral("Recording"), recordingLabel, this);
+    addStatusRow(statusGrid, 11, QStringLiteral("Error"), errorLabel, this);
     statusGrid->setColumnStretch(1, 1);
 
     QWidget *statusPane = new QWidget(this);
@@ -218,7 +217,6 @@ SmartMonitorPage::SmartMonitorPage(QWidget *parent)
         else
             controller->startMonitoring();
     });
-    connect(snapshotButton, &QPushButton::clicked, controller, &MonitorController::requestManualSnapshot);
     connect(afButton, &QPushButton::clicked, controller, &MonitorController::requestAutoFocus);
     connect(ld2410Button, &QPushButton::clicked, this, &SmartMonitorPage::ld2410ConfigRequested);
     connect(toolsButton, &QPushButton::clicked, this, &SmartMonitorPage::toolsRequested);
@@ -243,7 +241,6 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
         snapshot.recordingStatus.startsWith(QStringLiteral("recording:")) ||
         snapshot.recordingStatus.startsWith(QStringLiteral("stopping:"));
     startStopButton->setText(snapshot.monitoringEnabled ? QStringLiteral("Stop") : QStringLiteral("Start"));
-    snapshotButton->setEnabled(snapshot.camera == CameraState::Streaming);
     afButton->setEnabled(snapshot.camera == CameraState::Streaming);
     modeCombo->setEnabled(modeCombo->count() > 0 && !recordingNow);
 
@@ -251,6 +248,15 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
     const QString source = snapshot.presenceSource.isEmpty() ? QStringLiteral("--") : snapshot.presenceSource;
     presenceLabel->setText(QStringLiteral("%1  %2").arg(toString(snapshot.presence), source));
     luxLabel->setText(QStringLiteral("%1 lx").arg(snapshot.lux, 0, 'f', 1));
+    const QString occlusionText = QStringLiteral("%1  ps:%2 lux:%3 ir:%4")
+        .arg(snapshot.occlusionAlarm ? QStringLiteral("ALARM") : (snapshot.occlusionNear ? QStringLiteral("near") : QStringLiteral("clear")))
+        .arg(snapshot.proximityRaw)
+        .arg(snapshot.lux, 0, 'f', 1)
+        .arg(snapshot.irRaw);
+    occlusionLabel->setText(occlusionText);
+    occlusionLabel->setStyleSheet(snapshot.occlusionAlarm
+        ? QStringLiteral("QLabel#valueLabel{color:#ff756b;font-weight:700;}")
+        : QString());
 
     QString cameraText = toString(snapshot.camera);
     if (snapshot.cameraWanted)
@@ -286,6 +292,8 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
         overlay << snapshot.activeMode;
     if (recordingNow)
         overlay << QStringLiteral("REC");
+    if (snapshot.occlusionAlarm)
+        overlay << QStringLiteral("OCCLUSION");
     overlay << QStringLiteral("frames:%1").arg(snapshot.frameCount);
     previewPane->setOverlay(overlay.join(QStringLiteral("  ")));
 }

@@ -50,8 +50,6 @@
 | Linux 4.1.15、DTB、外置 `.ko` | Linaro `arm-linux-gnueabihf-gcc 4.9.4` | 由 `bsp/toolchain.mk` 通过 `BSP_KERNEL_CROSS_COMPILE` 覆盖 Buildroot 的 kernel make flags |
 | rootfs、driver test、`imx6-monitor`、Qt5 应用 | Buildroot internal `arm-buildroot-linux-gnueabihf-gcc 13.x + glibc` | 由 Buildroot 生成，安装进 rootfs 的用户态程序都走这条链路 |
 
-切换到 glibc rootfs 后，旧 musl rootfs 下构建出的用户态二进制不能直接复用。需要重新构建 rootfs 和所有安装进 rootfs 的用户态程序，并用 `file` 或板端运行结果确认解释器变为 glibc hard-float 路径，通常是 `/lib/ld-linux-armhf.so.3`。
-
 ## 常用构建入口
 
 兼容总入口：
@@ -77,7 +75,7 @@ bash buildscripts/pkg_clean_stale.sh <pkg>
 bash buildscripts/config.sh status
 ```
 
-旧的 `verify` 子命令已删除；验证方式改为按改动范围选择最窄构建命令，再到板端运行对应包内 README 里的测试命令。脚本边界、Buildroot 中间目录和残留清理规则见 [docs/编译命令总结.md](docs/编译命令总结.md)。
+脚本边界、Buildroot 中间目录和残留清理规则见 [docs/编译命令总结.md](docs/编译命令总结.md)。
 
 ## 本地包一览
 

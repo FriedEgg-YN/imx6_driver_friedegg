@@ -3,10 +3,10 @@
 本目录实现面向 i.MX6ULL 板端的 Qt 触摸屏 Smart Monitor 与硬件测试程序。当前主应用 `imx6-smart-monitor` 的核心闭环已经精简为：
 
 ```text
-LD2410C presence -> MonitorCore -> CameraDevice record -> /smart-monitor/videos
+AP3216C proximity/lux + LD2410C presence -> MonitorCore -> CameraDevice record -> /smart-monitor/videos
 ```
 
-主页面保留 RGB565 预览、手动 Snapshot、自动/关闭/常亮补光、分辨率/帧率选择和 LD2410C 配置入口。AP3216C 仍用于 `Auto` strobe 的 lux 判断；Camera Test 与 LD2410 Test 继续作为完整硬件实验台保留。
+主页面保留 RGB565 预览、摄像头遮挡报警、自动/关闭/常亮补光、分辨率/帧率选择和 LD2410C 配置入口。AP3216C 用于 `Auto` strobe 的 lux 判断，也用于基于 proximity/lux 的遮挡报警；Camera Test 与 LD2410 Test 继续作为完整硬件实验台保留。
 
 ## 目录概览
 
@@ -27,7 +27,7 @@ LD2410C presence -> MonitorCore -> CameraDevice record -> /smart-monitor/videos
 
 | 程序 | 作用 |
 | --- | --- |
-| `imx6-smart-monitor` | Smart Monitor 主页面：presence 触发录制、预览、手动截图、strobe 和 Tools。 |
+| `imx6-smart-monitor` | Smart Monitor 主页面：presence 触发录制、预览、遮挡报警、strobe 和 Tools。 |
 | `imx6-sm-touch-test` | 触摸 input/Qt 事件链路测试。 |
 | `imx6-sm-ap3216c-test` | AP3216C IIO sysfs 扫描和采样。 |
 | `imx6-sm-ld2410-test` | LD2410C OUT/input、misc ioctl、UART 配置和工程数据测试。 |
@@ -40,6 +40,7 @@ LD2410C presence -> MonitorCore -> CameraDevice record -> /smart-monitor/videos
 | 文档 | 内容 |
 | --- | --- |
 | [`docs/smart-monitor-v1-closed-loop.md`](docs/smart-monitor-v1-closed-loop.md) | Smart Monitor record-first 闭环、状态机、存储产物和验收命令。 |
+| [`docs/ld2410-device-qt-wrapper-learning-notes.md`](docs/ld2410-device-qt-wrapper-learning-notes.md) | LD2410Device Qt 用户态封装的 C++/Qt/状态调用分层学习笔记。 |
 | [`docs/camera-test-performance-notes.md`](docs/camera-test-performance-notes.md) | Camera Test RGB565/JPEG 采集性能、验证命令、已知限制。 |
 | [`docs/camera-data-flow-and-format-path.md`](docs/camera-data-flow-and-format-path.md) | OV5640 后的数据流、RGB565/JPEG 格式转换、buffer 与 SOI/EOI 裁剪语义。 |
 
@@ -74,7 +75,7 @@ QT_QPA_PLATFORM=linuxfb imx6-sm-core-test
 find /smart-monitor -maxdepth 2 -type f | sort
 ```
 
-预期只看到 `frames/*.jpg` 和 `videos/*.mjpeg`。不再生成 `sessions/`、`latest/`、`session.json`、`events.jsonl` 或 `index.jsonl`。
+预期 Smart Monitor 主页面只因 presence 录制生成 `videos/*.mjpeg`；手动截图功能已移除。Camera Test 仍可单独验证 `frames/*.jpg`。不再生成 `sessions/`、`latest/`、`session.json`、`events.jsonl` 或 `index.jsonl`。
 
 ## 边界
 

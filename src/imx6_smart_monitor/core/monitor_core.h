@@ -14,8 +14,12 @@ struct MonitorSnapshot {
     bool cameraWanted = false;
     bool recordingWanted = false;
     bool torchWanted = false;
+    bool occlusionAlarm = false;
+    bool occlusionNear = false;
     QString presenceSource;
     double lux = 0.0;
+    qint64 proximityRaw = -1;
+    qint64 irRaw = -1;
     QString activeMode;
     qulonglong frameCount = 0;
     QString afStatus;
@@ -55,6 +59,7 @@ public:
     void handleRecordingState(const QString &path, const QString &status);
     void handlePresence(bool present);
     void handleLux(double lux);
+    void handleOcclusionInput(const OcclusionInput &input);
     void confirmPresenceTimeout();
     void cooldownTimeout();
     void setStorageWritable(bool writable);
@@ -70,6 +75,8 @@ private:
     bool latestPresence = false;
     bool latestLuxValid = false;
     double latestLux = 0.0;
+    int occlusionEnterSamples = 0;
+    int occlusionExitSamples = 0;
 };
 
 } // namespace imx6sm

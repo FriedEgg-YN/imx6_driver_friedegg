@@ -55,7 +55,6 @@ MonitorController::MonitorController(QObject *parent)
         updateCoreCameraState(camera.state());
         emitSnapshot();
     });
-    connect(&camera, &CameraDevice::snapshotStatusChanged, this, &MonitorController::handleSnapshotStatus);
     connect(&camera, &CameraDevice::recordingStatusChanged, this, &MonitorController::handleRecordingStatus);
     connect(&camera, &CameraDevice::errorChanged, this, [this](const QString &error) {
         cameraError = error;
@@ -147,11 +146,6 @@ void MonitorController::setPreviewModeIndex(int index)
     emitSnapshot();
 }
 
-void MonitorController::requestManualSnapshot()
-{
-    queueSnapshot();
-}
-
 void MonitorController::setStrobePolicyIndex(int index)
 {
     switch (index) {
@@ -231,6 +225,12 @@ void MonitorController::pollSensors()
     }
 
     core.handleSensorState(sensorHub.latestState());
+    const SensorState latest = sensorHub.latestState();
+    OcclusionInput occlusion;
+    occlusion.hasLux = latest.hasLux;
+    occlusion.lux = latest.lux;
+    occlusion.proximityRaw = latest.proximityRaw;
+    core.handleOcclusionInput(occlusion);
     const MonitorSnapshot state = core.snapshot();
     if (state.monitoringEnabled) {
         if (state.presence == PresenceState::PersonPending) {
@@ -474,51 +474,6 @@ void MonitorController::syncTorch()
     }
 
     camera.setStrobeMode(torchWanted ? StrobeMode::Torch : StrobeMode::None);
-}
-
-void MonitorController::queueSnapshot()
-{
-    if (snapshotPending)
-        return;
-    if (!camera.isStreaming()) {
-        emit logMessage(QStringLiteral("snapshot ignored: camera idle"));
-        return;
-    }
-    if (!ensureStorageReady())
-        return;
-
-    const StoragePathResult path = storage.makeFramePath(storageRoot, QStringLiteral("snapshot"));
-    if (!path.ok) {
-        core.handleStorageState(StorageState::Degraded, path.error);
-        emitSnapshot();
-        return;
-    }
-
-    const CameraDevice::ActionResult result = camera.requestSnapshot(path.path, 1);
-    if (result != CameraDevice::ActionResult::Ok) {
-        emit logMessage(QStringLiteral("snapshot request rejected"));
-        return;
-    }
-
-    snapshotPending = true;
-    snapshotPendingPath = path.path;
-    emit logMessage(QStringLiteral("snapshot requested %1").arg(path.relativePath));
-}
-
-void MonitorController::handleSnapshotStatus(const QString &status)
-{
-    if (status.startsWith(QStringLiteral("saved:"))) {
-        const QString path = statusPathFromText(status);
-        emit logMessage(QStringLiteral("snapshot saved %1").arg(rootRelativePath(path)));
-        snapshotPending = false;
-        snapshotPendingPath.clear();
-    } else if (status.startsWith(QStringLiteral("failed:"))) {
-        emit logMessage(QStringLiteral("snapshot %1").arg(status));
-        snapshotPending = false;
-        snapshotPendingPath.clear();
-    }
-
-    emitSnapshot();
 }
 
 void MonitorController::handleRecordingStatus(const QString &status)
