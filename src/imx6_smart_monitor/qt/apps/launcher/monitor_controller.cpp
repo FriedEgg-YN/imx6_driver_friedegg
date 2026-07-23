@@ -63,9 +63,9 @@ MonitorController::MonitorController(QObject *parent)
         updateCoreCameraState(camera.state());
         emitSnapshot();
     });
-    connect(&camera, &CameraDevice::strobeStatusChanged, this, [this](const QString &status) {
-        emit logMessage(QStringLiteral("strobe: %1").arg(status));
-    });
+    // connect(&camera, &CameraDevice::strobeStatusChanged, this, [this](const QString &status) {
+    //     emit logMessage(QStringLiteral("strobe: %1").arg(status));
+    // });
     connect(&camera, &CameraDevice::logMessage, this, &MonitorController::logMessage);
 
     refreshCameraModes();
@@ -406,6 +406,7 @@ void MonitorController::stopCamera()
         camera.stopPreview();
         emit previewFrameChanged(QImage());
     }
+    strobeModeApplied = false;
     updateCoreCameraState(camera.state());
 }
 
@@ -473,7 +474,15 @@ void MonitorController::syncTorch()
         break;
     }
 
-    camera.setStrobeMode(torchWanted ? StrobeMode::Torch : StrobeMode::None);
+    const StrobeMode requestedMode =
+        torchWanted ? StrobeMode::Torch : StrobeMode::None;
+    if (strobeModeApplied && appliedStrobeMode == requestedMode)
+        return;
+
+    if (camera.setStrobeMode(requestedMode)) {
+        appliedStrobeMode = requestedMode;
+        strobeModeApplied = true;
+    }
 }
 
 void MonitorController::handleRecordingStatus(const QString &status)

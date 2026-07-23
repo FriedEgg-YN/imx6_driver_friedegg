@@ -40,6 +40,7 @@ AP3216C proximity/lux + LD2410C presence -> MonitorCore -> CameraDevice record -
 | 文档 | 内容 |
 | --- | --- |
 | [`docs/smart-monitor-v1-closed-loop.md`](docs/smart-monitor-v1-closed-loop.md) | Smart Monitor record-first 闭环、状态机、存储产物和验收命令。 |
+| [`docs/smart-monitor-class-and-state-diagrams.md`](docs/smart-monitor-class-and-state-diagrams.md) | 按分层拆分的类图，以及打开系统、有人、无人、关闭系统的事务状态流转图。 |
 | [`docs/ld2410-device-qt-wrapper-learning-notes.md`](docs/ld2410-device-qt-wrapper-learning-notes.md) | LD2410Device Qt 用户态封装的 C++/Qt/状态调用分层学习笔记。 |
 | [`docs/camera-test-performance-notes.md`](docs/camera-test-performance-notes.md) | Camera Test RGB565/JPEG 采集性能、验证命令、已知限制。 |
 | [`docs/camera-data-flow-and-format-path.md`](docs/camera-data-flow-and-format-path.md) | OV5640 后的数据流、RGB565/JPEG 格式转换、buffer 与 SOI/EOI 裁剪语义。 |

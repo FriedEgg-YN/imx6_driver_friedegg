@@ -99,6 +99,8 @@ private:
     double frameFps = 0.0;
     int modeIndex = 0;
     StrobePolicy currentStrobePolicy = StrobePolicy::Auto;
+    StrobeMode appliedStrobeMode = StrobeMode::None;
+    bool strobeModeApplied = false;
     bool recordingActive = false;
     QString lastSensorError;
 };
