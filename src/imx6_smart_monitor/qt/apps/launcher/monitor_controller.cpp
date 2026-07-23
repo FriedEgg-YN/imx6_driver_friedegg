@@ -18,7 +18,7 @@ MonitorController::MonitorController(QObject *parent)
     confirmTimer.setInterval(policy.presenceStartConfirmMs);
     cooldownTimer.setSingleShot(true);
     cooldownTimer.setInterval(policy.presenceEndCooldownMs);
-    sensorTimer.setInterval(500);
+    sensorTimer.setInterval(100);
     retryTimer.setSingleShot(true);
     retryTimer.setInterval(3000);
 
@@ -212,7 +212,7 @@ void MonitorController::pollSensors()
     if (ld2410.readState(&ld, &ldError)) {
         sensorHub.updateLd2410State(ld);
     } else {
-        sensorHub.updatePresence(false, QStringLiteral("ld2410c"));
+        sensorHub.updatePresence(false);
         if (!ldError.isEmpty())
             errors << ldError;
     }
@@ -463,7 +463,7 @@ void MonitorController::syncTorch()
     bool torchWanted = false;
     switch (currentStrobePolicy) {
     case StrobePolicy::Auto:
-        torchWanted = core.snapshot().torchWanted;
+        torchWanted = core.snapshot().strobe_on;
         break;
     case StrobePolicy::Off:
         torchWanted = false;

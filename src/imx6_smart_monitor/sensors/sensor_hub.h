@@ -15,7 +15,7 @@ namespace imx6sm {
 class SensorHub {
 public:
     SensorState latestState() const;
-    void updatePresence(bool presence, const QString &source);
+    void updatePresence(bool presence);
     void updateLux(double lux);
     void updateAp3216cRaw(qint64 proximityRaw, qint64 irRaw);
     void updateLd2410State(const Ld2410State &state);

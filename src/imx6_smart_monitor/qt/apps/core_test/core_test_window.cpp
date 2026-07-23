@@ -75,14 +75,14 @@ void CoreTestWindow::refresh()
     const MonitorSnapshot state = core.snapshot();
     monitoringLabel->setText(state.monitoringEnabled ? QStringLiteral("enabled") : QStringLiteral("disabled"));
     presenceLabel->setText(toString(state.presence));
-    lightLabel->setText(toString(state.light));
+    lightLabel->setText(state.strobe_on ? QStringLiteral("on") : QStringLiteral("off"));
     cameraLabel->setText(toString(state.camera));
     storageLabel->setText(toString(state.storage));
-    torchLabel->setText(state.torchWanted ? QStringLiteral("on") : QStringLiteral("off"));
+    torchLabel->setText(state.strobe_on ? QStringLiteral("on") : QStringLiteral("off"));
     wantedLabel->setText(QStringLiteral("camera:%1 record:%2 torch:%3")
                          .arg(state.cameraWanted ? QStringLiteral("yes") : QStringLiteral("no"),
                               state.recordingWanted ? QStringLiteral("yes") : QStringLiteral("no"),
-                              state.torchWanted ? QStringLiteral("yes") : QStringLiteral("no")));
+                               state.strobe_on ? QStringLiteral("yes") : QStringLiteral("no")));
     recordingLabel->setText(state.recordingStatus.isEmpty() ? QStringLiteral("--") : state.recordingStatus);
     errorLabel->setText((state.cameraError + QStringLiteral(" ") + state.storageError).trimmed().isEmpty() ? QStringLiteral("--") : (state.cameraError + QStringLiteral(" ") + state.storageError).trimmed());
     actionLabel->setText(state.lastAction.isEmpty() ? QStringLiteral("--") : state.lastAction);

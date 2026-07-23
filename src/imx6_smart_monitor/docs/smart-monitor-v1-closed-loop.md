@@ -49,14 +49,14 @@ UI 层只显示 `MonitorSnapshot`、预览帧和按钮状态，只向 controller
 | 字段 | 含义 |
 | --- | --- |
 | `monitoringEnabled` | Start/Stop 总开关。Stop 时相机和录制都应关闭。 |
-| `presence` / `presenceSource` | presence gate 的状态和来源。当前以 LD2410C 为低延迟 gate。 |
-| `lux` / `light` / `torchWanted` | AP3216C lux 与暗光滞回决策。 |
+| `presence` | presence gate 状态。当前以 LD2410C 为低延迟 gate。 |
+| `lux` / `strobe_on` | AP3216C lux 与暗光滞回补光决策。 |
 | `occlusionAlarm` / `occlusionNear` | AP3216C proximity/lux 遮挡报警与近物状态。 |
 | `proximityRaw` / `irRaw` | UI 展示 AP3216C 原始采样，遮挡决策只使用 proximity/lux。 |
 | `cameraWanted` / `cameraAction` | controller 是否应打开、关闭或 retry camera。 |
 | `recordingWanted` / `recordingAction` | controller 是否应启动或停止人在期间录制。 |
 | `recordingPath` / `recordingStatus` | UI 展示最近一次录制文件和状态。 |
-| `activeMode` / `frameCount` / `afStatus` | UI 展示 camera 当前工作状态。 |
+| `cameraModeLabel` / `frameCount` / `afStatus` | UI 展示 camera 当前工作状态。 |
 | `cameraError` / `storageError` | 异常验收入口。 |
 
 presence 时间语义由 controller 的 Qt timer 表达：

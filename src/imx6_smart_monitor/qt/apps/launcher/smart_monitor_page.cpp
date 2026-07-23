@@ -245,8 +245,7 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
     modeCombo->setEnabled(modeCombo->count() > 0 && !recordingNow);
 
     monitoringLabel->setText(snapshot.monitoringEnabled ? QStringLiteral("enabled") : QStringLiteral("disabled"));
-    const QString source = snapshot.presenceSource.isEmpty() ? QStringLiteral("--") : snapshot.presenceSource;
-    presenceLabel->setText(QStringLiteral("%1  %2").arg(toString(snapshot.presence), source));
+    presenceLabel->setText(toString(snapshot.presence));
     luxLabel->setText(QStringLiteral("%1 lx").arg(snapshot.lux, 0, 'f', 1));
     const QString occlusionText = QStringLiteral("%1  ps:%2 lux:%3 ir:%4")
         .arg(snapshot.occlusionAlarm ? QStringLiteral("ALARM") : (snapshot.occlusionNear ? QStringLiteral("near") : QStringLiteral("clear")))
@@ -262,13 +261,13 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
     if (snapshot.cameraWanted)
         cameraText += QStringLiteral(" wanted");
     cameraLabel->setText(cameraText);
-    modeLabel->setText(snapshot.activeMode.isEmpty() ? QStringLiteral("--") : snapshot.activeMode);
+    modeLabel->setText(snapshot.cameraModeLabel.isEmpty() ? QStringLiteral("--") : snapshot.cameraModeLabel);
     frameLabel->setText(QString::number(snapshot.frameCount));
     afLabel->setText(snapshot.afStatus.isEmpty() ? QStringLiteral("--") : snapshot.afStatus);
 
     const int strobeIndex = strobeCombo->currentIndex();
     if (strobeIndex == 0)
-        torchLabel->setText(snapshot.torchWanted ? QStringLiteral("auto torch") : QStringLiteral("auto off"));
+        torchLabel->setText(snapshot.strobe_on ? QStringLiteral("auto torch") : QStringLiteral("auto off"));
     else if (strobeIndex == 2)
         torchLabel->setText(QStringLiteral("forced torch"));
     else
@@ -288,8 +287,8 @@ void SmartMonitorPage::refreshSnapshot(const MonitorSnapshot &snapshot)
 
     QStringList overlay;
     overlay << toString(snapshot.presence) << toString(snapshot.camera);
-    if (!snapshot.activeMode.isEmpty())
-        overlay << snapshot.activeMode;
+    if (!snapshot.cameraModeLabel.isEmpty())
+        overlay << snapshot.cameraModeLabel;
     if (recordingNow)
         overlay << QStringLiteral("REC");
     if (snapshot.occlusionAlarm)

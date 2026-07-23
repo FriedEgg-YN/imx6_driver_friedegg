@@ -49,8 +49,7 @@ void MonitorCore::stopMonitoring()
     clearActions();
     current.monitoringEnabled = false;
     current.presence = PresenceState::NoPerson;
-    current.light = LightState::Normal;
-    current.torchWanted = false;
+    current.strobe_on = false;
     current.recordingWanted = false;
     current.cameraWanted = false;
     current.recordingAction = QStringLiteral("stop");
@@ -67,7 +66,6 @@ void MonitorCore::stopMonitoring()
 void MonitorCore::handleSensorState(const SensorState &state)
 {
     clearActions();
-    current.presenceSource = state.presenceSource;
     latestPresence = state.presence;
 
     if (state.hasLux) {
@@ -82,8 +80,13 @@ void MonitorCore::handleSensorState(const SensorState &state)
         if (state.presence) {
             if (current.presence == PresenceState::NoPerson ||
                 current.presence == PresenceState::Cooldown) {
-                current.presence = PresenceState::PersonPending;
-                current.lastAction = QStringLiteral("presence pending");
+                if (current.presence == PresenceState::Cooldown) {
+                    current.presence = PresenceState::ActiveMonitoring;
+                    current.lastAction = QStringLiteral("presence active");
+                } else {
+                    current.presence = PresenceState::PersonPending;
+                    current.lastAction = QStringLiteral("presence pending");
+                }
             }
         } else {
             if (current.presence == PresenceState::ActiveMonitoring ||
@@ -100,13 +103,13 @@ void MonitorCore::handleSensorState(const SensorState &state)
 }
 
 void MonitorCore::handleCameraState(CameraState state, const QString &error,
-                                    const QString &activeMode,
+                                     const QString &cameraModeLabel,
                                     qulonglong frameCount,
                                     const QString &afStatus)
 {
     clearActions();
     current.camera = state;
-    current.activeMode = activeMode;
+    current.cameraModeLabel = cameraModeLabel;
     current.frameCount = frameCount;
     current.afStatus = afStatus;
     current.cameraError = error;
@@ -153,7 +156,6 @@ void MonitorCore::handlePresence(bool present)
 {
     SensorState state;
     state.presence = present;
-    state.presenceSource = QStringLiteral("manual");
     handleSensorState(state);
 }
 
@@ -257,38 +259,31 @@ void MonitorCore::clearActions()
     current.cameraAction.clear();
     current.recordingAction.clear();
     current.strobeAction.clear();
-    current.focusAction.clear();
 }
 
 void MonitorCore::updateLightDecision()
 {
-    const bool previousTorchWanted = current.torchWanted;
+    const bool previousStrobeOn = current.strobe_on;
 
     if (!current.monitoringEnabled || !latestLuxValid) {
-        current.light = LightState::Normal;
-        current.torchWanted = false;
+        current.strobe_on = false;
     } else if (current.presence == PresenceState::ActiveMonitoring) {
         if (latestLux < policy.darkEnterLux ||
-            (current.torchWanted && latestLux < policy.darkExitLux)) {
-            current.light = LightState::TorchOn;
-            current.torchWanted = true;
+            (current.strobe_on && latestLux < policy.darkExitLux)) {
+            current.strobe_on = true;
         } else if (latestLux > policy.darkExitLux) {
-            current.light = LightState::Normal;
-            current.torchWanted = false;
+            current.strobe_on = false;
         } else {
-            current.light = LightState::Dark;
-            current.torchWanted = false;
+            current.strobe_on = false;
         }
     } else if (latestLux < policy.darkEnterLux) {
-        current.light = LightState::Dark;
-        current.torchWanted = false;
+        current.strobe_on = false;
     } else if (latestLux > policy.darkExitLux) {
-        current.light = LightState::Normal;
-        current.torchWanted = false;
+        current.strobe_on = false;
     }
 
-    if (previousTorchWanted != current.torchWanted)
-        current.strobeAction = current.torchWanted ? QStringLiteral("torch") : QStringLiteral("off");
+    if (previousStrobeOn != current.strobe_on)
+        current.strobeAction = current.strobe_on ? QStringLiteral("torch") : QStringLiteral("off");
 }
 
 void MonitorCore::updateCameraDecision()

@@ -16,7 +16,6 @@ struct DeviceStatus {
 
 struct SensorState {
     bool presence = false;
-    QString presenceSource;
     bool hasLux = false;
     double lux = 0.0;
     qint64 proximityRaw = -1;
@@ -55,7 +54,7 @@ struct MonitorPolicy {
     int occlusionEnterCount = 4;
     int occlusionExitCount = 4;
     int presenceStartConfirmMs = 300;
-    int presenceEndCooldownMs = 15000;
+    int presenceEndCooldownMs = 5000;
     QString storageRoot = QStringLiteral("/smart-monitor");
 };
 
@@ -64,13 +63,6 @@ enum class PresenceState {
     PersonPending,
     ActiveMonitoring,
     Cooldown,
-};
-
-enum class LightState {
-    Normal,
-    Dark,
-    TorchOn,
-    Recovering,
 };
 
 enum class CameraState {
@@ -95,7 +87,6 @@ enum class StrobeMode {
 };
 
 QString toString(PresenceState state);
-QString toString(LightState state);
 QString toString(CameraState state);
 QString toString(StorageState state);
 QString toString(StrobeMode mode);

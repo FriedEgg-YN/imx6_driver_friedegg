@@ -8,19 +8,17 @@ namespace imx6sm {
 struct MonitorSnapshot {
     bool monitoringEnabled = false;
     PresenceState presence = PresenceState::NoPerson;
-    LightState light = LightState::Normal;
+    bool strobe_on = false;
     CameraState camera = CameraState::Closed;
     StorageState storage = StorageState::Idle;
     bool cameraWanted = false;
     bool recordingWanted = false;
-    bool torchWanted = false;
     bool occlusionAlarm = false;
     bool occlusionNear = false;
-    QString presenceSource;
     double lux = 0.0;
     qint64 proximityRaw = -1;
     qint64 irRaw = -1;
-    QString activeMode;
+    QString cameraModeLabel;
     qulonglong frameCount = 0;
     QString afStatus;
     QString recordingPath;
@@ -30,7 +28,6 @@ struct MonitorSnapshot {
     QString cameraAction;
     QString recordingAction;
     QString strobeAction;
-    QString focusAction;
     QString lastAction;
 };
 
@@ -52,7 +49,7 @@ public:
     void stopMonitoring();
     void handleSensorState(const SensorState &state);
     void handleCameraState(CameraState state, const QString &error = QString(),
-                           const QString &activeMode = QString(),
+                           const QString &cameraModeLabel = QString(),
                            qulonglong frameCount = 0,
                            const QString &afStatus = QString());
     void handleStorageState(StorageState state, const QString &error = QString());

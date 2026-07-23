@@ -633,7 +633,7 @@ void Ld2410TestWindow::updateStateLabels(const Ld2410State &state)
     outLevelLabel->setText(state.outValid ? boolText(state.outLevel) : QStringLiteral("--"));
     engineeringMaxLabel->setText(QStringLiteral("motion %1 static %2").arg(state.maxMovingGate).arg(state.maxStaticGate));
     engineeringLightLabel->setText(QStringLiteral("light %1, engineering %2")
-                                       .arg(state.light)
+                                       .arg(static_cast<int>(state.light))
                                        .arg(boolText(state.engineering)));
     engineeringModeCheck->setChecked(state.engineering);
 

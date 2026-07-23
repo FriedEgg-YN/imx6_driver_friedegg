@@ -28,22 +28,6 @@ QString toString(PresenceState state)
     return QStringLiteral("Unknown");
 }
 
-QString toString(LightState state)
-{
-    switch (state) {
-    case LightState::Normal:
-        return QStringLiteral("Normal");
-    case LightState::Dark:
-        return QStringLiteral("Dark");
-    case LightState::TorchOn:
-        return QStringLiteral("TorchOn");
-    case LightState::Recovering:
-        return QStringLiteral("Recovering");
-    }
-
-    return QStringLiteral("Unknown");
-}
-
 QString toString(CameraState state)
 {
     switch (state) {
