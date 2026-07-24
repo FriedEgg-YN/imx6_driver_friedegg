@@ -141,6 +141,226 @@ configure
 - `ENUM_*` 是发现能力，不应该改变 active format，也不应该写 sensor streaming 寄存器。
 - host video node 面向用户态使用 fourcc；sensor subdev 内部更多使用 media-bus code。读代码时要把这两种格式概念分开。
 
+## 常用 V4L2 结构体和字段
+
+`VIDIOC_*` 的第三个参数不是任意的用户态数据，而是一个与 ioctl 命令严格匹配的 V4L2 UAPI 结构体指针。例如 `VIDIOC_QUERYCAP` 必须传入 `struct v4l2_capability *`，`VIDIOC_S_FMT` 必须传入 `struct v4l2_format *`。这些结构体既有“用户态先填写、驱动读取”的字段，也有“驱动回写、用户态读取”的字段；理解这个输入/输出方向，比只记字段名称更重要。
+
+本项目的用户态入口主要是 [`ov5640_interface_demo.c`](../ov5640_interface_demo.c)；早期的 [`ov5640_test.c`](../ov5640_test.c) 也使用了同一套单平面 capture API。内核侧 UAPI 定义见 [`videodev2.h`](../../linux-friedegg/include/uapi/linux/videodev2.h)。
+
+### 结构体与 ioctl 对照
+
+| 结构体 | 主要 ioctl | 一句话作用 | 当前路径中的角色 |
+| --- | --- | --- | --- |
+| `struct v4l2_capability` | `VIDIOC_QUERYCAP` | 查询 video node 的身份和能力 | 确认 capture/streaming 能力 |
+| `struct v4l2_input` | `VIDIOC_ENUMINPUT/G_INPUT/S_INPUT` | 描述和选择输入源 | 当前 host 只接受 input `0` |
+| `struct v4l2_fmtdesc` | `VIDIOC_ENUM_FMT` | 枚举支持的像素格式 | 用户态看到 fourcc，如 `RGB3`、`JPEG` |
+| `struct v4l2_frmsizeenum` | `VIDIOC_ENUM_FRAMESIZES` | 枚举某个格式支持的尺寸 | 当前主要返回离散尺寸 |
+| `struct v4l2_frmivalenum` | `VIDIOC_ENUM_FRAMEINTERVALS` | 枚举某个格式/尺寸支持的帧间隔 | 当前主要返回 15/30 fps |
+| `struct v4l2_format` | `VIDIOC_TRY_FMT/G_FMT/S_FMT` | 试算、读取或提交当前格式 | `fmt.pix` 描述单平面 capture |
+| `struct v4l2_pix_format` | 包含于 `v4l2_format` | 描述宽高、fourcc、stride、帧大小 | host/sensor 协商后的 active format |
+| `struct v4l2_streamparm` | `VIDIOC_G_PARM/S_PARM` | 查询或设置流参数 | `parm.capture.timeperframe` 表示帧间隔 |
+| `struct v4l2_requestbuffers` | `VIDIOC_REQBUFS` | 请求创建、切换或释放 buffer 队列 | 选择 MMAP 或 USERPTR |
+| `struct v4l2_buffer` | `VIDIOC_QUERYBUF/QBUF/DQBUF` | 描述一个具体 buffer 及其状态 | 连接用户态 buffer 和 VB2 buffer |
+| `struct v4l2_plane` | 多平面 `v4l2_buffer` 内 | 描述一个 plane | 当前单平面路径不使用 |
+| `struct v4l2_control` | `VIDIOC_G_CTRL/S_CTRL` | 读取或设置一个 control | 当前可用于 HFLIP/VFLIP 等 |
+
+当前 video node 使用的是 `V4L2_BUF_TYPE_VIDEO_CAPTURE`，即“单平面视频采集”。因此格式使用 `fmt.fmt.pix`，buffer 使用 `buf.m.offset` 或 `buf.m.userptr`。不要把它与 `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE` 的 `fmt.fmt.pix_mp`、`buf.m.planes` 混用。
+
+### `struct v4l2_capability`
+
+调用 `VIDIOC_QUERYCAP` 后，驱动填充设备描述和能力位。定义见 [`videodev2.h:302`](../../linux-friedegg/include/uapi/linux/videodev2.h#L302)。
+
+| 字段 | 含义 | 读写方向和当前关注点 |
+| --- | --- | --- |
+| `driver[16]` | 驱动模块名称 | 驱动回写，例如用于确认是否命中 `mx6s_capture` |
+| `card[32]` | 设备或 video card 的人类可读名称 | 驱动回写，便于日志识别 |
+| `bus_info[32]` | 总线或设备连接信息 | 驱动回写，OV5640 通常位于 I2C + CSI 拓扑 |
+| `version` | 驱动版本编码 | 驱动回写，不能直接当作字符串打印 |
+| `capabilities` | 物理设备整体能力位图 | 检查 `V4L2_CAP_VIDEO_CAPTURE` 和 `V4L2_CAP_STREAMING` |
+| `device_caps` | 当前 node 的能力位图 | 只有 `V4L2_CAP_DEVICE_CAPS` 置位时才按该字段判断 |
+| `reserved[3]` | 未来扩展保留区 | 初始化为 0，不要写入自定义数据 |
+
+`capabilities` 和 `device_caps` 都是 bitmask，判断能力必须使用按位与，而不是相等比较：
+
+```c
+if (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) {
+    /* 这个 node 支持视频采集 */
+}
+```
+
+`V4L2_CAP_VIDEO_CAPTURE` 只说明方向是 capture；本项目后续使用 `REQBUFS/QBUF/DQBUF/STREAMON`，所以还应确认 `V4L2_CAP_STREAMING`。如果设备同时设置了 `V4L2_CAP_DEVICE_CAPS`，实际 node 能力应使用 `device_caps`，否则使用 `capabilities`。
+
+### `struct v4l2_fmtdesc`
+
+`VIDIOC_ENUM_FMT` 每成功调用一次就返回一个格式。定义见 [`videodev2.h:549`](../../linux-friedegg/include/uapi/linux/videodev2.h#L549)。用户态通常只需先填写 `index` 和 `type`，其余字段由驱动回写。
+
+| 字段 | 含义 |
+| --- | --- |
+| `index` | 格式序号，从 `0` 开始；每次成功后递增 |
+| `type` | 要枚举的队列类型，本项目为 `V4L2_BUF_TYPE_VIDEO_CAPTURE` |
+| `flags` | 格式属性；`V4L2_FMT_FLAG_COMPRESSED` 表示压缩，`V4L2_FMT_FLAG_EMULATED` 表示模拟格式 |
+| `description[32]` | 人类可读描述，例如 `RGB565`、`JPEG` |
+| `pixelformat` | 机器识别的 FourCC，例如 `V4L2_PIX_FMT_RGB565`、`V4L2_PIX_FMT_JPEG` |
+| `reserved[4]` | 保留区，置 0 |
+
+`description` 只适合显示，后续 `ENUM_FRAMESIZES`、`TRY_FMT`、`S_FMT` 都应使用 `pixelformat`。FourCC 是 32 位整数，日志中直接打印十六进制不如转换成四字符直观。当前 JPEG 路径由 host 对外映射为 `V4L2_PIX_FMT_JPEG`，sensor 内部仍可能使用不同的 media-bus code。
+
+### `struct v4l2_frmsizeenum` 和 `struct v4l2_frmivalenum`
+
+这两个结构体分别回答“支持哪些尺寸”和“这个尺寸支持多快”。定义见 [`videodev2.h:586`](../../linux-friedegg/include/uapi/linux/videodev2.h#L586) 和 [`videodev2.h:614`](../../linux-friedegg/include/uapi/linux/videodev2.h#L614)。
+
+#### `v4l2_frmsizeenum`
+
+| 字段 | 含义 |
+| --- | --- |
+| `index` | 尺寸序号，从 `0` 开始 |
+| `pixel_format` | 查询对象，例如 `V4L2_PIX_FMT_RGB565` |
+| `type` | `DISCRETE`、`CONTINUOUS` 或 `STEPWISE` |
+| `discrete.width/height` | `DISCRETE` 类型下的一组固定宽高 |
+| `stepwise.min_width/max_width/step_width` | `STEPWISE` 类型下的宽度范围和步长 |
+| `stepwise.min_height/max_height/step_height` | `STEPWISE` 类型下的高度范围和步长 |
+| `reserved[2]` | 保留区，置 0 |
+
+当前 OV5640 路径主要返回离散尺寸，所以 demo 读取 `discrete.width/height`。通用程序必须先判断 `type`，不能把 union 中的 `discrete` 成员当成永远有效。
+
+#### `v4l2_frmivalenum`
+
+| 字段 | 含义 |
+| --- | --- |
+| `index` | 帧间隔序号，从 `0` 开始 |
+| `pixel_format` | 查询对象的像素格式 |
+| `width/height` | 查询对象的分辨率，必须与已枚举尺寸匹配 |
+| `type` | 帧间隔的 `DISCRETE`、`CONTINUOUS` 或 `STEPWISE` 类型 |
+| `discrete.numerator/denominator` | 单个固定帧间隔，单位为秒 |
+| `stepwise.min/max/step` | 可变帧间隔的范围和步进；每个成员都是 `struct v4l2_fract` |
+| `reserved[2]` | 保留区，置 0 |
+
+帧率和帧间隔互为倒数：
+
+```text
+timeperframe = numerator / denominator 秒
+fps = denominator / numerator
+```
+
+所以 `1/30` 表示 30 fps，而不是 1 fps。当前驱动重点支持 15 fps 和 30 fps 离散组合；实际可用值必须以指定 fourcc、宽度和高度下的枚举结果为准。
+
+### `struct v4l2_format` 和 `struct v4l2_pix_format`
+
+`v4l2_format` 是格式 ioctl 的外层容器，定义见 [`videodev2.h:1895`](../../linux-friedegg/include/uapi/linux/videodev2.h#L1895)；单平面 capture 使用其内部的 `fmt.pix`，具体字段定义见 [`videodev2.h:361`](../../linux-friedegg/include/uapi/linux/videodev2.h#L361)。
+
+| 字段 | 含义 | 本项目使用方式 |
+| --- | --- | --- |
+| `v4l2_format.type` | 格式所属队列类型 | 填 `V4L2_BUF_TYPE_VIDEO_CAPTURE` |
+| `fmt.pix.width` | 图像宽度，像素数 | `TRY_FMT/S_FMT` 前请求，ioctl 后读取实际值 |
+| `fmt.pix.height` | 图像高度，像素数 | 同上；驱动可能规整到最接近支持值 |
+| `fmt.pix.pixelformat` | 图像 FourCC | 例如 `RGB565` 或 `JPEG` |
+| `fmt.pix.field` | 逐行/隔行扫描方式 | 摄像头通常是 `V4L2_FIELD_NONE` |
+| `fmt.pix.bytesperline` | 一行占用字节数，可能包含对齐 padding | 用户态处理每行时优先使用该值 |
+| `fmt.pix.sizeimage` | 一帧 buffer 所需大小或最大大小 | `REQBUFS`、`read()` 和用户态保存帧时的重要依据 |
+| `fmt.pix.colorspace` | 色彩空间 | 描述颜色解释方式 |
+| `fmt.pix.priv` | 像素格式相关私有字段 | 通常保持驱动返回值，不自行猜测 |
+| `fmt.pix.flags` | 格式标志 | 例如 premultiplied alpha，按格式定义解释 |
+| `fmt.pix.ycbcr_enc` | Y'CbCr 编码 | RGB565 路径通常不关注 |
+| `fmt.pix.quantization` | 量化范围，full/limited 等 | YUV 路径更重要 |
+
+`TRY_FMT` 只试算和规整，不提交 active format；`S_FMT` 才提交。两者都可能修改用户请求，因此 ioctl 成功后必须使用驱动回写的 `width/height/pixelformat/bytesperline/sizeimage`，而不是继续使用原始请求值。当前文档中的 `G_FMT` 也用于确认这些实际值。
+
+特别注意 `bytesperline` 和 `sizeimage`：RGB565 在无 padding 时通常约为 `width * 2`，一帧约为 `bytesperline * height`；但 DMA 对齐、压缩格式和驱动固定 buffer 外壳都会使简单计算失效。用户态不应只用 `width * height * 2` 代替驱动返回的 `sizeimage`。
+
+### `struct v4l2_streamparm`、`v4l2_captureparm` 和 `v4l2_fract`
+
+定义见 [`videodev2.h:897`](../../linux-friedegg/include/uapi/linux/videodev2.h#L897) 和 [`videodev2.h:1920`](../../linux-friedegg/include/uapi/linux/videodev2.h#L1920)。capture 场景下使用：
+
+```text
+streamparm.type
+streamparm.parm.capture
+streamparm.parm.capture.timeperframe
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `streamparm.type` | 流类型，本项目为 `VIDEO_CAPTURE` |
+| `capture.capability` | 设备支持的采集参数能力；检查 `V4L2_CAP_TIMEPERFRAME` |
+| `capture.capturemode` | 当前采集模式，少数驱动用于 high-quality 等扩展 |
+| `capture.timeperframe` | 每帧间隔，`numerator/denominator` 秒 |
+| `capture.extendedmode` | 驱动私有扩展，通常保持 0 |
+| `capture.readbuffers` | read I/O 模式使用的 buffer 数量 |
+| `reserved[4]` | 保留区，置 0 |
+
+典型顺序是先 `G_PARM`，确认 `capture.capability & V4L2_CAP_TIMEPERFRAME`，再填写 `timeperframe = 1/30` 调 `S_PARM`。驱动可能将请求规整为实际支持的 15/30 fps，因此 `S_PARM` 后仍应读取回写结果。这个参数是在已经选定的格式/分辨率上协商帧率，不替代 `ENUM_FRAMEINTERVALS` 的能力发现。
+
+### `struct v4l2_requestbuffers`
+
+定义见 [`videodev2.h:690`](../../linux-friedegg/include/uapi/linux/videodev2.h#L690)，对应 `VIDIOC_REQBUFS`。
+
+| 字段 | 含义 | 本项目要点 |
+| --- | --- | --- |
+| `count` | 请求或返回的 buffer 数量 | 输入是请求值，成功后应使用驱动回写的实际值 |
+| `type` | buffer 队列类型 | 填 `V4L2_BUF_TYPE_VIDEO_CAPTURE` |
+| `memory` | buffer 内存模型 | 当前主路径是 `V4L2_MEMORY_MMAP`，也验证 `USERPTR` |
+| `reserved[2]` | 保留区 | 置 0 |
+
+`count=0` 通常表示释放该 memory 类型的 buffer。`count` 不是“必定得到的数量”：驱动可因内存不足或队列限制返回不同数量，用户态必须按回写的 `req.count` 分配自己的映射数组并循环 `QUERYBUF`，不能无条件使用请求值。
+
+常用 memory 模型：
+
+- `V4L2_MEMORY_MMAP`：驱动/VB2 分配 buffer，用户态通过 `QUERYBUF` 得到 offset 后 `mmap()`。
+- `V4L2_MEMORY_USERPTR`：用户态提供 `buf.m.userptr` 和 `buf.length`，VB2 在 `QBUF` 时 pin/map 用户页。
+- `V4L2_MEMORY_DMABUF`：用户态通过 `buf.m.fd` 导入外部 DMA-BUF；当前队列没有声明为主能力。
+
+### `struct v4l2_buffer` 和 `struct v4l2_plane`
+
+`v4l2_buffer` 定义见 [`videodev2.h:730`](../../linux-friedegg/include/uapi/linux/videodev2.h#L730)，是 `QUERYBUF/QBUF/DQBUF` 交换单个 buffer 信息的结构体。当前使用单平面 capture。
+
+| 字段 | 含义 | 当前 MMAP capture 的意义 |
+| --- | --- | --- |
+| `index` | buffer 编号 | `QUERYBUF` 遍历 0..count-1；`DQBUF` 返回已完成 buffer 的编号 |
+| `type` | 队列类型 | 必须与 `REQBUFS` 一致 |
+| `bytesused` | 实际有效 payload 字节数 | `DQBUF` 后用于判断当前帧有效长度，JPEG 尤其重要 |
+| `flags` | buffer 状态/时间戳等标志 | 可检查 `DONE`、`ERROR`、timestamp 类型 |
+| `field` | 当前帧的 field 类型 | 通常由驱动回写 |
+| `timestamp` | 帧时间戳 | `DQBUF` 后由驱动/VB2 回写 |
+| `timecode` | SMPTE 等时间码 | 普通 OV5640 采集通常不用 |
+| `sequence` | 帧序号 | 可用于检测丢帧或乱序 |
+| `memory` | 本次 buffer 的 memory 模型 | 必须与 `REQBUFS.memory` 一致 |
+| `m.offset` | MMAP 的设备内存 offset/cookie | `QUERYBUF` 后传给 `mmap()`，不是通用的物理地址 |
+| `m.userptr` | USERPTR 的用户虚拟地址 | 仅 USERPTR 有效 |
+| `m.fd` | DMABUF 文件描述符 | 仅 DMABUF 有效 |
+| `m.planes` | 多平面 plane 数组指针 | 仅 `*_MPLANE` 类型有效 |
+| `length` | 单平面 buffer 总容量 | `QUERYBUF` 后作为 `mmap()` 长度；不是 `bytesused` |
+
+MMAP 的最小操作关系是：
+
+```text
+REQBUFS(count, MMAP)
+  -> QUERYBUF(index) 得到 length + m.offset
+  -> mmap(m.offset, length)
+  -> QBUF(index)
+  -> STREAMON
+  -> DQBUF 得到 index + bytesused + timestamp + sequence
+  -> 使用映射数组[index]中的数据
+  -> QBUF(index) 重新交给驱动
+```
+
+这里有三个经常混淆的“长度/位置”字段：
+
+- `length`：整块 buffer 容量，通常用于 `mmap()`；
+- `bytesused`：本次已完成帧实际使用的 payload 长度；
+- `m.offset`：MMAP 映射入口的 offset/cookie，不能按通用 V4L2 规则解释成物理地址。
+
+`v4l2_plane` 只在多平面 API 中通过 `buf.m.planes` 使用。单平面 RGB565、YUYV、JPEG 采集使用 `v4l2_buffer.m.offset`；多平面 NV12M 等格式才需要分别管理 Y plane 和 UV plane 的 `bytesused/length/m.mem_offset` 等字段。
+
+### `struct v4l2_control`
+
+定义见 [`videodev2.h:1364`](../../linux-friedegg/include/uapi/linux/videodev2.h#L1364)，对应 `VIDIOC_G_CTRL/S_CTRL`。
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | control ID，例如 `V4L2_CID_HFLIP` |
+| `value` | 控件值；设置时由用户态填写，读取时由驱动回写 |
+
+当前 demo 的 `HFLIP/VFLIP/POWER_LINE_FREQUENCY` 会经过 V4L2 control core 进入 OV5640 的 control 回调。自动对焦和触摸区域同样使用 `id/value` 传递控制值；自定义 control 的合法范围、步进和单位必须以驱动注册的 control 定义为准，不能只根据整数类型猜测。
+
 ## 格式和 stream 参数配置
 
 | 用户态 ioctl | 驱动路径 | 主要工作 |
@@ -340,4 +560,3 @@ CSI DMA done IRQ
 4. 如果进入 VB2，继续看 `vb2_ops mx6s_videobuf_ops` 对应的 `.buf_prepare/.buf_queue/.start_streaming/.stop_streaming`。
 5. 如果进入 sensor，继续看 `ov5640_subdev_ops` 下的 `.video/.pad/.core` 回调。
 6. 最后把 buffer 完成路径和 IRQ 关联起来：`mx6s_csi_irq_handler() -> mx6s_csi_frame_done() -> vb2_buffer_done()`。
-
