@@ -14,13 +14,13 @@
 namespace imx6sm {
 
 /*
- * CameraFrameInterval / CameraMode 使用 fpsNum / fpsDen 表示帧率：
+ * CameraFrameRate / CameraMode 使用分子 / 分母表示帧率：
  * 30/1 表示 30 fps，15/1 表示 15 fps。V4L2 底层实际使用
  * timeperframe(numerator/denominator)，实现中会在枚举或配置时做一次转换。
  */
-struct CameraFrameInterval {
-    int fpsNum = 0;
-    int fpsDen = 1;
+struct CameraFrameRate {
+    int numerator = 0;
+    int denominator = 1;
 
     /* 返回适合 UI 显示的帧率文本，例如 "30 fps"；非法帧率返回 "--"。 */
     QString label() const;

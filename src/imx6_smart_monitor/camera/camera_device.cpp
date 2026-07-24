@@ -339,12 +339,12 @@ static void appendControls(int fd, QList<CameraControl> *controls)
         queryControlById(fd, knownControls[i], controls);
 }
 
-QString CameraFrameInterval::label() const
+QString CameraFrameRate::label() const
 {
-    if (fpsNum <= 0 || fpsDen <= 0)
+    if (numerator <= 0 || denominator <= 0)
         return QStringLiteral("--");
 
-    const double fps = static_cast<double>(fpsNum) / static_cast<double>(fpsDen);
+    const double fps = static_cast<double>(numerator) / static_cast<double>(denominator);
     if (qAbs(fps - static_cast<int>(fps)) < 0.01)
         return QStringLiteral("%1 fps").arg(static_cast<int>(fps));
     return QStringLiteral("%1 fps").arg(fps, 0, 'f', 2);
