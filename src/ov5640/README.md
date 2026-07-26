@@ -24,6 +24,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [`docs/ov5640_camera_system_learning_map.md`](docs/ov5640_camera_system_learning_map.md) | 总学习入口：硬件时序、host/sensor 分层、VB2/DMA/双槽、回调链、锁/工作队列和用户态实验路线。 |
 | [`docs/ov5640-jpeg-capture-path.md`](docs/ov5640-jpeg-capture-path.md) | 当前 JPEG sensor -> CSI -> V4L2 -> userspace 采集路径和验证计划。 |
 | [`docs/ov5640_sensor_driver_guide.md`](docs/ov5640_sensor_driver_guide.md) | Sensor subdev 架构、状态机、回调导读；部分段落保留 JPEG 前的历史描述。 |
 | [`docs/ov5640_host_driver_guide.md`](docs/ov5640_host_driver_guide.md) | `mx6s_capture.c` host 驱动架构、VB2/CSI DMA/IRQ 状态机。 |
