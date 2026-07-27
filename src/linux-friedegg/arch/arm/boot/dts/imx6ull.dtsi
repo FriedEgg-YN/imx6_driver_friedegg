@@ -161,7 +161,7 @@
 			fsl,max_ddr_freq = <400000000>;
 		};
 
-		pmu {
+		pmu: pmu {
 			compatible = "arm,cortex-a7-pmu";
 			interrupts = <GIC_SPI 94 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled";

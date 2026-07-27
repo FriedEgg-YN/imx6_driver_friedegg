@@ -184,6 +184,10 @@
 	};
 };
 
+&pmu {
+	status = "okay";
+};
+
 &cpu0 {
 	arm-supply = <&reg_arm>;
 	soc-supply = <&reg_soc>;
