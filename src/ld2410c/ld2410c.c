@@ -1,7 +1,7 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -9,7 +9,6 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
@@ -64,9 +63,8 @@ struct ld2410c_dev {
 	struct device *dev;
 	struct miscdevice miscdev;
 	struct input_dev *input;
-	int out_gpio;
+	struct gpio_desc *out_gpiod;
 	int out_irq;
-	bool out_active_low;
 	struct tty_struct *tty;
 	struct mutex tty_lock;
 	struct mutex tx_lock;
@@ -148,20 +146,18 @@ static bool ld2410c_has_new_state(struct ld2410c_file *ctx)
 	return state.sequence != ctx->last_sequence;
 }
 
-static void ld2410c_update_out(struct ld2410c_dev *ld)
+static irqreturn_t ld2410c_out_irq(int irq, void *data)
 {
+	struct ld2410c_dev *ld = data;
 	unsigned long flags;
-	int raw;
 	int active;
 
-	if (!gpio_is_valid(ld->out_gpio))
-		return;
-
-	raw = gpio_get_value(ld->out_gpio);
-	active = ld->out_active_low ? !raw : raw;
+	active = gpiod_get_value(ld->out_gpiod);
+	if (active < 0)
+		return IRQ_HANDLED;
 
 	spin_lock_irqsave(&ld->state_lock, flags);
-	ld->state.out_level = raw ? 1 : 0;
+	ld->state.out_level = active;
 	ld->state.flags |= LD2410C_STATE_F_OUT_VALID;
 	if (active)
 		ld->state.flags |= LD2410C_STATE_F_OUT_ACTIVE;
@@ -170,19 +166,10 @@ static void ld2410c_update_out(struct ld2410c_dev *ld)
 	ld2410c_publish_locked(ld);
 	spin_unlock_irqrestore(&ld->state_lock, flags);
 
-	if (ld->input) {
-		input_report_switch(ld->input, SW_FRONT_PROXIMITY, active);
-		input_sync(ld->input);
-	}
-
+	input_report_switch(ld->input, SW_FRONT_PROXIMITY, active);
+	input_sync(ld->input);
 	wake_up_interruptible(&ld->read_wq);
-}
 
-static irqreturn_t ld2410c_out_irq(int irq, void *data)
-{
-	struct ld2410c_dev *ld = data;
-
-	ld2410c_update_out(ld);
 	return IRQ_HANDLED;
 }
 
@@ -442,7 +429,8 @@ static int ld2410c_ldisc_open(struct tty_struct *tty)
 	ctx->ld = ld;
 	ctx->tty = tty_kref_get(tty);
 	tty->disc_data = ctx;
-	tty->receive_room = 65536;
+	/* Bound each ldisc callback to the largest frame we retain locally. */
+	tty->receive_room = LD2410C_RX_BUF_SIZE;
 	ld->tty = ctx->tty;
 
 out_unlock:
@@ -1017,7 +1005,8 @@ static const struct file_operations ld2410c_fops = {
 static int ld2410c_probe(struct platform_device *pdev)
 {
 	struct ld2410c_dev *ld;
-	enum of_gpio_flags of_flags;
+	unsigned long flags;
+	int active;
 	int ret;
 
 	ld = devm_kzalloc(&pdev->dev, sizeof(*ld), GFP_KERNEL);
@@ -1025,22 +1014,17 @@ static int ld2410c_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ld->dev = &pdev->dev;
-	ld->out_gpio = -EINVAL;
 	mutex_init(&ld->tty_lock);
 	mutex_init(&ld->tx_lock);
 	spin_lock_init(&ld->state_lock);
 	init_waitqueue_head(&ld->read_wq);
 	init_waitqueue_head(&ld->ack_wq);
 
-	ld->out_gpio = of_get_named_gpio_flags(pdev->dev.of_node, "out-gpios",
-					       0, &of_flags);
-	if (gpio_is_valid(ld->out_gpio)) {
-		ld->out_active_low = !!(of_flags & OF_GPIO_ACTIVE_LOW);
-		ret = devm_gpio_request_one(&pdev->dev, ld->out_gpio,
-					    GPIOF_IN, "ld2410c-out");
-		if (ret)
-			return ret;
+	ld->out_gpiod = devm_gpiod_get_optional(&pdev->dev, "out", GPIOD_IN);
+	if (IS_ERR(ld->out_gpiod))
+		return PTR_ERR(ld->out_gpiod);
 
+	if (ld->out_gpiod) {
 		ld->input = devm_input_allocate_device(&pdev->dev);
 		if (!ld->input)
 			return -ENOMEM;
@@ -1054,7 +1038,7 @@ static int ld2410c_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 
-		ld->out_irq = gpio_to_irq(ld->out_gpio);
+		ld->out_irq = gpiod_to_irq(ld->out_gpiod);
 		if (ld->out_irq < 0)
 			return ld->out_irq;
 
@@ -1063,6 +1047,23 @@ static int ld2410c_probe(struct platform_device *pdev)
 				       "ld2410c-out", ld);
 		if (ret)
 			return ret;
+
+		active = gpiod_get_value(ld->out_gpiod);
+		if (active < 0)
+			return active;
+
+		spin_lock_irqsave(&ld->state_lock, flags);
+		ld->state.out_level = active;
+		ld->state.flags |= LD2410C_STATE_F_OUT_VALID;
+		if (active)
+			ld->state.flags |= LD2410C_STATE_F_OUT_ACTIVE;
+		else
+			ld->state.flags &= ~LD2410C_STATE_F_OUT_ACTIVE;
+		ld2410c_publish_locked(ld);
+		spin_unlock_irqrestore(&ld->state_lock, flags);
+
+		input_report_switch(ld->input, SW_FRONT_PROXIMITY, active);
+		input_sync(ld->input);
 	} else {
 		dev_warn(&pdev->dev, "out-gpios missing; input switch disabled\n");
 	}
@@ -1085,7 +1086,6 @@ static int ld2410c_probe(struct platform_device *pdev)
 	mutex_unlock(&ld2410c_global_lock);
 
 	platform_set_drvdata(pdev, ld);
-	ld2410c_update_out(ld);
 
 	dev_info(&pdev->dev, "LD2410C driver ready; ldisc=%d misc=/dev/%s\n",
 		 LD2410C_LDISC, ld->miscdev.name);

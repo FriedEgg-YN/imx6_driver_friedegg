@@ -21,7 +21,6 @@ LD2410C 有两条信号路径：
 OUT 引脚
   -> GPIO1_IO10
   -> ld2410c_out_irq()
-  -> ld2410c_update_out()
   -> input SW_FRONT_PROXIMITY + /dev/ld2410c0 state
 
 UART3 数据帧
@@ -46,12 +45,12 @@ UART3 数据帧
 `ld2410c_probe()` 做几件事：
 
 - 分配 `struct ld2410c_dev`，初始化 `tty_lock`、`tx_lock`、`state_lock`、`read_wq`、`ack_wq`。
-- 从 DTS 读取 `out-gpios`，当前板级节点配置为 GPIO1_IO10、active high。
+- 通过 GPIO descriptor API 获取 DTS 的可选 `out-gpios`；DTS 的 active-low 标志由 GPIO 子系统统一处理。
 - 如果 OUT GPIO 存在，注册 input 设备 `LD2410C presence`，能力是 `EV_SW / SW_FRONT_PROXIMITY`。
 - 把 OUT GPIO 转成 IRQ，同时注册上升沿和下降沿中断，任何电平变化都会刷新 presence。
 - 注册 misc 设备 `/dev/ld2410c0`，用户态通过它读状态、poll 事件、发 ioctl 配置雷达。
 - 设置全局 `ld2410c_global`。当前实现只支持一个 LD2410C 实例；如果已经存在实例，第二个 probe 会返回 `-EBUSY`。
-- probe 末尾主动调用一次 `ld2410c_update_out()`，让初始 OUT 电平进入状态快照。
+- IRQ 注册后读取一次逻辑 OUT 电平并初始化状态快照与 input switch。
 
 `remove()` 只清理全局指针和 misc 设备；GPIO、input、IRQ、内存由 devm 资源自动释放。
 
@@ -62,16 +61,15 @@ OUT 是最低延迟、最简单的 presence gate。
 当 GPIO 中断触发时：
 
 1. `ld2410c_out_irq()` 被调用。
-2. `ld2410c_update_out()` 读取 GPIO 原始电平。
-3. 如果 DTS 标成 active low，就取反；当前 DTS 是 active high。
-4. 在 `state_lock` 保护下更新：
+2. 使用 `gpiod_get_value()` 读取 GPIO 逻辑电平；GPIO descriptor API 已自动处理 DTS 的 active-low 标志。
+3. 在 `state_lock` 保护下更新：
    - `state.out_level`
    - `LD2410C_STATE_F_OUT_VALID`
    - `LD2410C_STATE_F_OUT_ACTIVE`
    - `state.sequence`
    - `state.timestamp_ns`
-5. 如果 input 设备已注册，同步上报 `SW_FRONT_PROXIMITY`。
-6. 唤醒 `read_wq`，让阻塞在 `/dev/ld2410c0` 的 `read()`/`poll()` 用户拿到新状态。
+4. 同步上报 `SW_FRONT_PROXIMITY`。
+5. 唤醒 `read_wq`，让阻塞在 `/dev/ld2410c0` 的 `read()`/`poll()` 用户拿到新状态。
 
 这条路径不依赖 UART attach。也就是说，即使串口尚未绑定 line discipline，OUT 引脚仍然可以提供 presence 开关量。
 
@@ -83,7 +81,7 @@ TTY line discipline 是串口字节进入驱动的核心。
 
 | 回调 | 时机 | 当前行为 |
 | --- | --- | --- |
-| `open` | 用户态对 TTY 执行 `TIOCSETD(29)` 后，TTY 核心切换 line discipline 时调用。 | 检查是否有 `ld2410c_global`，检查是否已有 UART 绑定，分配 `ld2410c_ldisc`，保存 `tty` 引用，设置 `tty->disc_data`。 |
+| `open` | 用户态对 TTY 执行 `TIOCSETD(29)` 后，TTY 核心切换 line discipline 时调用。 | 检查是否有 `ld2410c_global`，检查是否已有 UART 绑定，分配 `ld2410c_ldisc`，保存 `tty` 引用，设置 `tty->disc_data`，并将 `receive_room` 限制为 256 字节。 |
 | `close` | line discipline 被替换、TTY 关闭或 fd 生命周期结束时调用。 | 清空 `ld->tty` 和 `tty->disc_data`，释放 tty 引用和上下文。 |
 | `receive_buf` | UART 驱动收到字节后交给当前 line discipline。 | 把字节追加到 256 字节 RX buffer，并调用帧消费逻辑。 |
 
