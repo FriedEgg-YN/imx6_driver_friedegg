@@ -356,46 +356,57 @@ static void ld2410c_parse_ack(struct ld2410c_dev *ld, const u8 *payload, u16 len
 static void ld2410c_consume_frame(struct ld2410c_ldisc *ctx)
 {
 	struct ld2410c_dev *ld = ctx->ld;
+	bool report = false;
+	bool cmd = false;
+	u16 length;
+	size_t total;
+	size_t i;
 
 	while (ctx->rx_count >= 4) {
-		bool report;
-		u16 len;
-		size_t total;
+		report = false;
+		cmd = false;
 
-		report = ld2410c_is_report_header(ctx->rx_buf);
-		if (!report && !ld2410c_is_cmd_header(ctx->rx_buf)) {
-			memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_count - 1);
-			ctx->rx_count--;
-			continue;
+		for (i = 0; i < ctx->rx_count - 3; i++) {
+			report = ld2410c_is_report_header(&ctx->rx_buf[i]);
+			cmd = !report && ld2410c_is_cmd_header(&ctx->rx_buf[i]);
+			if (report || cmd) {
+				if (i > 0) {
+					memmove(ctx->rx_buf, ctx->rx_buf + i, ctx->rx_count - i);
+					ctx->rx_count -= i;
+				}
+				break;
+			}
 		}
-
+		if (!report && !cmd) {
+			memmove(ctx->rx_buf, ctx->rx_buf + ctx->rx_count - 3, 3);
+			ctx->rx_count = 3;
+			return;
+		}
 		if (ctx->rx_count < 10)
 			return;
 
-		len = ld2410c_get_le16(&ctx->rx_buf[4]);
-		total = 4 + 2 + len + 4;
-		if (total > LD2410C_RX_BUF_SIZE || len > LD2410C_RX_BUF_SIZE - 10) {
-			memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_count - 1);
-			ctx->rx_count--;
+		length = ld2410c_get_le16(&ctx->rx_buf[4]);
+		total = 4 + 2 + length + 4;
+		if (total > LD2410C_RX_BUF_SIZE) {
+			memmove(ctx->rx_buf, ctx->rx_buf + 4, ctx->rx_count - 4);
+			ctx->rx_count -= 4;
 			ld2410c_count_parse_error(ld);
 			continue;
 		}
-
 		if (ctx->rx_count < total)
 			return;
-
 		if ((report && !ld2410c_has_report_tail(&ctx->rx_buf[total - 4])) ||
-		    (!report && !ld2410c_has_cmd_tail(&ctx->rx_buf[total - 4]))) {
-			memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_count - 1);
-			ctx->rx_count--;
+			(cmd && !ld2410c_has_cmd_tail(&ctx->rx_buf[total - 4]))) {
+			memmove(ctx->rx_buf, ctx->rx_buf + 4, ctx->rx_count - 4);
+			ctx->rx_count -= 4;
 			ld2410c_count_parse_error(ld);
 			continue;
 		}
-
-		if (report)
-			ld2410c_parse_report(ld, &ctx->rx_buf[6], len);
-		else
-			ld2410c_parse_ack(ld, &ctx->rx_buf[6], len);
+		if (report) {
+			ld2410c_parse_report(ld, &ctx->rx_buf[6], length);
+		} else if (cmd) {
+			ld2410c_parse_ack(ld, &ctx->rx_buf[6], length);
+		}
 
 		ctx->rx_count -= total;
 		if (ctx->rx_count)
