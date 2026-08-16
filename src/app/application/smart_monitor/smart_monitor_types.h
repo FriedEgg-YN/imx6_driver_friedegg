@@ -1,7 +1,6 @@
 #ifndef SMART_MONITOR_TYPES_H
 #define SMART_MONITOR_TYPES_H
 
-#include <iostream>
 #include <cstdint>
 
 namespace smartmonitor {
@@ -33,32 +32,26 @@ struct MonitorPolicy {
     int presenceConfirmMs = 300;
     int presenceCooldownMs = 15000;
 
-    // 啥意思
+    // Stale sample thresholds, if a sample is older than this, it is considered stale and will be ignored
     int presenceStaleMs = 1500;
     int luxStaleMs = 1500;
 };
 
 struct PresenceSample {
     bool valid = false;
-    bool presence = false;
-    std::int64_t updateTimeMs = 0;
+    bool present = false;
+    std::int64_t updateAtMs = 0;
 };
 
 struct LuxSample {
     bool valid = false;
     double lux = 0.0;
-    std::int64_t updateTimeMs = 0;
+    std::int64_t updateAtMs = 0;
 };
 
 struct MonitorState {
     PresenceState presenceState = PresenceState::Disabled;
     EnvLightState lightState = EnvLightState::Unknown;
-
-    bool presenceAvailable = false;
-    bool luxAvailable = false;
-
-    bool latestPresence = false;
-    double latestLux = 0.0;
 };
 
 struct MonitorDecision {

@@ -8,6 +8,7 @@ namespace smartmonitor {
 class MonitorEngine {
 public:
     explicit MonitorEngine(const MonitorPolicy &policy = MonitorPolicy());
+    ~MonitorEngine();
 
     const MonitorState &state() const;
 
@@ -22,7 +23,10 @@ public:
 
 private:
     // make decision based on current state
-    MonitorDecision makeDecision() const;
+    MonitorDecision makeDecision(
+        TimerCommand confirmTimerCmd = TimerCommand::Keep,
+        TimerCommand cooldownTimerCmd = TimerCommand::Keep
+    ) const;
 
     MonitorPolicy m_policy;
     MonitorState m_state;
