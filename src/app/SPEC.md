@@ -51,7 +51,10 @@ LD2410C UART ----------+                         v
                                            MonitorEngine
                                                 |
                                                 v
-OV5640 / V4L2 --> CameraWorker <-- MonitorController --> SmartMonitorPage
+OV5640 / V4L2 --> CameraWorker <-- CameraService <-- MonitorController --> SmartMonitorPage
+                         |              |
+                         v              v
+                    owning frame   typed status/result
                          |
                          v
                     MediaWriter --> JPEG / MJPEG
@@ -406,12 +409,14 @@ create Page + Controller
 ```cpp
 enum class OperationCode {
     Accepted,
+    Succeeded,
     Busy,
     InvalidArgument,
     Unavailable,
     IoError,
     Unsupported,
     Cancelled,
+    Timeout,
 };
 
 struct OperationResult {
@@ -420,7 +425,7 @@ struct OperationResult {
 };
 ```
 
-“请求已接受”和“操作最终成功”是两个阶段，但第一版不要求所有 API 都带 request ID。例如 `startPreview()` 返回是否接受，最终状态通过 `cameraStatusChanged(CameraStatus)` 返回。
+“请求已接受”和“操作最终成功”是两个阶段：同步门面使用 `Accepted` 表示命令已入队，异步 completion 使用 `Succeeded` 或具体错误码；长期状态仍通过 typed status signal 返回。第一版不要求所有 API 都带 request ID。例如 `startPreview()` 返回是否接受，最终状态通过 `cameraStatusChanged(CameraStatus)` 返回。
 
 以下场景出现后再添加 request ID：
 
@@ -753,7 +758,7 @@ Controller 订阅 sensor、执行 Engine timer decision、收敛 Camera/recordin
 ### 15.2 板端单 App 验收
 
 ```bash
-QT_QPA_PLATFORM=linuxfb <app-binary>
+QT_QPA_PLATFORM=linuxfb "${APP_BINARY}"
 ```
 
 每个设备至少验证正常工作、设备缺失、读写失败和退出清理。实际 binary 确定后更新本节。
@@ -802,8 +807,8 @@ QT_QPA_PLATFORM=linuxfb <app-binary>
 最终必须提供：
 
 ```bash
-bash buildscripts/build_and_deploy.sh drv <package>
-QT_QPA_PLATFORM=linuxfb <app-binary>
+bash buildscripts/build_and_deploy.sh drv "${PACKAGE}"
+QT_QPA_PLATFORM=linuxfb "${APP_BINARY}"
 ```
 
 并同步更新 `bsp/package/`、模块 README、实际 binary 名和板端验证命令。
