@@ -46,15 +46,15 @@ driver ABI -> backend -> Worker -> typed sample
 
 本计划按 SPEC 阶段 0-8 导航；编号是学习顺序，不代表每篇都是独立实施阶段：
 
-- 阶段 0，旧闭环和 ABI 基线：[01 现有代码审查](01-current-code-review.md)、[02 架构与所有权](02-architecture-and-ownership.md)、[03 qmake 最小工程](03-qmake-minimal-project.md)。
-- 阶段 1，MonitorEngine：[04 值类型与状态模型](04-value-types-and-state-model.md)、[05 Presence Engine](05-monitor-engine-presence.md)、[06 Light Engine](06-monitor-engine-light.md)、[07 Engine 测试](07-monitor-engine-tests.md)。
-- 阶段 2，AP3216C 全链路：[08 Qt 对象模型](08-qt-object-model.md)、[09 Qt Worker 线程](09-qt-worker-thread.md)、[10 AP3216C backend](10-ap3216c-backend.md)、[11 AP3216C App](11-ap3216c-app.md)。其中 08-09 是后续所有 Service/Worker 的共同基础。
-- 阶段 3，LD2410C 读取链路：[12 LD2410C ABI](12-ld2410c-abi.md)、[13 LD2410C App](13-ld2410c-app.md)。
-- 阶段 4，Camera 预览链路：[14 Camera 能力发现](14-camera-capability.md)、[15 Camera MMAP 预览](15-camera-mmap-preview.md)、[16 Camera 帧转换](16-camera-frame-conversion.md)、[17 Camera controls](17-camera-controls.md)。
-- 阶段 5，MediaWriter、截图和录像：[18 MediaWriter](18-media-writer.md)。
-- 阶段 6，Smart Monitor 闭环：[19 Smart Monitor 集成](19-smart-monitor-integration.md)。
-- 阶段 7，简化 Shell 和资源切换：[20 Page 与 Shell](20-page-and-shell.md)。
-- 阶段 8，LD2410C 少量配置、异常和交付：[21 异常、交付与复盘](21-failure-delivery-review.md)。
+- [x] 阶段 0，旧闭环和 ABI 基线：[01 现有代码审查](01-current-code-review.md)、[02 架构与所有权](02-architecture-and-ownership.md)、[03 qmake 最小工程](03-qmake-minimal-project.md)。
+- [x] 阶段 1，MonitorEngine：[04 值类型与状态模型](04-value-types-and-state-model.md)、[05 Presence Engine](05-monitor-engine-presence.md)、[06 Light Engine](06-monitor-engine-light.md)、[07 Engine 测试](07-monitor-engine-tests.md)。
+- [ ] 阶段 2，AP3216C 全链路：[08 Qt 对象模型](08-qt-object-model.md)、[09 Qt Worker 线程](09-qt-worker-thread.md)、[10 AP3216C backend](10-ap3216c-backend.md)、[11 AP3216C App](11-ap3216c-app.md)。其中 08-09 是后续所有 Service/Worker 的共同基础。
+- [ ] 阶段 3，LD2410C 读取链路：[12 LD2410C ABI](12-ld2410c-abi.md)、[13 LD2410C App](13-ld2410c-app.md)。
+- [ ] 阶段 4，Camera 预览链路：[14 Camera 能力发现](14-camera-capability.md)、[15 Camera MMAP 预览](15-camera-mmap-preview.md)、[16 Camera 帧转换](16-camera-frame-conversion.md)、[17 Camera controls](17-camera-controls.md)。
+- [ ] 阶段 5，MediaWriter、截图和录像：[18 MediaWriter](18-media-writer.md)。
+- [ ] 阶段 6，Smart Monitor 闭环：[19 Smart Monitor 集成](19-smart-monitor-integration.md)。
+- [ ] 阶段 7，简化 Shell 和资源切换：[20 Page 与 Shell](20-page-and-shell.md)。
+- [ ] 阶段 8，LD2410C 少量配置、异常和交付：[21 异常、交付与复盘](21-failure-delivery-review.md)。
 
 ## 分步手写任务
 
