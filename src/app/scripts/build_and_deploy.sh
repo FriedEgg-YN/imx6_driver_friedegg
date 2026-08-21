@@ -7,7 +7,7 @@ WORKSPACE_DIR=$(cd "$(dirname "$0")/../../.." && pwd)
 QMAKE="$WORKSPACE_DIR/buildroot/output/host/bin/qmake"
 TARGET=$(sed -n 's/^[[:space:]]*TARGET[[:space:]]*=[[:space:]]*//p' "$PRO_FILE" | head -n 1)
 BUILD_DIR="/tmp/${TARGET}-build"
-NFS_DIR=${NFS_DIR:?set NFS_DIR to the NFS rootfs path}
+NFS_DIR="$HOME/linux/nfs/rootfs"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
