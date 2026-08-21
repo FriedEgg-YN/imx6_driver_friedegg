@@ -1,6 +1,22 @@
 # QT 基础
 
-## 最小 Wiget 程序讲解
+- [1. 最小 Wiget 程序讲解](#1-最小-wiget-程序讲解)
+  - [1.1. QApplication](#11-qapplication)
+  - [1.2. QWidget](#12-qwidget)
+    - [1.2.1. 标题和尺寸](#121-标题和尺寸)
+- [2. QObject](#2-qobject)
+- [QThread](#qthread)
+- [3. signals/slot/emit](#3-signalsslotemit)
+  - [3.1. signals](#31-signals)
+  - [3.2. slots](#32-slots)
+  - [3.3. emit](#33-emit)
+  - [3.4. connect](#34-connect)
+  - [3.5. 跨线程connect与thread affinity](#35-跨线程connect与thread-affinity)
+- [4. QVBoxLayout](#4-qvboxlayout)
+- [5. QString](#5-qstring)
+
+
+## 1. 最小 Wiget 程序讲解
 
 ```cpp
 #include <QApplication>
@@ -19,7 +35,7 @@ int main(int argc, char *argv[])
 }
 ```
 
-### QApplication
+### 1.1. QApplication
 
 每个 Qt Widgets 程序都需要一个 QApplication 对象。它负责：
 
@@ -43,7 +59,7 @@ exec() 启动 Qt 主事件循环：
 
 如果没有 app.exec()，程序会创建窗口后马上离开 main()，窗口几乎不会被看到。
 
-### QWidget
+### 1.2. QWidget
 
 没有父对象的 QWidget 是顶层窗口。
 
@@ -53,7 +69,7 @@ exec() 启动 Qt 主事件循环：
 - 退出事件循环后，window 自动析构；
 - 不需要手动 delete。
 
-#### 标题和尺寸
+#### 1.2.1. 标题和尺寸
 
 ```cpp
 window.setWindowTitle("i.MX6ULL Qt Widgets Test");
@@ -71,15 +87,56 @@ window.show();
 
 构造 QWidget 不等于显示窗口。只有调用 `show()`、`showFullScreen()` 等函数，Qt 才会创建对应的平台窗口并安排绘制。
 
-## QObject
+## 2. QObject
 
 `QObject` 是 Qt 元对象系统的入口，没有它，signals/slots/emit这些机制就不能正常工作
 
 Qt 通过`QObject` 实现标准父对象机制，如果传入父对象，在父对象析构时会递归调用子对象析构函数
 
-## signals/slot/emit
+## QThread
 
-### signals
+```cpp
+/** 
+ * 只在GUI线程中创建了线程对象本身
+ * 启动后会执行 QThread::run()，可以重载
+ */
+QThread thread;
+/**
+ * worker 中QTimer不是在构造函数中初始化，而是通过strat之类函数初始化，这样QTimer在 worker affinity所在线程 
+ * 修改worker的thread affinity
+ * worker 需继承 QObject，且不能有 parent，否则不能执行此调用
+ */
+worker->moveToThread(thread);
+/**
+ * 把worker放入其所属线程的 deferred-delete 队列，会在线程收尾阶段析构
+ */
+QObject::connect(&thread, &QThread::finished, &worker, &QObject::deleteLater)
+/**
+ * 真正创建并启动底层线程
+ * 在默认的 QThread::run() 中，会执行事件循环
+ */
+thread.start();
+/**
+ * 退出事件循环，事件循环返回后，会发出 QThread::finished 信号
+ */
+thread.quit();
+```
+
+thread 对象本身还属于 GUI 线程，但它管理的工作函数运行在另一个线程。
+
+推荐使用 worker-object 模式：
+
+QThread       负责管理线程
+SensorWorker  负责实际业务
+moveToThread  改变 Worker 的 affinity
+queued signal 把命令投递给 Worker
+QTimer        在 Worker 线程中周期触发
+
+注意跨线程不要共享可变容器、Widget 指针、fd 或 backend 指针
+
+## 3. signals/slot/emit
+
+### 3.1. signals
 
 ```cpp
 signals:
@@ -106,7 +163,7 @@ Signal 表示事件或状态发生变化：
 - 数据到达；
 - 错误或生命周期通知。
 
-### slots
+### 3.2. slots
 
 Slot 是接收 signal 的成员函数：
 
@@ -134,7 +191,7 @@ public:
 
 不一定必须写在 slots: 下。写成 slot 的意义是明确它是 Qt 事件接口，并将其纳入元对象信息。
 
-### emit
+### 3.3. emit
 
 发射 signal：
 
@@ -146,7 +203,7 @@ emit 是可读性标记，不负责创建线程，也不会保存最新状态。
 
 如果发射时没有任何连接者，该事件直接结束；以后建立连接的对象不会收到历史 signal。
 
-### connect
+### 3.4. connect
 
 建立长期的事件连接：
 ```cpp
@@ -189,7 +246,15 @@ QObject 销毁后，Qt 会自动断开以它作为 sender 或 receiver 的连接
 
 *BlockingQueuedConnection 不能在同一线程使用，否则会死锁；GUI 程序中也应谨慎使用，避免冻结界面。*
 
-### 跨线程connect与thread affinity
+需要说明的是，`QueuedConnection` 不是立刻调用slot，而是把一次调用包装成事件放进 receiver 线程的事件队列。Qt 必须知道参数的类型、大小、复制方式，因此跨线程参数必须：
+
+- 可复制
+- 自己拥有数据
+- 不包含 Widget 指针
+- 不包含临时栈对象引用
+- 不包含不能包装生命周期的裸 buffer
+
+### 3.5. 跨线程connect与thread affinity
 
 跨线程通常使用默认 Auto 或显式 Queued：
 
@@ -241,7 +306,7 @@ Controller <---result signal---- Worker
 
 GUI 不直接调用 Worker 普通方法，而是通过 queued signal 提交命令；Worker 再通过 typed signal 把结果按值返回。
 
-## QVBoxLayout
+## 4. QVBoxLayout
 
 QVBoxLayout 是 Qt 里的垂直布局管理器，作用是把多个控件按从上到下的顺序排列，并自动处理间距、对齐和窗口缩放时的重排。
 
@@ -271,7 +336,7 @@ QVBoxLayout 是 Qt 里的垂直布局管理器，作用是把多个控件按从�
 - setSpacing()：设置控件间距
 - setContentsMargins()：设置四周边距
 
-## QString
+## 5. QString
 
 `QString` 是 Qt 用来表示 Unicode 字符串的类，具有隐式共享机制，`QString b = a;` 时不会立即复制数据，只有其中一个字符串被真正修改才进行复制。
 

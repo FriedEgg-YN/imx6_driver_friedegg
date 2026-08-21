@@ -1,0 +1,1 @@
+// 留待后续聚合 main.cpp 中多个类的创建、连接、启动等逻辑，形成一个统一的 composition root。
