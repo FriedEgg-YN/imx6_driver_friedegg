@@ -49,7 +49,7 @@ void SensorService::handleWorkerStarted()
     emit samplingStarted();
 }
 
-void SensorService::handleWorkerSample(const FakeSample &sample)
+void SensorService::handleWorkerSample(const Ap3216cSample &sample)
 {
     if (m_samplingState == SamplingState::Running)
     {

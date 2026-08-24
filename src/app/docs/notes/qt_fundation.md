@@ -12,6 +12,9 @@
   - [3.3. emit](#33-emit)
   - [3.4. connect](#34-connect)
   - [3.5. 跨线程connect与thread affinity](#35-跨线程connect与thread-affinity)
+- [QByteArray](#qbytearray)
+- [QFile](#qfile)
+- [QString](#qstring)
 - [4. QVBoxLayout](#4-qvboxlayout)
 - [5. QString](#5-qstring)
 
@@ -305,6 +308,234 @@ Controller <---result signal---- Worker
 ```
 
 GUI 不直接调用 Worker 普通方法，而是通过 queued signal 提交命令；Worker 再通过 typed signal 把结果按值返回。
+
+## QByteArray
+
+```cpp
+// QByteArray 构造
+QByteArray ba;  // empty
+QByteArray ba("abc");  // 从 const char* 构造
+QByteArray ba = QByteArrayLiteral("abc");  // 字面量，适合常量
+QByteArray ba(10, '\0');  // 指定长度并填充
+QByteArray ba = QByteArray::fromRawData(ptr, len);  // 不拷贝，引用外部数据
+
+// 属性接口
+ba.isEmpty();  // 是否为空
+ba.size(); ba.length(); ba.count();  // 字节数
+ba.capacity();  // 容量
+ba.reserve(100);  // 预留容量
+ba.clear();  // 清空
+ba.isNull();  // 是否是 null 状态，通常不常用
+// 取字节/子串
+ba.at(i); ba[i];  // 取单个字节
+ba.left(n);  // 左边 n 个字节
+ba.right(n);  // 右边 n 个字节
+ba.mid(pos, len);  // 子串
+ba.first(n);  // 前 n 个字节
+ba.last(n);  // 后 n 个字节
+ba.chop(n);  // 删除末尾 n 个字节
+ba.truncate(n);  // 截断到指定长度
+
+// 查找
+ba.contains("abc");  // 是否包含
+ba.indexOf("abc");  // 第一次出现位置
+ba.lastIndexOf("abc");  // 最后一次出现位置
+ba.startsWith("abc");  // 是否以某串开头
+ba.endsWith("abc");  // 是否以某串结尾
+
+// 修改
+ba.append("x");  // 追加
+ba += "x";  // 追加
+ba.prepend("x");  // 前插
+ba.replace("a", "b");  // 替换
+ba.remove("a");  // 删除匹配内容
+ba.fill('x', 5);  // 填充为指定字符
+ba.resize(20);  // 调整大小
+
+// 去空白
+ba.trimmed();  // 去掉首尾空白
+ba.simplified();  // 去掉首尾空白，并压缩中间空白
+ba.trimmed();  // 常用于处理文本字节数据
+
+// 比较
+ba == "abc";
+ba != "abc";
+ba.compare("abc");  // 返回 <0, 0, >0
+
+// 编码转换
+ba.toStdString();  // 转 std::string
+ba.toHex();  // 转十六进制字节串
+ba.toBase64();  // 转 Base64
+QString::fromUtf8(ba);  // 转 QString
+QString::fromLocal8Bit(ba);  // 转 QString
+QString::fromLatin1(ba);  // 转 QString
+QString text = QString::fromUtf8(ba);
+QByteArray utf8 = text.toUtf8();
+
+// 数字相关
+QByteArray::number(123);
+QByteArray::number(3.14);
+
+// 原始数据
+ba.constData();  // const char*
+ba.data();  // char*
+ba.data() + i;  // 指针运算
+// QByteArray 常用例子
+
+QByteArray data = file.readAll();
+QString text = QString::fromUtf8(data);
+
+QByteArray line = file.readLine();
+if (line.endsWith('\n')) {
+    line.chop(1);
+}
+
+QByteArray hex = data.toHex();
+QByteArray b64 = data.toBase64();
+
+QByteArray joined = "a" + QByteArray("b") + "c";
+```
+
+## QFile
+
+QFile 继承自 QIODevice，QIODevice 析构会关闭已打开的设备，实现了对 fd 的 oop管理
+
+```cpp
+// QFile 构造/绑定
+QFile file;  // empty
+QFile file(path);  // 绑定文件路径
+file.setFileName(path);  // 后续再设置路径
+
+// 打开/关闭
+file.open(QIODevice::ReadOnly | QIODevice::Text);  // 文本模式
+file.close();  // 关闭
+file.isOpen();  // 是否已打开
+file.isReadable();  // 是否可读
+file.isWritable();  // 是否可写
+
+// 读
+file.readAll();  // 读全部，返回 QByteArray
+file.read(n);  // 读 n 字节，返回 QByteArray
+file.readLine();  // 读一行，返回 QByteArray
+file.readLine(maxlen);  // 限长读一行
+file.atEnd();  // 是否到末尾
+file.bytesAvailable();  // 还能读多少字节
+
+// 写
+file.write(data);  // 写入 QByteArray / const char*
+file.write(data, len);  // 写入指定长度
+file.flush();  // 刷新缓冲
+file.resize(size);  // 调整文件大小
+
+// 定位
+file.pos();  // 当前读写位置
+file.seek(offset);  // 跳到指定位置
+file.size();  // 文件大小
+file.exists();  // 文件是否存在
+file.remove();  // 删除文件
+file.rename(newName);  // 重命名
+file.copy(newName);  // 复制文件
+
+// 信息
+file.fileName();  // 路径
+file.errorString();  // 错误描述
+file.permissions();  // 权限
+file.setPermissions(perms);  // 设置权限
+file.fileTime(QFileDevice::FileModificationTime);  // 文件时间
+```
+
+- QIODevice::ReadOnly  只读打开。
+- QIODevice::WriteOnly  只写打开。
+- QIODevice::ReadWrite  读写都允许，等价于 ReadOnly | WriteOnly。
+- QIODevice::Append  追加写入，写操作总是在文件末尾。
+- QIODevice::Truncate  打开时清空原文件内容。
+- QIODevice::Text  文本模式。Qt 会做一些平台相关处理，最典型的是换行符转换（windows中"\r\n"转"\n"）。读写都可用。
+- QIODevice::Unbuffered  尽量不走 Qt 缓冲，直接操作底层设备。
+- QIODevice::NewOnly  只在文件不存在时创建，已存在就失败。
+- QIODevice::ExistingOnly  只能打开已存在的文件，不允许新建。
+
+## QString
+
+```cpp
+// 构造
+QString s;  // empty
+QString s = "abc";  // 从 c 字符串构造
+QString s = QStringLiteral("abc");  // 更适合字符串常量
+s = "hello";  // 赋值
+
+// 属性接口
+s.isEmpty();  // 是否为空
+s.size(); s.length(); s.count();  // number of char
+s.capacity();  // 当前容量
+s.reserve(100);  // 预留容量
+s.clear();  // 清空
+
+// 取字符/子串
+s.at(i); s[i];  // cpp 基础接口
+s.left(n); s.right(n);  // 左/右 n 个字符
+s.mid(pos, len);  // 类似 substr
+s.first(n);  // 前 n 个字符，Qt 里新版本可用时很方便
+s.chopped(n);  // 返回去掉末尾 n 个字符的结果
+s.chop(n);  // 直接删除末尾 n 个字符
+s.truncate(n);  // 直接截断到长度 n
+
+// 查找
+s.contains("abc");  // 是否包含
+s.indexOf("abc");  // 第一次出现位置
+s.lastIndexOf("abc");  // 最后一次出现位置
+s.startsWith("abc");  // 是否以某串开头
+s.endsWith("abc");  // 是否以某串结尾
+
+// 比较
+s == "abc";
+s != "abc";
+s.compare("abc");  // 返回 <0, 0, >0
+s.compare("abc", Qt::CaseInsensitive);  // 忽略大小写比较
+
+// 修改
+s.append("x");  // 追加
+s += "x";  // 追加
+s.prepend("x");  // 前插
+s.replace("a", "b");  // 替换
+s.remove("a");  // 删除匹配内容
+s.replace(i, len, "x");  // 从位置 i 开始替换 len 个字符
+s.fill('x', 5);  // 填充成指定字符
+
+// 去空白
+s.trimmed();  // 去掉首尾空白
+s.simplified();  // 去掉首尾空白，并把中间多个空白压成一个
+
+// 大小写
+s.toLower();
+s.toUpper();
+
+// 拆分/拼接
+s.split(",");  // 按分隔符拆分成 QStringList
+list.join(",");  // QStringList 拼接成 QString
+
+// 格式化
+QString("%1").arg(value);  // Qt 风格模板替换
+QString("%1 %2").arg(a).arg(b);  // 多参数格式化
+QString::number(123);  // 数字转字符串
+QString::number(3.14, 'f', 2);  // 指定格式和精度
+
+// 类型转换
+s.toInt();
+s.toLongLong();
+s.toDouble();
+s.toBool();
+s.toUtf8();  // 转 QByteArray
+s.toLocal8Bit();
+s.toLatin1();
+QString::fromUtf8(bytes);
+QString::fromLocal8Bit(bytes);
+QString::fromLatin1(bytes);
+
+// 视图/引用相关
+s.constData();  // const QChar*
+s.data();  // 可写数据，注意版本和使用场景
+s.cbegin(); s.cend();  // 迭代
+```
 
 ## 4. QVBoxLayout
 

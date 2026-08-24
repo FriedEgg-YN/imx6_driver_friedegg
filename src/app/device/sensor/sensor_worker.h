@@ -2,8 +2,11 @@
 #define SENSOR_WORKER_H
 
 #include "sensor_types.h"
+#include "ap3216c_backend.h"
 
 #include <QObject>
+
+#include <memory>
 
 class QTimer;
 
@@ -42,11 +45,12 @@ signals:
     void samplingStopped();
 
     /** @brief Worker 产生了一份拥有自身数据的采样结果。 */
-    void sampleProduced(const FakeSample &sample);
+    void sampleProduced(const Ap3216cSample &sample);
 
 private:
     QTimer *m_timer = nullptr;
-    int m_sequence = 0;
+    std::unique_ptr<Ap3216cBackend> m_ap3216cBackend;
+    // int m_sequence = 0;
 };
 
 } // namespace smartmonitor

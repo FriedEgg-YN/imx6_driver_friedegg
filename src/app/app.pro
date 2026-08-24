@@ -10,6 +10,7 @@ INCLUDEPATH += $$PWD
 
 SOURCES += \
     $$PWD/main/main.cpp \
+    $$PWD/main/composition_root.cpp \
     $$PWD/device/sensor/sensor_service.cpp \
     $$PWD/device/sensor/sensor_worker.cpp \
     $$PWD/application/ap3216c/ap3216c_controller.cpp \
@@ -18,6 +19,7 @@ SOURCES += \
 
 HEADERS += \
     $$PWD/device/sensor/sensor_types.h \
+    $$PWD/main/composition_root.h \
     $$PWD/device/sensor/sensor_service.h \
     $$PWD/device/sensor/sensor_worker.h \
     $$PWD/application/ap3216c/ap3216c_view_state.h \

@@ -2,6 +2,7 @@
 #define AP3216C_VIEW_STATE_H
 
 #include "device/sensor/sensor_types.h"
+#include "device/sensor/ap3216c_backend.h"
 
 #include <QString>
 
@@ -17,8 +18,7 @@ struct Ap3216cViewState
 {
     SamplingState samplingState = SamplingState::Idle;
     bool hasSample = false;
-    FakeSample sample;
-    QString status = QStringLiteral("Stopped");
+    Ap3216cSample sample;
 };
 
 } // namespace smartmonitor

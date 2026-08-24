@@ -30,11 +30,6 @@ void Ap3216cController::requestStart()
     if (result.code == OperationCode::Accepted)
     {
         m_viewState.samplingState = SamplingState::Starting;
-        m_viewState.status = QStringLiteral("Starting");
-    }
-    else
-    {
-        m_viewState.status = result.error;
     }
 
     publishViewState();
@@ -49,12 +44,7 @@ void Ap3216cController::requestStop()
         if (m_viewState.samplingState != SamplingState::Idle)
         {
             m_viewState.samplingState = SamplingState::Stopping;
-            m_viewState.status = QStringLiteral("Stopping");
         }
-    }
-    else
-    {
-        m_viewState.status = result.error;
     }
 
     publishViewState();
@@ -63,23 +53,13 @@ void Ap3216cController::requestStop()
 void Ap3216cController::handleSamplingStarted()
 {
     m_viewState.samplingState = SamplingState::Running;
-    m_viewState.status = QStringLiteral("Running");
     publishViewState();
 }
 
-void Ap3216cController::handleSampleUpdated(const FakeSample &sample)
+void Ap3216cController::handleSampleUpdated(const Ap3216cSample &sample)
 {
     m_viewState.hasSample = true;
     m_viewState.sample = sample;
-
-    if (sample.valid)
-    {
-        m_viewState.status = QStringLiteral("Available");
-    }
-    else
-    {
-        m_viewState.status = QStringLiteral("Unavailable: ") + sample.error;
-    }
 
     publishViewState();
 }
@@ -87,7 +67,6 @@ void Ap3216cController::handleSampleUpdated(const FakeSample &sample)
 void Ap3216cController::handleSamplingStopped()
 {
     m_viewState.samplingState = SamplingState::Idle;
-    m_viewState.status = QStringLiteral("Stopped");
     publishViewState();
 }
 

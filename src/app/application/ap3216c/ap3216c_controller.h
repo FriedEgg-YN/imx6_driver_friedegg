@@ -37,7 +37,7 @@ public slots:
     void handleSamplingStarted();
 
     /** @brief 处理 Service 发布的新采样结果。 */
-    void handleSampleUpdated(const FakeSample &sample);
+    void handleSampleUpdated(const Ap3216cSample &sample);
 
     /** @brief 处理 Service 已停止采样的异步通知。 */
     void handleSamplingStopped();

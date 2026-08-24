@@ -26,6 +26,11 @@ void SensorWorker::startSampling()
         m_timer->start(500);
     }
 
+    if (!m_ap3216cBackend)
+    {
+        m_ap3216cBackend.reset(new Ap3216cBackend());
+    }
+
     emit samplingStarted();
 }
 
@@ -45,21 +50,15 @@ void SensorWorker::sampleOnce()
 {
     Q_ASSERT(QThread::currentThread() == thread());
 
-    ++m_sequence;
+    Ap3216cSample sample;
 
-    FakeSample sample;
-    sample.updatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    if (!m_ap3216cBackend)
+    {
+        sample.error = QStringLiteral("Ap3216c Backend not initialized");
+    }
 
-    if (m_sequence % 5 == 0)
-    {
-        sample.valid = false;
-        sample.error = QStringLiteral("Simulated sensor error");
-    }
-    else
-    {
-        sample.valid = true;
-        sample.value = m_sequence;
-    }
+    sample = m_ap3216cBackend->readSample();
+    sample.timestamp = QDateTime::currentMSecsSinceEpoch();
 
     emit sampleProduced(sample);
 }

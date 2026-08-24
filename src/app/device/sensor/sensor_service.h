@@ -2,6 +2,7 @@
 #define SENSOR_SERVICE_H
 
 #include "sensor_types.h"
+#include "ap3216c_backend.h"
 
 #include <QObject>
 
@@ -35,7 +36,7 @@ signals:
     void workerStopRequested();
 
     /** @brief 对订阅者发布新的传感器采样结果。 */
-    void sampleUpdated(const FakeSample &sample);
+    void sampleUpdated(const Ap3216cSample &sample);
 
     /** @brief 对订阅者发布采样已开始的最终状态。 */
     void samplingStarted();
@@ -48,7 +49,7 @@ public slots:
     void handleWorkerStarted();
 
     /** @brief 处理并转发 Worker 产生的采样结果。 */
-    void handleWorkerSample(const FakeSample &sample);
+    void handleWorkerSample(const Ap3216cSample &sample);
 
     /** @brief 处理 Worker 已停止采样的通知。 */
     void handleWorkerStopped();

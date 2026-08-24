@@ -7,6 +7,28 @@
 
 namespace smartmonitor {
 
+enum class Availability
+{
+    Unknown,
+    Available,
+    Unavailable
+};
+
+struct DeviceStatus
+{
+    Availability availability = Availability::Unknown;
+    QString sysfsPath;
+    QString error;
+};
+
+template <typename T>
+struct SensorField
+{
+    T value{};
+    bool valid = false;
+    QString error;
+};
+
 /**
  * @brief 一次模拟传感器采样结果。
  *

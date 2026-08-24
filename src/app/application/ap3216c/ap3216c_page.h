@@ -35,8 +35,9 @@ public slots:
     void renderViewState(const Ap3216cViewState &viewState);
 
 private:
-    QLabel *m_statusLabel;
+    QLabel *m_samplingStateLabel;
     QLabel *m_sampleLabel;
+    QLabel *m_timeLabel;
     QPushButton *m_startButton;
     QPushButton *m_stopButton;
 };
